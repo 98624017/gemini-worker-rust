@@ -10,8 +10,10 @@ use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use time::format_description::FormatItem;
 use time::macros::format_description;
+use tokio::io::AsyncReadExt;
 use url::Url;
 
+use crate::blob_runtime::{BlobHandle, BlobRuntime};
 use crate::config::Config;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -53,6 +55,25 @@ impl Uploader {
                 Err(_) => self.upload_legacy(data, mime_type).await,
             },
         }
+    }
+
+    pub async fn upload_reader<R>(&self, mut reader: R, mime_type: &str) -> Result<UploadResult>
+    where
+        R: tokio::io::AsyncRead + Unpin + Send,
+    {
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).await?;
+        self.upload_image(&bytes, mime_type).await
+    }
+
+    pub async fn upload_blob(
+        &self,
+        runtime: &BlobRuntime,
+        blob: &BlobHandle,
+        mime_type: &str,
+    ) -> Result<UploadResult> {
+        let reader = runtime.open_reader(blob).await?;
+        self.upload_reader(reader, mime_type).await
     }
 
     async fn upload_legacy(&self, data: &[u8], mime_type: &str) -> Result<UploadResult> {
@@ -254,13 +275,9 @@ pub fn parse_image_host_mode(raw: &str) -> Result<ImageHostMode> {
     }
 }
 
-pub fn wrap_proxy_url(public_base_url: &str, target_url: &str) -> String {
+pub fn wrap_external_proxy_url(external_proxy_prefix: &str, target_url: &str) -> String {
     let encoded: String = url::form_urlencoded::byte_serialize(target_url.as_bytes()).collect();
-    format!(
-        "{}/proxy/image?url={}",
-        public_base_url.trim_end_matches('/'),
-        encoded
-    )
+    format!("{}{}", external_proxy_prefix.trim(), encoded)
 }
 
 pub fn build_r2_object_key(

@@ -8,6 +8,7 @@ pub mod request_encode;
 pub mod request_materialize;
 pub mod request_scan;
 pub mod request_rewrite;
+pub mod response_materialize;
 pub mod response_rewrite;
 pub mod upload;
 pub mod upstream;
@@ -32,6 +33,7 @@ pub fn test_config() -> Config {
             ".aitohumanize.com".to_string(),
         ],
         public_base_url: String::new(),
+        external_image_proxy_prefix: String::new(),
         slow_log_threshold: Duration::from_millis(100_000),
         proxy_standard_output_urls: true,
         proxy_special_upstream_urls: true,

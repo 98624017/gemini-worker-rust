@@ -1,15 +1,13 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde_json::Value;
 
 use crate::cache::InlineDataUrlFetchService;
 use crate::config::Config;
 use crate::image_io::{DEFAULT_MAX_IMAGE_BYTES, fetch_image_as_inline_data};
-use crate::upload::Uploader;
+use crate::upload::wrap_external_proxy_url;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OutputMode {
@@ -48,9 +46,9 @@ pub async fn normalize_special_markdown_image_response(
     let inline_data = match output_mode {
         OutputMode::Url => {
             let data = if config.proxy_special_upstream_urls
-                && !config.public_base_url.trim().is_empty()
+                && !config.external_image_proxy_prefix.trim().is_empty()
             {
-                wrap_proxy_url_encoded(&config.public_base_url, &image_url)
+                wrap_external_proxy_url(&config.external_image_proxy_prefix, &image_url)
             } else {
                 image_url.clone()
             };
@@ -83,41 +81,6 @@ pub async fn normalize_special_markdown_image_response(
     Ok(body)
 }
 
-pub async fn rewrite_inline_data_base64_to_urls(
-    mut body: Value,
-    uploader: &Uploader,
-    public_base_url: &str,
-    wrap_legacy_urls: bool,
-) -> Value {
-    let entries = scan_inline_data_base64_entries(&body);
-    let mut replacements = HashMap::new();
-
-    for entry in entries {
-        if let Ok(image_bytes) = STANDARD.decode(entry.data.as_bytes()) {
-            if let Ok(upload_result) = uploader.upload_image(&image_bytes, &entry.mime_type).await {
-                let final_url = if upload_result.provider == "legacy"
-                    && wrap_legacy_urls
-                    && !public_base_url.trim().is_empty()
-                {
-                    crate::upload::wrap_proxy_url(public_base_url, &upload_result.url)
-                } else {
-                    upload_result.url
-                };
-                replacements.insert(entry, final_url);
-            }
-        }
-    }
-
-    patch_inline_data_urls(&mut body, &replacements);
-    body
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct InlineDataEntry {
-    mime_type: String,
-    data: String,
-}
-
 pub fn remove_thought_signatures(node: &mut Value) {
     match node {
         Value::Object(map) => {
@@ -135,79 +98,10 @@ pub fn remove_thought_signatures(node: &mut Value) {
     }
 }
 
-fn is_url_like(value: &str) -> bool {
+pub fn is_url_like(value: &str) -> bool {
     value.starts_with("http://")
         || value.starts_with("https://")
         || value.starts_with("/proxy/image")
-}
-
-fn scan_inline_data_base64_entries(node: &Value) -> Vec<InlineDataEntry> {
-    let mut entries = Vec::new();
-
-    fn walk(node: &Value, entries: &mut Vec<InlineDataEntry>) {
-        match node {
-            Value::Object(map) => {
-                if let Some(Value::Object(inline_data)) = map.get("inlineData") {
-                    if let (Some(Value::String(data)), Some(Value::String(mime_type))) =
-                        (inline_data.get("data"), inline_data.get("mimeType"))
-                    {
-                        if !is_url_like(data) {
-                            let entry = InlineDataEntry {
-                                mime_type: mime_type.clone(),
-                                data: data.clone(),
-                            };
-                            if !entries.contains(&entry) {
-                                entries.push(entry);
-                            }
-                        }
-                    }
-                }
-
-                for child in map.values() {
-                    walk(child, entries);
-                }
-            }
-            Value::Array(items) => {
-                for child in items {
-                    walk(child, entries);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    walk(node, &mut entries);
-    entries
-}
-
-fn patch_inline_data_urls(node: &mut Value, replacements: &HashMap<InlineDataEntry, String>) {
-    match node {
-        Value::Object(map) => {
-            if let Some(Value::Object(inline_data)) = map.get_mut("inlineData") {
-                if let (Some(Value::String(data)), Some(Value::String(mime_type))) =
-                    (inline_data.get("data"), inline_data.get("mimeType"))
-                {
-                    let entry = InlineDataEntry {
-                        mime_type: mime_type.clone(),
-                        data: data.clone(),
-                    };
-                    if let Some(url) = replacements.get(&entry) {
-                        inline_data.insert("data".to_string(), Value::String(url.clone()));
-                    }
-                }
-            }
-
-            for child in map.values_mut() {
-                patch_inline_data_urls(child, replacements);
-            }
-        }
-        Value::Array(items) => {
-            for child in items {
-                patch_inline_data_urls(child, replacements);
-            }
-        }
-        _ => {}
-    }
 }
 
 fn contains_inline_data(node: &Value) -> bool {
@@ -245,12 +139,6 @@ fn extract_markdown_image_url(text: &str) -> Option<String> {
         return Some(candidate.to_string());
     }
     None
-}
-
-fn wrap_proxy_url_encoded(public_base_url: &str, target_url: &str) -> String {
-    let base = public_base_url.trim().trim_end_matches('/');
-    let encoded = URL_SAFE_NO_PAD.encode(target_url.as_bytes());
-    format!("{base}/proxy/image?u={encoded}")
 }
 
 fn guess_image_mime_type_from_url(raw_url: &str) -> &'static str {

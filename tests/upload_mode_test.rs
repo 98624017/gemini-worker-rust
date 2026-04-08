@@ -2,6 +2,7 @@ use anyhow::{Result, anyhow};
 
 use rust_sync_proxy::upload::{
     BoxUploadFuture, ImageHostMode, UploadResult, upload_image_with_mode,
+    wrap_external_proxy_url,
 };
 
 #[tokio::test]
@@ -43,4 +44,16 @@ fn ok_upload_result(provider: &str, url: String) -> Result<UploadResult> {
         url,
         provider: provider.to_string(),
     })
+}
+
+#[test]
+fn external_proxy_prefix_wraps_uploaded_url() {
+    let wrapped = wrap_external_proxy_url(
+        "https://proxy.example.com/fetch?url=",
+        "https://img.example.com/a.png",
+    );
+    assert_eq!(
+        wrapped,
+        "https://proxy.example.com/fetch?url=https%3A%2F%2Fimg.example.com%2Fa.png"
+    );
 }

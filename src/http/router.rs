@@ -19,9 +19,10 @@ use crate::cache::InlineDataUrlFetchService;
 use crate::config::Config;
 use crate::request_encode::encode_request_body;
 use crate::request_materialize::materialize_request_images;
+use crate::response_materialize::finalize_output_urls;
 use crate::response_rewrite::{
     OutputMode, keep_largest_inline_image, normalize_special_markdown_image_response,
-    remove_thought_signatures, rewrite_inline_data_base64_to_urls,
+    remove_thought_signatures,
 };
 use crate::upload::Uploader;
 use crate::upstream::{ResolvedUpstream, resolve_upstream_from_header_map};
@@ -277,6 +278,7 @@ async fn forward_gemini_request(
         &state.image_client,
         state.inline_data_fetch_service.as_ref(),
         state.uploader.as_ref(),
+        state.blob_runtime.as_ref(),
         state.config.as_ref(),
     )
     .await?;
@@ -290,6 +292,7 @@ async fn handle_non_stream_response(
     image_client: &reqwest::Client,
     fetch_service: Option<&Arc<InlineDataUrlFetchService>>,
     uploader: &Uploader,
+    blob_runtime: &BlobRuntime,
     config: &Config,
 ) -> Result<Response> {
     let status = upstream_response.status();
@@ -328,13 +331,13 @@ async fn handle_non_stream_response(
     remove_thought_signatures(&mut final_json);
     final_json = keep_largest_inline_image(final_json);
     if output_mode == OutputMode::Url {
-        final_json = rewrite_inline_data_base64_to_urls(
-            final_json,
+        finalize_output_urls(
+            &mut final_json,
+            blob_runtime,
             uploader,
-            &config.public_base_url,
-            config.proxy_standard_output_urls,
+            &config.external_image_proxy_prefix,
         )
-        .await;
+        .await?;
     }
     let final_body = serde_json::to_vec(&final_json)?;
     let mut response = Response::new(Body::from(final_body));

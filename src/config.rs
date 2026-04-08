@@ -32,6 +32,7 @@ pub struct Config {
     pub image_host_mode: String,
     pub allowed_proxy_domains: Vec<String>,
     pub public_base_url: String,
+    pub external_image_proxy_prefix: String,
     pub slow_log_threshold: Duration,
     pub proxy_standard_output_urls: bool,
     pub proxy_special_upstream_urls: bool,
@@ -112,6 +113,11 @@ impl Config {
                 .get("PUBLIC_BASE_URL")
                 .map(String::as_str)
                 .map(normalize_optional_http_base_url)
+                .unwrap_or_default(),
+            external_image_proxy_prefix: env_map
+                .get("EXTERNAL_IMAGE_PROXY_PREFIX")
+                .map(String::as_str)
+                .map(parse_optional_string_with_disabled)
                 .unwrap_or_default(),
             slow_log_threshold: Duration::from_millis(parse_non_negative_u64_with_default(
                 env_map.get("SLOW_LOG_THRESHOLD_MS"),

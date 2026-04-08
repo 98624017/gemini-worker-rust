@@ -113,7 +113,7 @@ async fn generate_content_rewrites_inline_data_to_wrapped_urls_when_output_url_e
     let mut config = rust_sync_proxy::test_config();
     config.upstream_base_url = format!("http://{}", upstream_addr);
     config.upstream_api_key = "env-key".to_string();
-    config.public_base_url = "https://proxy.example.com".to_string();
+    config.external_image_proxy_prefix = "https://proxy.example.com/fetch?url=".to_string();
     config.legacy_uguu_upload_url = format!("http://{upload_addr}/uguu");
 
     let app = rust_sync_proxy::build_router(config);
@@ -146,7 +146,7 @@ async fn generate_content_rewrites_inline_data_to_wrapped_urls_when_output_url_e
     assert_eq!(parts[0]["text"], "kept");
     assert_eq!(
         parts[1]["inlineData"]["data"],
-        "https://proxy.example.com/proxy/image?url=https%3A%2F%2Fh.uguu.se%2Ffixed-image.png"
+        "https://proxy.example.com/fetch?url=https%3A%2F%2Fh.uguu.se%2Ffixed-image.png"
     );
 
     let captured_body = String::from_utf8(capture.request_body.lock().await.clone()).unwrap();
@@ -223,7 +223,7 @@ async fn generate_content_materializes_request_image_urls_before_forwarding() {
 }
 
 #[tokio::test]
-async fn generate_content_rewrites_inline_data_to_direct_r2_url_when_r2_enabled() {
+async fn generate_content_rewrites_inline_data_to_external_proxy_url_when_r2_enabled() {
     let capture = UpstreamCapture::default();
     let upstream = Router::new()
         .route(
@@ -242,7 +242,7 @@ async fn generate_content_rewrites_inline_data_to_direct_r2_url_when_r2_enabled(
     let mut config = rust_sync_proxy::test_config();
     config.upstream_base_url = format!("http://{}", upstream_addr);
     config.upstream_api_key = "env-key".to_string();
-    config.public_base_url = "https://proxy.example.com".to_string();
+    config.external_image_proxy_prefix = "https://proxy.example.com/fetch?url=".to_string();
     config.image_host_mode = "r2".to_string();
     config.r2_endpoint = format!("http://{r2_addr}");
     config.r2_bucket = "bucket".to_string();
@@ -277,7 +277,9 @@ async fn generate_content_rewrites_inline_data_to_direct_r2_url_when_r2_enabled(
         .as_array()
         .unwrap();
     let image_url = parts[1]["inlineData"]["data"].as_str().unwrap();
-    assert!(image_url.starts_with("https://img.example.com/images/"));
+    assert!(image_url.starts_with(
+        "https://proxy.example.com/fetch?url=https%3A%2F%2Fimg.example.com%2Fimages%2F"
+    ));
     assert!(image_url.ends_with(".png"));
     assert!(!image_url.contains("/proxy/image?url="));
 
@@ -320,7 +322,7 @@ async fn generate_content_falls_back_to_legacy_wrapped_url_when_r2_then_legacy_e
     let mut config = rust_sync_proxy::test_config();
     config.upstream_base_url = format!("http://{}", upstream_addr);
     config.upstream_api_key = "env-key".to_string();
-    config.public_base_url = "https://proxy.example.com".to_string();
+    config.external_image_proxy_prefix = "https://proxy.example.com/fetch?url=".to_string();
     config.image_host_mode = "r2_then_legacy".to_string();
     config.legacy_uguu_upload_url = format!("http://{upload_addr}/uguu");
     config.r2_endpoint = format!("http://{r2_addr}");
@@ -357,7 +359,7 @@ async fn generate_content_falls_back_to_legacy_wrapped_url_when_r2_then_legacy_e
         .unwrap();
     assert_eq!(
         parts[1]["inlineData"]["data"],
-        "https://proxy.example.com/proxy/image?url=https%3A%2F%2Fh.uguu.se%2Ffixed-image.png"
+        "https://proxy.example.com/fetch?url=https%3A%2F%2Fh.uguu.se%2Ffixed-image.png"
     );
     assert_eq!(*r2_capture.request_count.lock().await, 1);
     assert_eq!(*upload_capture.request_count.lock().await, 1);
@@ -383,7 +385,7 @@ async fn generate_content_preserves_base64_when_r2_upload_fails() {
     let mut config = rust_sync_proxy::test_config();
     config.upstream_base_url = format!("http://{}", upstream_addr);
     config.upstream_api_key = "env-key".to_string();
-    config.public_base_url = "https://proxy.example.com".to_string();
+    config.external_image_proxy_prefix = "https://proxy.example.com/fetch?url=".to_string();
     config.image_host_mode = "r2".to_string();
     config.r2_endpoint = format!("http://{r2_addr}");
     config.r2_bucket = "bucket".to_string();
@@ -435,7 +437,7 @@ async fn generate_content_normalizes_markdown_image_to_proxy_url_when_output_url
     let mut config = rust_sync_proxy::test_config();
     config.upstream_base_url = format!("http://{}", upstream_addr);
     config.upstream_api_key = "env-key".to_string();
-    config.public_base_url = "https://proxy.example.com".to_string();
+    config.external_image_proxy_prefix = "https://proxy.example.com/fetch?url=".to_string();
     config.proxy_special_upstream_urls = true;
 
     let app = rust_sync_proxy::build_router(config);
@@ -464,7 +466,7 @@ async fn generate_content_normalizes_markdown_image_to_proxy_url_when_output_url
         json!([{
             "inlineData": {
                 "mimeType": "image/png",
-                "data": "https://proxy.example.com/proxy/image?u=aHR0cHM6Ly9leGFtcGxlLmNvbS9wYXRoL2RlbW8ucG5n"
+                "data": "https://proxy.example.com/fetch?url=https%3A%2F%2Fexample.com%2Fpath%2Fdemo.png"
             }
         }])
     );
