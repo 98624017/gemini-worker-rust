@@ -235,9 +235,11 @@ where
         ImageHostMode::Legacy => legacy_uploader(data.to_vec(), mime_type.to_string()).await,
         ImageHostMode::R2 => r2_uploader(data.to_vec(), mime_type.to_string()).await,
         ImageHostMode::R2ThenLegacy => {
-            match r2_uploader(data.to_vec(), mime_type.to_string()).await {
+            let owned_data = data.to_vec();
+            let owned_mime = mime_type.to_string();
+            match r2_uploader(owned_data.clone(), owned_mime.clone()).await {
                 Ok(result) => Ok(result),
-                Err(_) => legacy_uploader(data.to_vec(), mime_type.to_string()).await,
+                Err(_) => legacy_uploader(owned_data, owned_mime).await,
             }
         }
     }

@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
@@ -39,12 +39,12 @@ impl Default for RewriteServices {
 }
 
 pub fn scan_inline_data_urls(body: &Value) -> Result<InlineDataScan> {
-    let mut unique_urls = BTreeSet::new();
+    let mut unique_urls = HashSet::new();
     let mut total_refs = 0usize;
 
     fn walk(
         node: &Value,
-        unique_urls: &mut BTreeSet<String>,
+        unique_urls: &mut HashSet<String>,
         total_refs: &mut usize,
     ) -> Result<()> {
         match node {

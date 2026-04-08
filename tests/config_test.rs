@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::Duration;
 
 #[test]
 fn defaults_match_go_proxy_expectations() {
@@ -6,11 +7,14 @@ fn defaults_match_go_proxy_expectations() {
     assert_eq!(cfg.port, 8787);
     assert_eq!(cfg.upstream_base_url, "https://magic666.top");
     assert_eq!(cfg.image_host_mode.as_str(), "legacy");
-    assert_eq!(cfg.slow_log_threshold_ms, 100_000);
-    assert_eq!(cfg.image_fetch_timeout_ms, 20_000);
-    assert_eq!(cfg.upload_timeout_ms, 10_000);
-    assert_eq!(cfg.image_tls_handshake_timeout_ms, 15_000);
-    assert_eq!(cfg.upload_tls_handshake_timeout_ms, 10_000);
+    assert_eq!(cfg.slow_log_threshold, Duration::from_millis(100_000));
+    assert_eq!(cfg.image_fetch_timeout, Duration::from_millis(20_000));
+    assert_eq!(cfg.upload_timeout, Duration::from_millis(10_000));
+    assert_eq!(
+        cfg.image_tls_handshake_timeout,
+        Duration::from_millis(15_000)
+    );
+    assert_eq!(cfg.upload_tls_handshake_timeout, Duration::from_millis(10_000));
     assert!(!cfg.image_fetch_insecure_skip_verify);
     assert!(!cfg.upload_insecure_skip_verify);
     assert_eq!(
@@ -18,8 +22,8 @@ fn defaults_match_go_proxy_expectations() {
         100 * 1024 * 1024
     );
     assert_eq!(
-        cfg.inline_data_url_background_fetch_wait_timeout_ms,
-        cfg.image_fetch_timeout_ms
+        cfg.inline_data_url_background_fetch_wait_timeout,
+        cfg.image_fetch_timeout
     );
     assert_eq!(cfg.legacy_uguu_upload_url, "https://uguu.se/upload");
     assert_eq!(
@@ -65,8 +69,11 @@ fn invalid_port_falls_back_to_default_like_go() {
 fn background_fetch_wait_timeout_defaults_to_image_fetch_timeout() {
     let env = HashMap::from([("IMAGE_FETCH_TIMEOUT_MS".to_string(), "3456".to_string())]);
     let cfg = rust_sync_proxy::config::Config::from_env_map(&env).unwrap();
-    assert_eq!(cfg.image_fetch_timeout_ms, 3456);
-    assert_eq!(cfg.inline_data_url_background_fetch_wait_timeout_ms, 3456);
+    assert_eq!(cfg.image_fetch_timeout, Duration::from_millis(3456));
+    assert_eq!(
+        cfg.inline_data_url_background_fetch_wait_timeout,
+        Duration::from_millis(3456)
+    );
 }
 
 #[test]

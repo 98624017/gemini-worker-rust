@@ -1,6 +1,7 @@
 use serde_json::json;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use axum::Router;
 use axum::extract::State;
@@ -51,8 +52,8 @@ async fn markdown_base64_normalization_uses_fetch_service_cache() {
 
     let mut config = rust_sync_proxy::test_config();
     config.inline_data_url_memory_cache_max_bytes = 1024;
-    config.inline_data_url_background_fetch_wait_timeout_ms = 100;
-    config.inline_data_url_background_fetch_total_timeout_ms = 500;
+    config.inline_data_url_background_fetch_wait_timeout = Duration::from_millis(100);
+    config.inline_data_url_background_fetch_total_timeout = Duration::from_millis(500);
     let fetch_service = rust_sync_proxy::cache::InlineDataUrlFetchService::from_config(
         &config,
         reqwest::Client::new(),

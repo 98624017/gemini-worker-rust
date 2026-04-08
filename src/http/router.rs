@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
 use axum::body::{Body, to_bytes};
@@ -52,13 +52,13 @@ pub fn build_router(config: Config) -> Router {
         Some(Arc::new(AdminState::new(config.admin_password.clone())))
     };
     let image_client = build_http_client(
-        config.image_fetch_timeout_ms,
-        config.image_tls_handshake_timeout_ms,
+        config.image_fetch_timeout,
+        config.image_tls_handshake_timeout,
         config.image_fetch_insecure_skip_verify,
     );
     let upload_client = build_http_client(
-        config.upload_timeout_ms,
-        config.upload_tls_handshake_timeout_ms,
+        config.upload_timeout,
+        config.upload_tls_handshake_timeout,
         config.upload_insecure_skip_verify,
     );
     let inline_data_fetch_service = InlineDataUrlFetchService::from_config(
@@ -94,6 +94,7 @@ async fn model_action(
 ) -> Response {
     let started_at = Instant::now();
     let created_at = admin::now_rfc3339();
+    let request_method = request.method().to_string();
     let request_path = request.uri().path().to_string();
     let request_query = request.uri().query().unwrap_or_default().to_string();
     let remote_addr = request
@@ -120,7 +121,7 @@ async fn model_action(
                 response,
                 AdminLogEntry {
                     created_at,
-                    method: "POST".to_string(),
+                    method: request_method,
                     path: request_path,
                     query: request_query,
                     remote_addr,
@@ -146,14 +147,14 @@ async fn model_action(
         )
             .into_response();
         return finalize_admin_response(
-            &state,
-            response,
-            AdminLogEntry {
-                created_at,
-                method: "POST".to_string(),
-                path: request_path,
-                query: request_query,
-                remote_addr,
+                &state,
+                response,
+                AdminLogEntry {
+                    created_at,
+                    method: request_method,
+                    path: request_path,
+                    query: request_query,
+                    remote_addr,
                 is_stream: false,
                 status_code: StatusCode::NOT_FOUND.as_u16(),
                 duration_ms: started_at.elapsed().as_millis() as i64,
@@ -163,7 +164,6 @@ async fn model_action(
         .await;
     };
 
-    let request_method = request.method().to_string();
     match forward_gemini_request(state.clone(), resolved, target_path, request, is_stream).await {
         Ok((response, mut admin_entry)) => {
             admin_entry.created_at = created_at;
@@ -208,7 +208,8 @@ async fn forward_gemini_request(
     request: Request,
     is_stream: bool,
 ) -> Result<(Response, AdminLogEntry)> {
-    let request_headers = request.headers().clone();
+    let content_type_header = request.headers().get(CONTENT_TYPE).cloned();
+    let accept_header = request.headers().get(ACCEPT).cloned();
     let request_query = request.uri().query().map(ToOwned::to_owned);
     let request_body = to_bytes(request.into_body(), MAX_REQUEST_BODY_BYTES)
         .await
@@ -224,6 +225,7 @@ async fn forward_gemini_request(
     let cache_observer = admin_stats.map(|stats| {
         Arc::new(move |_raw_url: &str, from_cache: bool| {
             if from_cache {
+                // Relaxed: 独立统计计数器，读端可接受最终一致。
                 stats
                     .cache_hits
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -249,11 +251,11 @@ async fn forward_gemini_request(
         build_upstream_url(&resolved.base_url, &target_path, request_query.as_deref())?;
 
     let mut upstream_request = state.upstream_client.post(upstream_url).body(upstream_body);
-    if let Some(value) = request_headers.get(CONTENT_TYPE) {
-        upstream_request = upstream_request.header(CONTENT_TYPE, value.clone());
+    if let Some(value) = content_type_header {
+        upstream_request = upstream_request.header(CONTENT_TYPE, value);
     }
-    if let Some(value) = request_headers.get(ACCEPT) {
-        upstream_request = upstream_request.header(ACCEPT, value.clone());
+    if let Some(value) = accept_header {
+        upstream_request = upstream_request.header(ACCEPT, value);
     }
     upstream_request = upstream_request.header("x-goog-api-key", resolved.api_key.clone());
     upstream_request =
@@ -533,14 +535,20 @@ async fn finalize_admin_response(
     entry.status_code = parts.status.as_u16();
 
     let stats = admin_state.stats();
+    // Relaxed: 独立统计计数器，不与其他原子操作构成同步链。
+    // 读端（admin stats API）可接受最终一致。
     stats
         .total_requests
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if entry.status_code >= 400 {
+        // Relaxed: 独立统计计数器，不与其他原子操作构成同步链。
+        // 读端（admin stats API）可接受最终一致。
         stats
             .error_requests
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
+    // Relaxed: 独立统计计数器，不与其他原子操作构成同步链。
+    // 读端（admin stats API）可接受最终一致。
     stats
         .total_duration_ms
         .fetch_add(entry.duration_ms, std::sync::atomic::Ordering::Relaxed);
@@ -550,23 +558,23 @@ async fn finalize_admin_response(
 }
 
 fn build_http_client(
-    timeout_ms: u64,
-    tls_handshake_timeout_ms: u64,
+    timeout: Duration,
+    tls_handshake_timeout: Duration,
     insecure_skip_verify: bool,
 ) -> reqwest::Client {
     reqwest::Client::builder()
-        .timeout(std::time::Duration::from_millis(timeout_ms))
-        .connect_timeout(std::time::Duration::from_millis(tls_handshake_timeout_ms))
+        .timeout(timeout)
+        .connect_timeout(tls_handshake_timeout)
         .danger_accept_invalid_certs(insecure_skip_verify)
         .build()
         .unwrap_or_else(|_| reqwest::Client::new())
 }
 
 fn log_slow_request(config: &Config, entry: &AdminLogEntry) {
-    if config.slow_log_threshold_ms == 0 {
+    if config.slow_log_threshold.is_zero() {
         return;
     }
-    if entry.duration_ms < config.slow_log_threshold_ms as i64 {
+    if entry.duration_ms < config.slow_log_threshold.as_millis() as i64 {
         return;
     }
 

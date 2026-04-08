@@ -26,8 +26,8 @@ fn admin_log_collects_proxy_and_http_image_urls() {
     assert_eq!(
         sanitized.image_urls,
         vec![
-            "/proxy/image?u=abc".to_string(),
-            "https://img.example/a.png".to_string()
+            "https://img.example/a.png".to_string(),
+            "/proxy/image?u=abc".to_string()
         ]
     );
 }
@@ -145,4 +145,94 @@ async fn mock_generate_content(
             "content": { "parts": [{ "text": "ok" }] }
         }]
     }))
+}
+
+#[tokio::test]
+async fn admin_logs_page_contains_chartjs_and_theme_toggle() {
+    let html = fetch_admin_logs_page_html().await;
+
+    // Verify Chart.js is inlined
+    assert!(html.contains("Chart"), "HTML should contain inlined Chart.js");
+
+    // Verify theme toggle exists
+    assert!(
+        html.contains("themeToggle"),
+        "HTML should contain theme toggle button"
+    );
+
+    // Verify CSS variables are used
+    assert!(
+        html.contains("--bg-primary"),
+        "HTML should use CSS variables"
+    );
+
+    // Verify keyboard navigation code exists
+    assert!(
+        html.contains("keydown"),
+        "HTML should contain keyboard navigation"
+    );
+}
+
+#[tokio::test]
+async fn admin_logs_page_only_previews_proxy_images() {
+    let html = fetch_admin_logs_page_html().await;
+    assert!(
+        html.contains("startsWith('/proxy/image')"),
+        "HTML should only auto-preview proxy image URLs"
+    );
+    assert!(
+        html.contains("external image"),
+        "HTML should keep external image URLs inert until explicit open"
+    );
+}
+
+#[tokio::test]
+async fn admin_logs_page_lazy_renders_log_details() {
+    let html = fetch_admin_logs_page_html().await;
+    assert!(
+        html.contains("function buildDetailMarkup(item)"),
+        "HTML should build detail markup lazily"
+    );
+    assert!(
+        html.contains("if (!d.dataset.rendered)"),
+        "HTML should defer detail rendering until expansion"
+    );
+}
+
+#[tokio::test]
+async fn admin_logs_page_preserves_system_theme_without_override() {
+    let html = fetch_admin_logs_page_html().await;
+    assert!(
+        html.contains("function readThemeOverride()"),
+        "HTML should keep override state separate from system theme"
+    );
+    assert!(
+        html.contains("applyTheme(resolveTheme(), false);"),
+        "initial theme application should not persist auto-detected theme"
+    );
+    assert!(
+        html.contains("if (persist) localStorage.setItem('theme', theme);"),
+        "theme persistence should happen only after explicit override"
+    );
+}
+
+async fn fetch_admin_logs_page_html() -> String {
+    let mut config = rust_sync_proxy::test_config();
+    config.admin_password = "pw".to_string();
+
+    let app = rust_sync_proxy::build_router(config);
+    let auth = format!("Basic {}", STANDARD.encode("user:pw"));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/logs")
+                .header("authorization", auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    String::from_utf8_lossy(&body).into_owned()
 }

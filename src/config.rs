@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::env;
+use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use url::Url;
@@ -27,23 +28,23 @@ pub struct Config {
     pub image_host_mode: String,
     pub allowed_proxy_domains: Vec<String>,
     pub public_base_url: String,
-    pub slow_log_threshold_ms: u64,
+    pub slow_log_threshold: Duration,
     pub proxy_standard_output_urls: bool,
     pub proxy_special_upstream_urls: bool,
     pub admin_password: String,
-    pub image_fetch_timeout_ms: u64,
-    pub image_tls_handshake_timeout_ms: u64,
+    pub image_fetch_timeout: Duration,
+    pub image_tls_handshake_timeout: Duration,
     pub image_fetch_insecure_skip_verify: bool,
     pub image_fetch_external_proxy_domains: Vec<String>,
     pub inline_data_url_cache_dir: String,
-    pub inline_data_url_cache_ttl_ms: u64,
+    pub inline_data_url_cache_ttl: Duration,
     pub inline_data_url_cache_max_bytes: u64,
     pub inline_data_url_memory_cache_max_bytes: u64,
-    pub inline_data_url_background_fetch_wait_timeout_ms: u64,
-    pub inline_data_url_background_fetch_total_timeout_ms: u64,
+    pub inline_data_url_background_fetch_wait_timeout: Duration,
+    pub inline_data_url_background_fetch_total_timeout: Duration,
     pub inline_data_url_background_fetch_max_inflight: usize,
-    pub upload_timeout_ms: u64,
-    pub upload_tls_handshake_timeout_ms: u64,
+    pub upload_timeout: Duration,
+    pub upload_tls_handshake_timeout: Duration,
     pub upload_insecure_skip_verify: bool,
     pub legacy_uguu_upload_url: String,
     pub legacy_kefan_upload_url: String,
@@ -88,6 +89,10 @@ impl Config {
             .map(parse_csv)
             .filter(|domains| !domains.is_empty())
             .unwrap_or_else(default_allowed_proxy_domains);
+        let image_fetch_timeout_ms_raw = parse_positive_u64_with_default(
+            env_map.get("IMAGE_FETCH_TIMEOUT_MS"),
+            DEFAULT_IMAGE_FETCH_TIMEOUT_MS,
+        );
 
         let config = Self {
             port,
@@ -100,10 +105,10 @@ impl Config {
                 .map(String::as_str)
                 .map(normalize_optional_http_base_url)
                 .unwrap_or_default(),
-            slow_log_threshold_ms: parse_non_negative_u64_with_default(
+            slow_log_threshold: Duration::from_millis(parse_non_negative_u64_with_default(
                 env_map.get("SLOW_LOG_THRESHOLD_MS"),
                 DEFAULT_SLOW_LOG_THRESHOLD_MS,
-            ),
+            )),
             proxy_standard_output_urls: parse_bool(env_map.get("PROXY_STANDARD_OUTPUT_URLS"), true),
             proxy_special_upstream_urls: parse_bool(
                 env_map.get("PROXY_SPECIAL_UPSTREAM_URLS"),
@@ -114,14 +119,11 @@ impl Config {
                 .map(String::as_str)
                 .map(parse_optional_string_with_disabled)
                 .unwrap_or_default(),
-            image_fetch_timeout_ms: parse_positive_u64_with_default(
-                env_map.get("IMAGE_FETCH_TIMEOUT_MS"),
-                DEFAULT_IMAGE_FETCH_TIMEOUT_MS,
-            ),
-            image_tls_handshake_timeout_ms: parse_positive_u64_with_default(
+            image_fetch_timeout: Duration::from_millis(image_fetch_timeout_ms_raw),
+            image_tls_handshake_timeout: Duration::from_millis(parse_positive_u64_with_default(
                 env_map.get("IMAGE_TLS_HANDSHAKE_TIMEOUT_MS"),
                 DEFAULT_IMAGE_TLS_HANDSHAKE_TIMEOUT_MS,
-            ),
+            )),
             image_fetch_insecure_skip_verify: parse_bool(
                 env_map.get("IMAGE_FETCH_INSECURE_SKIP_VERIFY"),
                 false,
@@ -136,10 +138,10 @@ impl Config {
                 .map(String::as_str)
                 .map(parse_optional_string_with_disabled)
                 .unwrap_or_default(),
-            inline_data_url_cache_ttl_ms: parse_non_negative_u64_with_default(
+            inline_data_url_cache_ttl: Duration::from_millis(parse_non_negative_u64_with_default(
                 env_map.get("INLINE_DATA_URL_CACHE_TTL_MS"),
                 DEFAULT_INLINE_DATA_URL_CACHE_TTL_MS,
-            ),
+            )),
             inline_data_url_cache_max_bytes: parse_non_negative_u64_with_default(
                 env_map.get("INLINE_DATA_URL_CACHE_MAX_BYTES"),
                 DEFAULT_INLINE_DATA_URL_CACHE_MAX_BYTES,
@@ -148,29 +150,30 @@ impl Config {
                 env_map.get("INLINE_DATA_URL_MEMORY_CACHE_MAX_BYTES"),
                 DEFAULT_INLINE_DATA_URL_MEMORY_CACHE_MAX_BYTES,
             ),
-            inline_data_url_background_fetch_wait_timeout_ms: parse_wait_timeout_ms(
-                env_map.get("INLINE_DATA_URL_BACKGROUND_FETCH_WAIT_TIMEOUT_MS"),
-                parse_positive_u64_with_default(
-                    env_map.get("IMAGE_FETCH_TIMEOUT_MS"),
-                    DEFAULT_IMAGE_FETCH_TIMEOUT_MS,
+            inline_data_url_background_fetch_wait_timeout: Duration::from_millis(
+                parse_wait_timeout_ms(
+                    env_map.get("INLINE_DATA_URL_BACKGROUND_FETCH_WAIT_TIMEOUT_MS"),
+                    image_fetch_timeout_ms_raw,
                 ),
             ),
-            inline_data_url_background_fetch_total_timeout_ms: parse_non_negative_u64_with_default(
+            inline_data_url_background_fetch_total_timeout: Duration::from_millis(
+                parse_non_negative_u64_with_default(
                 env_map.get("INLINE_DATA_URL_BACKGROUND_FETCH_TOTAL_TIMEOUT_MS"),
                 DEFAULT_INLINE_DATA_URL_BACKGROUND_FETCH_TOTAL_TIMEOUT_MS,
+                ),
             ),
             inline_data_url_background_fetch_max_inflight: parse_non_negative_usize_with_default(
                 env_map.get("INLINE_DATA_URL_BACKGROUND_FETCH_MAX_INFLIGHT"),
                 DEFAULT_INLINE_DATA_URL_BACKGROUND_FETCH_MAX_INFLIGHT,
             ),
-            upload_timeout_ms: parse_positive_u64_with_default(
+            upload_timeout: Duration::from_millis(parse_positive_u64_with_default(
                 env_map.get("UPLOAD_TIMEOUT_MS"),
                 DEFAULT_UPLOAD_TIMEOUT_MS,
-            ),
-            upload_tls_handshake_timeout_ms: parse_positive_u64_with_default(
+            )),
+            upload_tls_handshake_timeout: Duration::from_millis(parse_positive_u64_with_default(
                 env_map.get("UPLOAD_TLS_HANDSHAKE_TIMEOUT_MS"),
                 DEFAULT_UPLOAD_TLS_HANDSHAKE_TIMEOUT_MS,
-            ),
+            )),
             upload_insecure_skip_verify: parse_bool(
                 env_map.get("UPLOAD_INSECURE_SKIP_VERIFY"),
                 false,

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::Router;
 use axum::extract::State;
@@ -20,8 +20,8 @@ async fn request_cache_reuses_fetched_image_across_calls() {
     let (address, request_count) = spawn_image_server(0).await;
     let mut config = rust_sync_proxy::test_config();
     config.inline_data_url_memory_cache_max_bytes = 1024;
-    config.inline_data_url_background_fetch_wait_timeout_ms = 100;
-    config.inline_data_url_background_fetch_total_timeout_ms = 500;
+    config.inline_data_url_background_fetch_wait_timeout = Duration::from_millis(100);
+    config.inline_data_url_background_fetch_total_timeout = Duration::from_millis(500);
     let service = rust_sync_proxy::cache::InlineDataUrlFetchService::from_config(
         &config,
         reqwest::Client::new(),
@@ -43,8 +43,8 @@ async fn request_cache_background_bridge_reuses_inflight_download() {
     let (address, request_count) = spawn_image_server(30).await;
     let mut config = rust_sync_proxy::test_config();
     config.inline_data_url_memory_cache_max_bytes = 1024;
-    config.inline_data_url_background_fetch_wait_timeout_ms = 20;
-    config.inline_data_url_background_fetch_total_timeout_ms = 500;
+    config.inline_data_url_background_fetch_wait_timeout = Duration::from_millis(20);
+    config.inline_data_url_background_fetch_total_timeout = Duration::from_millis(500);
     let service = rust_sync_proxy::cache::InlineDataUrlFetchService::from_config(
         &config,
         reqwest::Client::new(),
@@ -76,8 +76,8 @@ async fn request_cache_still_populates_cache_when_background_bridge_disabled() {
     let mut config = rust_sync_proxy::test_config();
     config.inline_data_url_memory_cache_max_bytes = 1024;
     config.inline_data_url_background_fetch_max_inflight = 0;
-    config.inline_data_url_background_fetch_wait_timeout_ms = 0;
-    config.inline_data_url_background_fetch_total_timeout_ms = 500;
+    config.inline_data_url_background_fetch_wait_timeout = Duration::ZERO;
+    config.inline_data_url_background_fetch_total_timeout = Duration::from_millis(500);
     let service = rust_sync_proxy::cache::InlineDataUrlFetchService::from_config(
         &config,
         reqwest::Client::new(),

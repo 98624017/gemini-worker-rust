@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -6,6 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
+use lru::LruCache;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, Notify};
@@ -19,7 +20,7 @@ const EXTERNAL_IMAGE_FETCH_PROXY_PREFIX: &str = "https://gemini.xinbaoai.com/pro
 
 #[derive(Clone, Debug)]
 pub struct CachedInlineData {
-    pub mime_type: String,
+    pub mime_type: Arc<str>,
     pub bytes: Bytes,
 }
 
@@ -69,7 +70,7 @@ struct FetchTask {
 
 #[derive(Clone)]
 struct MemoryEntry {
-    mime_type: String,
+    mime_type: Arc<str>,
     bytes: Bytes,
     size: u64,
 }
@@ -79,8 +80,7 @@ struct MemoryCache {
 }
 
 struct MemoryCacheInner {
-    items: HashMap<String, MemoryEntry>,
-    order: VecDeque<String>,
+    items: LruCache<String, MemoryEntry>,
     max_bytes: u64,
     cur_bytes: u64,
 }
@@ -108,7 +108,7 @@ impl InlineDataUrlFetchService {
         allow_private_networks: bool,
     ) -> Option<Arc<Self>> {
         if config.inline_data_url_cache_dir.trim().is_empty()
-            && config.inline_data_url_background_fetch_total_timeout_ms == 0
+            && config.inline_data_url_background_fetch_total_timeout.is_zero()
             && config.inline_data_url_memory_cache_max_bytes == 0
         {
             return None;
@@ -122,12 +122,12 @@ impl InlineDataUrlFetchService {
             None
         };
         let disk_cache = if !config.inline_data_url_cache_dir.trim().is_empty()
-            && config.inline_data_url_cache_ttl_ms > 0
+            && !config.inline_data_url_cache_ttl.is_zero()
             && config.inline_data_url_cache_max_bytes > 0
         {
             Some(Arc::new(DiskCache::new(
                 PathBuf::from(config.inline_data_url_cache_dir.clone()),
-                Duration::from_millis(config.inline_data_url_cache_ttl_ms),
+                config.inline_data_url_cache_ttl,
                 config.inline_data_url_cache_max_bytes,
             )))
         } else {
@@ -142,12 +142,8 @@ impl InlineDataUrlFetchService {
             memory_cache,
             disk_cache,
             inflight: Arc::new(Mutex::new(HashMap::new())),
-            wait_timeout: Duration::from_millis(
-                config.inline_data_url_background_fetch_wait_timeout_ms,
-            ),
-            total_timeout: Duration::from_millis(
-                config.inline_data_url_background_fetch_total_timeout_ms,
-            ),
+            wait_timeout: config.inline_data_url_background_fetch_wait_timeout,
+            total_timeout: config.inline_data_url_background_fetch_total_timeout,
             max_inflight: config.inline_data_url_background_fetch_max_inflight,
         }))
     }
@@ -156,7 +152,7 @@ impl InlineDataUrlFetchService {
         if let Some(cache) = &self.memory_cache {
             if let Some(hit) = cache.get(raw_url).await {
                 return Ok(FetchResult {
-                    mime_type: hit.mime_type,
+                    mime_type: hit.mime_type.to_string(),
                     bytes: hit.bytes,
                     from_cache: true,
                 });
@@ -169,91 +165,76 @@ impl InlineDataUrlFetchService {
                     memory.set(raw_url, &hit).await;
                 }
                 return Ok(FetchResult {
-                    mime_type: hit.mime_type,
+                    mime_type: hit.mime_type.to_string(),
                     bytes: hit.bytes,
                     from_cache: true,
                 });
             }
         }
 
+        let existing = {
+            let inflight = self.inflight.lock().await;
+            inflight.get(raw_url).map(Arc::clone)
+        };
+        if let Some(task) = existing {
+            return self.wait_for_task(&task).await;
+        }
+
         let task = {
             let mut inflight = self.inflight.lock().await;
             if let Some(task) = inflight.get(raw_url) {
-                Arc::clone(task)
-            } else {
-                if inflight.len() >= self.max_inflight {
-                    drop(inflight);
-                    let fetched = self.direct_fetch(raw_url).await?;
-                    let cached = CachedInlineData {
-                        mime_type: fetched.mime_type.clone(),
-                        bytes: fetched.bytes.clone(),
-                    };
-                    self.store_in_caches(raw_url, &cached).await;
-                    return Ok(FetchResult {
-                        mime_type: fetched.mime_type,
-                        bytes: fetched.bytes,
-                        from_cache: false,
-                    });
-                }
-                let task = Arc::new(FetchTask {
-                    notify: Notify::new(),
-                    result: Mutex::new(None),
-                });
-                inflight.insert(raw_url.to_string(), Arc::clone(&task));
-                let service = Arc::clone(self);
-                let url = raw_url.to_string();
-                let task_for_spawn = Arc::clone(&task);
-                tokio::spawn(async move {
-                    let result = service
-                        .direct_fetch(&url)
-                        .await
-                        .map(|fetched| CachedInlineData {
-                            mime_type: fetched.mime_type,
-                            bytes: fetched.bytes,
-                        });
-                    let published = result
-                        .as_ref()
-                        .map(Clone::clone)
-                        .map_err(|err| err.to_string());
-                    let mut guard = task_for_spawn.result.lock().await;
-                    *guard = Some(published);
-                    drop(guard);
-                    task_for_spawn.notify.notify_waiters();
-                    service.inflight.lock().await.remove(&url);
-                    if let Ok(hit) = &result {
-                        service.store_in_caches(&url, hit).await;
-                    }
-                });
-                task
+                let task = Arc::clone(task);
+                drop(inflight);
+                return self.wait_for_task(&task).await;
             }
+            if inflight.len() >= self.max_inflight {
+                drop(inflight);
+                let fetched = self.direct_fetch(raw_url).await?;
+                let cached = CachedInlineData {
+                    mime_type: Arc::from(fetched.mime_type.as_str()),
+                    bytes: fetched.bytes.clone(),
+                };
+                self.store_in_caches(raw_url, &cached).await;
+                return Ok(FetchResult {
+                    mime_type: fetched.mime_type,
+                    bytes: fetched.bytes,
+                    from_cache: false,
+                });
+            }
+            let task = Arc::new(FetchTask {
+                notify: Notify::new(),
+                result: Mutex::new(None),
+            });
+            inflight.insert(raw_url.to_string(), Arc::clone(&task));
+            task
         };
 
-        let notified = task.notify.notified();
-        if let Some(result) = Self::published_result(&task).await? {
-            return Ok(result);
-        }
-
-        let wait_timeout = if self.wait_timeout.is_zero() {
-            self.total_timeout
-        } else {
-            self.wait_timeout
-        };
-
-        if tokio::time::timeout(wait_timeout, notified).await.is_err() {
-            if let Some(result) = Self::published_result(&task).await? {
-                return Ok(result);
+        let service = Arc::clone(self);
+        let url = raw_url.to_string();
+        let task_for_spawn = Arc::clone(&task);
+        tokio::spawn(async move {
+            let result = service
+                .direct_fetch(&url)
+                .await
+                .map(|fetched| CachedInlineData {
+                    mime_type: Arc::from(fetched.mime_type.as_str()),
+                    bytes: fetched.bytes,
+                });
+            let published = result
+                .as_ref()
+                .map(Clone::clone)
+                .map_err(|err| err.to_string());
+            let mut guard = task_for_spawn.result.lock().await;
+            *guard = Some(published);
+            drop(guard);
+            task_for_spawn.notify.notify_waiters();
+            service.inflight.lock().await.remove(&url);
+            if let Ok(hit) = &result {
+                service.store_in_caches(&url, hit).await;
             }
-            return Err(BackgroundFetchWaitTimeoutError {
-                wait_timeout,
-                total_timeout: self.total_timeout,
-            }
-            .into());
-        }
+        });
 
-        match Self::published_result(&task).await? {
-            Some(result) => Ok(result),
-            None => Err(anyhow!("background fetch finished without result")),
-        }
+        self.wait_for_task(&task).await
     }
 
     async fn direct_fetch(&self, raw_url: &str) -> Result<FetchedInlineData> {
@@ -282,11 +263,40 @@ impl InlineDataUrlFetchService {
         }
     }
 
+    async fn wait_for_task(self: &Arc<Self>, task: &Arc<FetchTask>) -> Result<FetchResult> {
+        let notified = task.notify.notified();
+        if let Some(result) = Self::published_result(task).await? {
+            return Ok(result);
+        }
+
+        let wait_timeout = if self.wait_timeout.is_zero() {
+            self.total_timeout
+        } else {
+            self.wait_timeout
+        };
+
+        if tokio::time::timeout(wait_timeout, notified).await.is_err() {
+            if let Some(result) = Self::published_result(task).await? {
+                return Ok(result);
+            }
+            return Err(BackgroundFetchWaitTimeoutError {
+                wait_timeout,
+                total_timeout: self.total_timeout,
+            }
+            .into());
+        }
+
+        match Self::published_result(task).await? {
+            Some(result) => Ok(result),
+            None => Err(anyhow!("background fetch finished without result")),
+        }
+    }
+
     async fn published_result(task: &Arc<FetchTask>) -> Result<Option<FetchResult>> {
         let guard = task.result.lock().await;
         match guard.as_ref() {
             Some(Ok(hit)) => Ok(Some(FetchResult {
-                mime_type: hit.mime_type.clone(),
+                mime_type: hit.mime_type.to_string(),
                 bytes: hit.bytes.clone(),
                 from_cache: false,
             })),
@@ -300,8 +310,7 @@ impl MemoryCache {
     fn new(max_bytes: u64) -> Self {
         Self {
             inner: Mutex::new(MemoryCacheInner {
-                items: HashMap::new(),
-                order: VecDeque::new(),
+                items: LruCache::unbounded(),
                 max_bytes,
                 cur_bytes: 0,
             }),
@@ -310,11 +319,10 @@ impl MemoryCache {
 
     async fn get(&self, url: &str) -> Option<CachedInlineData> {
         let mut guard = self.inner.lock().await;
-        let item = guard.items.get(url).cloned()?;
-        move_to_back(&mut guard.order, url);
+        let item = guard.items.get(url)?;
         Some(CachedInlineData {
-            mime_type: item.mime_type,
-            bytes: item.bytes,
+            mime_type: item.mime_type.clone(),
+            bytes: item.bytes.clone(),
         })
     }
 
@@ -324,20 +332,16 @@ impl MemoryCache {
         if size > guard.max_bytes {
             return;
         }
-        if let Some(previous) = guard.items.remove(url) {
+        if let Some(previous) = guard.items.pop(url) {
             guard.cur_bytes = guard.cur_bytes.saturating_sub(previous.size);
-            remove_from_order(&mut guard.order, url);
         }
         while guard.cur_bytes + size > guard.max_bytes {
-            let Some(oldest) = guard.order.pop_front() else {
+            let Some((_key, evicted)) = guard.items.pop_lru() else {
                 break;
             };
-            if let Some(previous) = guard.items.remove(&oldest) {
-                guard.cur_bytes = guard.cur_bytes.saturating_sub(previous.size);
-            }
+            guard.cur_bytes = guard.cur_bytes.saturating_sub(evicted.size);
         }
-        guard.order.push_back(url.to_string());
-        guard.items.insert(
+        guard.items.put(
             url.to_string(),
             MemoryEntry {
                 mime_type: value.mime_type.clone(),
@@ -377,7 +381,7 @@ impl DiskCache {
 
         let bytes = Bytes::from(std::fs::read(body_path)?);
         Ok(Some(CachedInlineData {
-            mime_type: meta.mime_type,
+            mime_type: Arc::from(meta.mime_type.as_str()),
             bytes,
         }))
     }
@@ -393,7 +397,7 @@ impl DiskCache {
         std::fs::write(
             &meta_path,
             serde_json::to_vec(&DiskMeta {
-                mime_type: value.mime_type.clone(),
+                mime_type: value.mime_type.to_string(),
                 expires_at_unix_ms: now_unix_ms() + self.ttl.as_millis() as u64,
                 size_bytes: value.bytes.len() as u64,
             })?,
@@ -475,17 +479,6 @@ fn now_unix_ms() -> u64 {
         .as_millis() as u64
 }
 
-fn move_to_back(order: &mut VecDeque<String>, url: &str) {
-    remove_from_order(order, url);
-    order.push_back(url.to_string());
-}
-
-fn remove_from_order(order: &mut VecDeque<String>, url: &str) {
-    if let Some(position) = order.iter().position(|key| key == url) {
-        order.remove(position);
-    }
-}
-
 #[allow(dead_code)]
 fn _is_subpath(path: &Path, dir: &Path) -> bool {
     path.starts_with(dir)
@@ -500,7 +493,7 @@ mod tests {
         let task = Arc::new(FetchTask {
             notify: Notify::new(),
             result: Mutex::new(Some(Ok(CachedInlineData {
-                mime_type: "image/png".to_string(),
+                mime_type: Arc::from("image/png"),
                 bytes: Bytes::from_static(&[1, 2, 3]),
             }))),
         });
