@@ -1,0 +1,111 @@
+use serde_json::json;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use axum::Router;
+use axum::extract::State;
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header::CONTENT_TYPE};
+use axum::routing::get;
+use tokio::net::TcpListener;
+
+#[test]
+fn keeps_only_largest_inline_image_per_candidate() {
+    let input = json!({
+        "candidates": [{
+            "content": {"parts": [
+                {"inlineData": {"mimeType": "image/png", "data": "aaaa"}},
+                {"inlineData": {"mimeType": "image/png", "data": "aaaaaaaa"}}
+            ]}
+        }]
+    });
+
+    let output = rust_sync_proxy::response_rewrite::keep_largest_inline_image(input);
+    let parts = output["candidates"][0]["content"]["parts"]
+        .as_array()
+        .unwrap();
+    assert_eq!(parts.len(), 1);
+    assert_eq!(parts[0]["inlineData"]["data"], "aaaaaaaa");
+}
+
+#[derive(Clone)]
+struct MarkdownImageState {
+    png: Vec<u8>,
+    request_count: Arc<AtomicUsize>,
+}
+
+#[tokio::test]
+async fn markdown_base64_normalization_uses_fetch_service_cache() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let request_count = Arc::new(AtomicUsize::new(0));
+    let state = MarkdownImageState {
+        png: vec![137, 80, 78, 71, 13, 10, 26, 10],
+        request_count: Arc::clone(&request_count),
+    };
+    let app = Router::new()
+        .route("/image.png", get(serve_markdown_png))
+        .with_state(state);
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let mut config = rust_sync_proxy::test_config();
+    config.inline_data_url_memory_cache_max_bytes = 1024;
+    config.inline_data_url_background_fetch_wait_timeout_ms = 100;
+    config.inline_data_url_background_fetch_total_timeout_ms = 500;
+    let fetch_service = rust_sync_proxy::cache::InlineDataUrlFetchService::from_config(
+        &config,
+        reqwest::Client::new(),
+        rust_sync_proxy::image_io::DEFAULT_MAX_IMAGE_BYTES,
+        true,
+    )
+    .unwrap();
+
+    let body = json!({
+        "candidates": [{
+            "content": {
+                "parts": [{
+                    "text": format!("![img](http://{address}/image.png)")
+                }]
+            }
+        }]
+    });
+
+    let first = rust_sync_proxy::response_rewrite::normalize_special_markdown_image_response(
+        body.clone(),
+        rust_sync_proxy::response_rewrite::OutputMode::Base64,
+        &reqwest::Client::new(),
+        Some(&fetch_service),
+        &config,
+    )
+    .await
+    .unwrap();
+    let second = rust_sync_proxy::response_rewrite::normalize_special_markdown_image_response(
+        body,
+        rust_sync_proxy::response_rewrite::OutputMode::Base64,
+        &reqwest::Client::new(),
+        Some(&fetch_service),
+        &config,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        first["candidates"][0]["content"]["parts"][0]["inlineData"]["data"],
+        "iVBORw0KGgo="
+    );
+    assert_eq!(
+        second["candidates"][0]["content"]["parts"][0]["inlineData"]["data"],
+        "iVBORw0KGgo="
+    );
+    assert_eq!(request_count.load(Ordering::Relaxed), 1);
+}
+
+async fn serve_markdown_png(
+    State(state): State<MarkdownImageState>,
+) -> (StatusCode, HeaderMap, Vec<u8>) {
+    state.request_count.fetch_add(1, Ordering::Relaxed);
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("image/png"));
+    (StatusCode::OK, headers, state.png)
+}

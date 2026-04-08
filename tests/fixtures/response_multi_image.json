@@ -1,0 +1,23 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "inlineData": {
+              "mimeType": "image/png",
+              "data": "aaaa"
+            }
+          },
+          {
+            "inlineData": {
+              "mimeType": "image/png",
+              "data": "bbbbbbbb"
+            }
+          }
+        ]
+      },
+      "finishReason": "STOP"
+    }
+  ]
+}

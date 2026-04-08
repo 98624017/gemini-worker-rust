@@ -1,0 +1,4 @@
+event: message
+data: {"candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"image/png","data":"aaaa"}},{"inlineData":{"mimeType":"image/png","data":"bbbbbbbb"}}]}}]}
+
+data: [DONE]
