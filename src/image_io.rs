@@ -5,12 +5,20 @@ use bytes::Bytes;
 use reqwest::header::CONTENT_TYPE;
 use url::Url;
 
+use crate::blob_runtime::{BlobHandle, BlobRuntime};
+
 pub const DEFAULT_MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct FetchedInlineData {
     pub mime_type: String,
     pub bytes: Bytes,
+}
+
+#[derive(Clone, Debug)]
+pub struct FetchedBlob {
+    pub mime_type: String,
+    pub blob: BlobHandle,
 }
 
 pub fn enforce_max_size(actual: usize, limit: usize) -> Result<()> {
@@ -66,6 +74,30 @@ pub async fn fetch_image_as_inline_data_with_options(
     Ok(FetchedInlineData {
         mime_type: normalize_image_mime_type(content_type.as_deref(), raw_url),
         bytes,
+    })
+}
+
+pub async fn fetch_image_into_blob(
+    client: &reqwest::Client,
+    runtime: &BlobRuntime,
+    raw_url: &str,
+    max_image_bytes: usize,
+    allow_private_networks: bool,
+) -> Result<FetchedBlob> {
+    let fetched = fetch_image_as_inline_data_with_options(
+        client,
+        raw_url,
+        max_image_bytes,
+        allow_private_networks,
+    )
+    .await?;
+    let blob = runtime
+        .store_bytes(fetched.bytes.to_vec(), fetched.mime_type.clone())
+        .await?;
+
+    Ok(FetchedBlob {
+        mime_type: fetched.mime_type,
+        blob,
     })
 }
 

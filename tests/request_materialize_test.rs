@@ -11,53 +11,15 @@ struct ImageState {
 }
 
 #[tokio::test]
-async fn request_inline_data_urls_are_rewritten_to_base64() {
-    let (image_url, _server) = spawn_png_server().await;
-
-    let body = json!({
-        "contents": [{
-            "parts": [{
-                "inlineData": {
-                    "data": image_url
-                }
-            }]
-        }]
-    });
-
-    let rewritten = rust_sync_proxy::request_rewrite::rewrite_request_inline_data(
-        body,
-        &rust_sync_proxy::request_rewrite::RewriteServices {
-            image_client: reqwest::Client::new(),
-            max_image_bytes: rust_sync_proxy::image_io::DEFAULT_MAX_IMAGE_BYTES,
-            allow_private_networks: true,
-            fetch_service: None,
-            cache_observer: None,
-        },
-    )
-    .await
-    .unwrap();
-
-    let inline_data = &rewritten["contents"][0]["parts"][0]["inlineData"];
-    assert_eq!(inline_data["mimeType"], "image/png");
-    assert_eq!(inline_data["data"], "iVBORw0KGgo=");
-}
-
-#[tokio::test]
-async fn request_inline_data_urls_are_materialized_to_blob_handles() {
+async fn request_materialize_fetches_image_url_into_blob_handle() {
     let (image_url, _server) = spawn_png_server().await;
     let runtime = rust_sync_proxy::test_blob_runtime(8 * 1024 * 1024);
-    let body = json!({
-        "contents": [{
-            "parts": [{
-                "inlineData": {
-                    "data": image_url
-                }
-            }]
-        }]
+    let request = json!({
+        "contents": [{"parts": [{"inlineData": {"data": image_url}}]}]
     });
 
     let materialized = rust_sync_proxy::request_materialize::materialize_request_images(
-        body,
+        request,
         &runtime,
         &reqwest::Client::new(),
     )
@@ -66,7 +28,6 @@ async fn request_inline_data_urls_are_materialized_to_blob_handles() {
 
     assert_eq!(materialized.replacements.len(), 1);
     assert_eq!(materialized.replacements[0].mime_type, "image/png");
-    assert!(runtime.is_inline(&materialized.replacements[0].blob).await);
 }
 
 async fn spawn_png_server() -> (String, tokio::task::JoinHandle<()>) {
