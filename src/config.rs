@@ -17,6 +17,10 @@ const DEFAULT_INLINE_DATA_URL_CACHE_MAX_BYTES: u64 = 1 << 30;
 const DEFAULT_INLINE_DATA_URL_MEMORY_CACHE_MAX_BYTES: u64 = 100 * 1024 * 1024;
 const DEFAULT_INLINE_DATA_URL_BACKGROUND_FETCH_TOTAL_TIMEOUT_MS: u64 = 90_000;
 const DEFAULT_INLINE_DATA_URL_BACKGROUND_FETCH_MAX_INFLIGHT: usize = 128;
+const DEFAULT_BLOB_INLINE_MAX_BYTES: u64 = 8 * 1024 * 1024;
+const DEFAULT_BLOB_REQUEST_HOT_BUDGET_BYTES: u64 = 24 * 1024 * 1024;
+const DEFAULT_BLOB_GLOBAL_HOT_BUDGET_BYTES: u64 = 384 * 1024 * 1024;
+const DEFAULT_BLOB_SPILL_DIR: &str = "/tmp/rust-sync-proxy-blobs";
 const DEFAULT_LEGACY_UGUU_UPLOAD_URL: &str = "https://uguu.se/upload";
 const DEFAULT_LEGACY_KEFAN_UPLOAD_URL: &str = "https://ai.kefan.cn/api/upload/local";
 
@@ -43,6 +47,10 @@ pub struct Config {
     pub inline_data_url_background_fetch_wait_timeout: Duration,
     pub inline_data_url_background_fetch_total_timeout: Duration,
     pub inline_data_url_background_fetch_max_inflight: usize,
+    pub blob_inline_max_bytes: u64,
+    pub blob_request_hot_budget_bytes: u64,
+    pub blob_global_hot_budget_bytes: u64,
+    pub blob_spill_dir: String,
     pub upload_timeout: Duration,
     pub upload_tls_handshake_timeout: Duration,
     pub upload_insecure_skip_verify: bool,
@@ -166,6 +174,24 @@ impl Config {
                 env_map.get("INLINE_DATA_URL_BACKGROUND_FETCH_MAX_INFLIGHT"),
                 DEFAULT_INLINE_DATA_URL_BACKGROUND_FETCH_MAX_INFLIGHT,
             ),
+            blob_inline_max_bytes: parse_non_negative_u64_with_default(
+                env_map.get("BLOB_INLINE_MAX_BYTES"),
+                DEFAULT_BLOB_INLINE_MAX_BYTES,
+            ),
+            blob_request_hot_budget_bytes: parse_non_negative_u64_with_default(
+                env_map.get("BLOB_REQUEST_HOT_BUDGET_BYTES"),
+                DEFAULT_BLOB_REQUEST_HOT_BUDGET_BYTES,
+            ),
+            blob_global_hot_budget_bytes: parse_non_negative_u64_with_default(
+                env_map.get("BLOB_GLOBAL_HOT_BUDGET_BYTES"),
+                DEFAULT_BLOB_GLOBAL_HOT_BUDGET_BYTES,
+            ),
+            blob_spill_dir: env_map
+                .get("BLOB_SPILL_DIR")
+                .map(String::as_str)
+                .map(parse_optional_string_with_disabled)
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| DEFAULT_BLOB_SPILL_DIR.to_string()),
             upload_timeout: Duration::from_millis(parse_positive_u64_with_default(
                 env_map.get("UPLOAD_TIMEOUT_MS"),
                 DEFAULT_UPLOAD_TIMEOUT_MS,

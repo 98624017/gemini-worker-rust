@@ -1,4 +1,5 @@
 pub mod admin;
+pub mod blob_runtime;
 pub mod cache;
 pub mod config;
 pub mod http;
@@ -8,9 +9,11 @@ pub mod response_rewrite;
 pub mod upload;
 pub mod upstream;
 
+pub use blob_runtime::{BlobHandle, BlobRuntime, BlobRuntimeConfig, BlobStorage};
 pub use http::build_router;
 
 use config::Config;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 pub fn test_config() -> Config {
@@ -41,6 +44,10 @@ pub fn test_config() -> Config {
         inline_data_url_background_fetch_wait_timeout: Duration::from_millis(20_000),
         inline_data_url_background_fetch_total_timeout: Duration::from_millis(90_000),
         inline_data_url_background_fetch_max_inflight: 128,
+        blob_inline_max_bytes: 8 * 1024 * 1024,
+        blob_request_hot_budget_bytes: 24 * 1024 * 1024,
+        blob_global_hot_budget_bytes: 384 * 1024 * 1024,
+        blob_spill_dir: "/tmp/rust-sync-proxy-blobs".to_string(),
         upload_timeout: Duration::from_millis(10_000),
         upload_tls_handshake_timeout: Duration::from_millis(10_000),
         upload_insecure_skip_verify: false,
@@ -53,4 +60,17 @@ pub fn test_config() -> Config {
         r2_public_base_url: String::new(),
         r2_object_prefix: "images".to_string(),
     }
+}
+
+pub fn test_blob_runtime(inline_max_bytes: u64) -> BlobRuntime {
+    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    let spill_dir = std::env::temp_dir().join(format!("rust-sync-proxy-test-blobs-{id}"));
+    BlobRuntime::new(BlobRuntimeConfig {
+        inline_max_bytes,
+        request_hot_budget_bytes: 24 * 1024 * 1024,
+        global_hot_budget_bytes: 384 * 1024 * 1024,
+        spill_dir,
+    })
 }
