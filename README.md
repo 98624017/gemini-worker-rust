@@ -141,6 +141,25 @@ export UPSTREAM_API_KEY="your-upstream-key"
 - `UPLOAD_INSECURE_SKIP_VERIFY`
   默认关闭；仅用于对齐 Go 原版 TLS 配置
 
+### BlobRuntime 预算
+
+- `INSTANCE_MEMORY_BYTES`
+  用于推导 blob 默认预算；默认 `2147483648`
+- `BLOB_INLINE_MAX_BYTES`
+  单个 blob 保持内存直通的上限
+- `BLOB_REQUEST_HOT_BUDGET_BYTES`
+  单请求可占用的热内存预算
+- `BLOB_GLOBAL_HOT_BUDGET_BYTES`
+  进程级热内存总预算
+- `BLOB_SPILL_DIR`
+  spill 文件目录；默认 `/tmp/rust-sync-proxy-blobs`
+
+按 `INSTANCE_MEMORY_BYTES` 推导出的默认值：
+
+- `2GiB`: `inline=8MiB`，`request_hot=24MiB`，`global_hot=384MiB`
+- `4GiB`: `inline=12MiB`，`request_hot=40MiB`，`global_hot=768MiB`
+- `8GiB`: `inline=16MiB`，`request_hot=64MiB`，`global_hot=1536MiB`
+
 R2 模式还需要：
 
 - `R2_ENDPOINT`
@@ -204,6 +223,12 @@ curl -sS \
 
 ```bash
 ~/.cargo/bin/cargo test --tests -- --nocapture
+```
+
+看 blob runtime 的基准与调参记录：
+
+```bash
+sed -n '1,240p' docs/plans/2026-04-09-generate-content-memory-redesign-benchmark-notes.md
 ```
 
 跑 Go/Rust 对照：
