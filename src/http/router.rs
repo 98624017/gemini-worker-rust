@@ -10,12 +10,15 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{Value, json};
+use tokio_util::io::ReaderStream;
 use url::{Url, form_urlencoded};
 
 use crate::admin::{self, AdminLogEntry, AdminState};
+use crate::blob_runtime::{BlobRuntime, BlobRuntimeConfig};
 use crate::cache::InlineDataUrlFetchService;
 use crate::config::Config;
-use crate::request_rewrite::{RewriteServices, rewrite_request_inline_data};
+use crate::request_encode::encode_request_body;
+use crate::request_materialize::materialize_request_images;
 use crate::response_rewrite::{
     OutputMode, keep_largest_inline_image, normalize_special_markdown_image_response,
     remove_thought_signatures, rewrite_inline_data_base64_to_urls,
@@ -33,6 +36,7 @@ struct AppState {
     uploader: Arc<Uploader>,
     admin: Option<Arc<AdminState>>,
     inline_data_fetch_service: Option<Arc<InlineDataUrlFetchService>>,
+    blob_runtime: Arc<BlobRuntime>,
 }
 
 pub fn build_router(config: Config) -> Router {
@@ -57,6 +61,12 @@ pub fn build_router(config: Config) -> Router {
         crate::image_io::DEFAULT_MAX_IMAGE_BYTES,
         false,
     );
+    let blob_runtime = Arc::new(BlobRuntime::new(BlobRuntimeConfig {
+        inline_max_bytes: config.blob_inline_max_bytes,
+        request_hot_budget_bytes: config.blob_request_hot_budget_bytes,
+        global_hot_budget_bytes: config.blob_global_hot_budget_bytes,
+        spill_dir: config.blob_spill_dir.clone().into(),
+    }));
     let state = AppState {
         uploader: Arc::new(Uploader::new(upload_client, config.clone())),
         config: Arc::new(config),
@@ -64,6 +74,7 @@ pub fn build_router(config: Config) -> Router {
         image_client,
         admin,
         inline_data_fetch_service,
+        blob_runtime,
     };
 
     Router::new()
@@ -200,41 +211,35 @@ async fn forward_gemini_request(
         .map_err(|err| anyhow!("failed to read request body: {err}"))?;
     let request_raw = admin::sanitize_json_for_log(&request_body);
 
-    let mut body: Value =
+    let body: Value =
         serde_json::from_slice(&request_body).map_err(|err| anyhow!("invalid json body: {err}"))?;
     let output_mode = get_output_mode(request_query.as_deref(), &body);
-    strip_output_from_value(&mut body);
 
-    let admin_stats = state.admin.as_ref().map(|admin| admin.stats());
-    let cache_observer = admin_stats.map(|stats| {
-        Arc::new(move |_raw_url: &str, from_cache: bool| {
-            if from_cache {
-                // Relaxed: 独立统计计数器，读端可接受最终一致。
-                stats
-                    .cache_hits
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
-        }) as Arc<dyn Fn(&str, bool) + Send + Sync>
-    });
-
-    body = rewrite_request_inline_data(
-        body,
-        &RewriteServices {
-            image_client: state.image_client.clone(),
-            max_image_bytes: crate::image_io::DEFAULT_MAX_IMAGE_BYTES,
-            allow_private_networks: false,
-            fetch_service: state.inline_data_fetch_service.clone(),
-            cache_observer,
-        },
+    let materialized =
+        materialize_request_images(body, state.blob_runtime.as_ref(), &state.image_client).await?;
+    let encoded = encode_request_body(
+        materialized.request,
+        materialized.replacements.clone(),
+        state.blob_runtime.as_ref(),
     )
     .await?;
-    let request_upstream = admin::sanitize_json_for_log(&serde_json::to_vec(&body)?);
 
-    let upstream_body = serde_json::to_vec(&body)?;
+    for replacement in &materialized.replacements {
+        state.blob_runtime.remove(&replacement.blob).await?;
+    }
+
+    let request_upstream_bytes = state.blob_runtime.read_bytes(&encoded.body_blob).await?;
+    let request_upstream = admin::sanitize_json_for_log(&request_upstream_bytes);
     let upstream_url =
         build_upstream_url(&resolved.base_url, &target_path, request_query.as_deref())?;
 
-    let mut upstream_request = state.upstream_client.post(upstream_url).body(upstream_body);
+    let reader = state.blob_runtime.open_reader(&encoded.body_blob).await?;
+    let request_stream = ReaderStream::new(reader);
+    let mut upstream_request = state
+        .upstream_client
+        .post(upstream_url)
+        .body(reqwest::Body::wrap_stream(request_stream))
+        .header("content-length", encoded.content_length.to_string());
     if let Some(value) = content_type_header {
         upstream_request = upstream_request.header(CONTENT_TYPE, value);
     }
@@ -245,7 +250,14 @@ async fn forward_gemini_request(
     upstream_request =
         upstream_request.header(AUTHORIZATION, format!("Bearer {}", resolved.api_key));
 
-    let upstream_response = upstream_request.send().await?;
+    let upstream_response = match upstream_request.send().await {
+        Ok(response) => response,
+        Err(err) => {
+            state.blob_runtime.remove(&encoded.body_blob).await?;
+            return Err(err.into());
+        }
+    };
+    state.blob_runtime.remove(&encoded.body_blob).await?;
 
     let mut admin_entry = AdminLogEntry {
         output_mode: match output_mode {
@@ -485,24 +497,6 @@ fn get_output_mode(query: Option<&str>, body: &Value) -> OutputMode {
     }
 
     OutputMode::Base64
-}
-
-fn strip_output_from_value(body: &mut Value) {
-    if let Some(map) = body.as_object_mut() {
-        map.remove("output");
-    }
-
-    if let Some(image_config) = body.pointer_mut("/generationConfig/imageConfig") {
-        if let Some(map) = image_config.as_object_mut() {
-            map.remove("output");
-        }
-    }
-
-    if let Some(image_config) = body.pointer_mut("/generation_config/image_config") {
-        if let Some(map) = image_config.as_object_mut() {
-            map.remove("output");
-        }
-    }
 }
 
 fn build_upstream_url(base_url: &str, path: &str, query: Option<&str>) -> Result<String> {

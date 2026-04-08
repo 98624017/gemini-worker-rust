@@ -5,7 +5,7 @@ use axum::extract::State;
 use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderMap, Request, StatusCode, Uri};
 use axum::response::IntoResponse;
-use axum::routing::{post, put};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
@@ -34,6 +34,11 @@ struct R2Capture {
     path: Arc<Mutex<String>>,
     authorization: Arc<Mutex<String>>,
     content_type: Arc<Mutex<String>>,
+}
+
+#[derive(Clone)]
+struct ImageState {
+    png: Vec<u8>,
 }
 
 #[tokio::test]
@@ -161,6 +166,60 @@ async fn generate_content_rewrites_inline_data_to_wrapped_urls_when_output_url_e
         *upload_capture.user_agent.lock().await,
         "ComfyUI-Banana/1.0"
     );
+}
+
+#[tokio::test]
+async fn generate_content_materializes_request_image_urls_before_forwarding() {
+    let capture = UpstreamCapture::default();
+    let upstream = Router::new()
+        .route(
+            "/v1beta/models/demo:generateContent",
+            post(mock_generate_content),
+        )
+        .with_state(capture.clone());
+    let upstream_addr = spawn_server(upstream).await;
+
+    let image_server = Router::new()
+        .route("/image.png", get(serve_png))
+        .with_state(ImageState {
+            png: vec![137, 80, 78, 71, 13, 10, 26, 10],
+        });
+    let image_addr = spawn_server(image_server).await;
+
+    let mut config = rust_sync_proxy::test_config();
+    config.upstream_base_url = format!("http://{}", upstream_addr);
+    config.upstream_api_key = "env-key".to_string();
+
+    let app = rust_sync_proxy::build_router(config);
+    let request_body = json!({
+        "contents": [{
+            "parts": [{
+                "inlineData": {
+                    "data": format!("http://{image_addr}/image.png")
+                }
+            }]
+        }]
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1beta/models/demo:generateContent")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(request_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let captured_body = capture.request_body.lock().await.clone();
+    let json_body: Value = serde_json::from_slice(&captured_body).unwrap();
+    let inline_data = &json_body["contents"][0]["parts"][0]["inlineData"];
+    assert_eq!(inline_data["mimeType"], "image/png");
+    assert_eq!(inline_data["data"], "iVBORw0KGgo=");
 }
 
 #[tokio::test]
@@ -533,6 +592,12 @@ async fn store_r2_capture(capture: &R2Capture, headers: &HeaderMap, uri: &Uri, b
         .unwrap_or_default()
         .to_string();
     assert!(body_len > 0);
+}
+
+async fn serve_png(State(state): State<ImageState>) -> (StatusCode, HeaderMap, Vec<u8>) {
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, "image/png".parse().unwrap());
+    (StatusCode::OK, headers, state.png)
 }
 
 async fn spawn_server(app: Router) -> std::net::SocketAddr {

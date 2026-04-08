@@ -168,6 +168,13 @@ impl BlobRuntime {
         }
     }
 
+    pub async fn read_bytes(&self, handle: &BlobHandle) -> Result<Bytes> {
+        match handle.storage() {
+            BlobStorage::Inline(bytes) => Ok(bytes.clone()),
+            BlobStorage::Spilled(path) => Ok(fs::read(path).await?.into()),
+        }
+    }
+
     pub async fn remove(&self, handle: &BlobHandle) -> Result<()> {
         if handle.inner.removed.swap(true, Ordering::AcqRel) {
             return Ok(());

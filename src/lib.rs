@@ -4,6 +4,7 @@ pub mod cache;
 pub mod config;
 pub mod http;
 pub mod image_io;
+pub mod request_encode;
 pub mod request_materialize;
 pub mod request_scan;
 pub mod request_rewrite;
