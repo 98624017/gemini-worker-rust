@@ -207,10 +207,11 @@ async fn forward_gemini_request(
     let content_type_header = request.headers().get(CONTENT_TYPE).cloned();
     let accept_header = request.headers().get(ACCEPT).cloned();
     let request_query = request.uri().query().map(ToOwned::to_owned);
+    let admin_enabled = state.admin.is_some();
     let request_body = to_bytes(request.into_body(), MAX_REQUEST_BODY_BYTES)
         .await
         .map_err(|err| anyhow!("failed to read request body: {err}"))?;
-    let request_raw = admin::sanitize_json_for_log(&request_body);
+    let request_raw = admin::maybe_sanitize_json_for_log(&request_body, admin_enabled);
 
     let body: Value =
         serde_json::from_slice(&request_body).map_err(|err| anyhow!("invalid json body: {err}"))?;
@@ -229,8 +230,12 @@ async fn forward_gemini_request(
         state.blob_runtime.remove(&replacement.blob).await?;
     }
 
-    let request_upstream_bytes = state.blob_runtime.read_bytes(&encoded.body_blob).await?;
-    let request_upstream = admin::sanitize_json_for_log(&request_upstream_bytes);
+    let request_upstream = if admin_enabled {
+        let request_upstream_bytes = state.blob_runtime.read_bytes(&encoded.body_blob).await?;
+        admin::maybe_sanitize_json_for_log(&request_upstream_bytes, true)
+    } else {
+        None
+    };
     let upstream_url =
         build_upstream_url(&resolved.base_url, &target_path, request_query.as_deref())?;
 
@@ -265,10 +270,22 @@ async fn forward_gemini_request(
             OutputMode::Base64 => "base64".to_string(),
             OutputMode::Url => "url".to_string(),
         },
-        request_raw: request_raw.pretty,
-        request_raw_images: request_raw.image_urls,
-        request_upstream: request_upstream.pretty,
-        request_upstream_images: request_upstream.image_urls,
+        request_raw: request_raw
+            .as_ref()
+            .map(|value| value.pretty.clone())
+            .unwrap_or_default(),
+        request_raw_images: request_raw
+            .as_ref()
+            .map(|value| value.image_urls.clone())
+            .unwrap_or_default(),
+        request_upstream: request_upstream
+            .as_ref()
+            .map(|value| value.pretty.clone())
+            .unwrap_or_default(),
+        request_upstream_images: request_upstream
+            .as_ref()
+            .map(|value| value.image_urls.clone())
+            .unwrap_or_default(),
         ..Default::default()
     };
 

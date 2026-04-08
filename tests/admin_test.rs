@@ -33,6 +33,13 @@ fn admin_log_collects_proxy_and_http_image_urls() {
 }
 
 #[test]
+fn maybe_sanitize_json_for_log_skips_when_admin_is_disabled() {
+    let sanitized =
+        rust_sync_proxy::admin::maybe_sanitize_json_for_log(br#"{"inlineData":{"data":"AQID"}}"#, false);
+    assert!(sanitized.is_none());
+}
+
+#[test]
 fn extract_finish_reason_returns_first_candidate_reason() {
     let body: serde_json::Value = serde_json::from_str(
         r#"{"candidates":[{"finishReason":"STOP"},{"finishReason":"OTHER"}]}"#,

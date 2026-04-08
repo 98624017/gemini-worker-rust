@@ -12,6 +12,7 @@ const DEFAULT_IMAGE_FETCH_TIMEOUT_MS: u64 = 20_000;
 const DEFAULT_UPLOAD_TIMEOUT_MS: u64 = 10_000;
 const DEFAULT_IMAGE_TLS_HANDSHAKE_TIMEOUT_MS: u64 = 15_000;
 const DEFAULT_UPLOAD_TLS_HANDSHAKE_TIMEOUT_MS: u64 = 10_000;
+const DEFAULT_INSTANCE_MEMORY_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const DEFAULT_INLINE_DATA_URL_CACHE_TTL_MS: u64 = 3_600_000;
 const DEFAULT_INLINE_DATA_URL_CACHE_MAX_BYTES: u64 = 1 << 30;
 const DEFAULT_INLINE_DATA_URL_MEMORY_CACHE_MAX_BYTES: u64 = 100 * 1024 * 1024;
@@ -23,6 +24,13 @@ const DEFAULT_BLOB_GLOBAL_HOT_BUDGET_BYTES: u64 = 384 * 1024 * 1024;
 const DEFAULT_BLOB_SPILL_DIR: &str = "/tmp/rust-sync-proxy-blobs";
 const DEFAULT_LEGACY_UGUU_UPLOAD_URL: &str = "https://uguu.se/upload";
 const DEFAULT_LEGACY_KEFAN_UPLOAD_URL: &str = "https://ai.kefan.cn/api/upload/local";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BlobBudgetDefaults {
+    pub inline_max_bytes: u64,
+    pub request_hot_budget_bytes: u64,
+    pub global_hot_budget_bytes: u64,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
@@ -72,6 +80,12 @@ impl Config {
     }
 
     pub fn from_env_map(env_map: &HashMap<String, String>) -> Result<Self> {
+        let blob_budget_defaults = blob_budget_defaults_for_memory(
+            parse_non_negative_u64_with_default(
+                env_map.get("INSTANCE_MEMORY_BYTES"),
+                DEFAULT_INSTANCE_MEMORY_BYTES,
+            ),
+        );
         let port = env_map
             .get("PORT")
             .map(String::as_str)
@@ -182,15 +196,15 @@ impl Config {
             ),
             blob_inline_max_bytes: parse_non_negative_u64_with_default(
                 env_map.get("BLOB_INLINE_MAX_BYTES"),
-                DEFAULT_BLOB_INLINE_MAX_BYTES,
+                blob_budget_defaults.inline_max_bytes,
             ),
             blob_request_hot_budget_bytes: parse_non_negative_u64_with_default(
                 env_map.get("BLOB_REQUEST_HOT_BUDGET_BYTES"),
-                DEFAULT_BLOB_REQUEST_HOT_BUDGET_BYTES,
+                blob_budget_defaults.request_hot_budget_bytes,
             ),
             blob_global_hot_budget_bytes: parse_non_negative_u64_with_default(
                 env_map.get("BLOB_GLOBAL_HOT_BUDGET_BYTES"),
-                DEFAULT_BLOB_GLOBAL_HOT_BUDGET_BYTES,
+                blob_budget_defaults.global_hot_budget_bytes,
             ),
             blob_spill_dir: env_map
                 .get("BLOB_SPILL_DIR")
@@ -241,6 +255,30 @@ impl Config {
 
         validate(&config)?;
         Ok(config)
+    }
+}
+
+pub fn blob_budget_defaults_for_memory(memory_bytes: u64) -> BlobBudgetDefaults {
+    const GIB: u64 = 1024 * 1024 * 1024;
+
+    if memory_bytes >= 8 * GIB {
+        BlobBudgetDefaults {
+            inline_max_bytes: 16 * 1024 * 1024,
+            request_hot_budget_bytes: 64 * 1024 * 1024,
+            global_hot_budget_bytes: 1536 * 1024 * 1024,
+        }
+    } else if memory_bytes >= 4 * GIB {
+        BlobBudgetDefaults {
+            inline_max_bytes: 12 * 1024 * 1024,
+            request_hot_budget_bytes: 40 * 1024 * 1024,
+            global_hot_budget_bytes: 768 * 1024 * 1024,
+        }
+    } else {
+        BlobBudgetDefaults {
+            inline_max_bytes: DEFAULT_BLOB_INLINE_MAX_BYTES,
+            request_hot_budget_bytes: DEFAULT_BLOB_REQUEST_HOT_BUDGET_BYTES,
+            global_hot_budget_bytes: DEFAULT_BLOB_GLOBAL_HOT_BUDGET_BYTES,
+        }
     }
 }
 

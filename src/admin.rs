@@ -1009,6 +1009,14 @@ pub fn admin_stats_response(state: &AdminState) -> Response {
     .into_response()
 }
 
+pub fn maybe_sanitize_json_for_log(raw: &[u8], enabled: bool) -> Option<SanitizedAdminLog> {
+    if enabled {
+        Some(sanitize_json_for_log(raw))
+    } else {
+        None
+    }
+}
+
 pub fn sanitize_json_for_log(raw: &[u8]) -> SanitizedAdminLog {
     if raw.is_empty() {
         return SanitizedAdminLog {
