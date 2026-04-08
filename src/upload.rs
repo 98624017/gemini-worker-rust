@@ -4,6 +4,8 @@ use std::pin::Pin;
 use anyhow::{Result, anyhow};
 use hmac::{Hmac, Mac};
 use rand::Rng;
+use reqwest::Body;
+use reqwest::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, USER_AGENT};
 use reqwest::multipart::{Form, Part};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -11,9 +13,10 @@ use time::OffsetDateTime;
 use time::format_description::FormatItem;
 use time::macros::format_description;
 use tokio::io::AsyncReadExt;
+use tokio_util::io::ReaderStream;
 use url::Url;
 
-use crate::blob_runtime::{BlobHandle, BlobRuntime};
+use crate::blob_runtime::{BlobHandle, BlobRuntime, BlobStorage};
 use crate::config::Config;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -57,23 +60,22 @@ impl Uploader {
         }
     }
 
-    pub async fn upload_reader<R>(&self, mut reader: R, mime_type: &str) -> Result<UploadResult>
-    where
-        R: tokio::io::AsyncRead + Unpin + Send,
-    {
-        let mut bytes = Vec::new();
-        reader.read_to_end(&mut bytes).await?;
-        self.upload_image(&bytes, mime_type).await
-    }
-
     pub async fn upload_blob(
         &self,
         runtime: &BlobRuntime,
         blob: &BlobHandle,
         mime_type: &str,
     ) -> Result<UploadResult> {
-        let reader = runtime.open_reader(blob).await?;
-        self.upload_reader(reader, mime_type).await
+        match parse_image_host_mode(&self.config.image_host_mode)? {
+            ImageHostMode::Legacy => self.upload_legacy_blob(runtime, blob, mime_type).await,
+            ImageHostMode::R2 => self.upload_r2_blob(runtime, blob, mime_type).await,
+            ImageHostMode::R2ThenLegacy => {
+                match self.upload_r2_blob(runtime, blob, mime_type).await {
+                    Ok(result) => Ok(result),
+                    Err(_) => self.upload_legacy_blob(runtime, blob, mime_type).await,
+                }
+            }
+        }
     }
 
     async fn upload_legacy(&self, data: &[u8], mime_type: &str) -> Result<UploadResult> {
@@ -239,6 +241,200 @@ impl Uploader {
             provider: "r2".to_string(),
         })
     }
+
+    async fn upload_legacy_blob(
+        &self,
+        runtime: &BlobRuntime,
+        blob: &BlobHandle,
+        mime_type: &str,
+    ) -> Result<UploadResult> {
+        if let Ok(url) = self.upload_blob_to_uguu(runtime, blob, mime_type).await {
+            return Ok(UploadResult {
+                url,
+                provider: "legacy".to_string(),
+            });
+        }
+
+        let url = self.upload_blob_to_kefan(runtime, blob, mime_type).await?;
+        Ok(UploadResult {
+            url,
+            provider: "legacy".to_string(),
+        })
+    }
+
+    async fn upload_blob_to_uguu(
+        &self,
+        runtime: &BlobRuntime,
+        blob: &BlobHandle,
+        mime_type: &str,
+    ) -> Result<String> {
+        #[derive(Deserialize)]
+        struct UguuResponse {
+            success: bool,
+            files: Vec<UguuFile>,
+        }
+        #[derive(Deserialize)]
+        struct UguuFile {
+            url: String,
+        }
+
+        let response = self
+            .send_streaming_multipart(
+                runtime,
+                blob,
+                &self.config.legacy_uguu_upload_url,
+                "files[]",
+                mime_type,
+                true,
+            )
+            .await?;
+        let status = response.status();
+        let body = response.text().await?;
+        if !status.is_success() {
+            return Err(anyhow!("uguu status {}: {}", status, body.trim()));
+        }
+        let parsed: UguuResponse = serde_json::from_str(&body)
+            .map_err(|err| anyhow!("uguu invalid json: {err}: {}", body.trim()))?;
+        if !parsed.success || parsed.files.is_empty() || parsed.files[0].url.trim().is_empty() {
+            return Err(anyhow!("uguu upload failed: {}", body.trim()));
+        }
+        Ok(parsed.files[0].url.clone())
+    }
+
+    async fn upload_blob_to_kefan(
+        &self,
+        runtime: &BlobRuntime,
+        blob: &BlobHandle,
+        mime_type: &str,
+    ) -> Result<String> {
+        #[derive(Deserialize)]
+        struct KefanResponse {
+            success: bool,
+            data: String,
+        }
+
+        let response = self
+            .send_streaming_multipart(
+                runtime,
+                blob,
+                &self.config.legacy_kefan_upload_url,
+                "file",
+                mime_type,
+                false,
+            )
+            .await?;
+        let body = response.text().await?;
+        let parsed: KefanResponse = serde_json::from_str(&body)
+            .map_err(|err| anyhow!("kefan invalid json: {err}: {}", body.trim()))?;
+        if !parsed.success || parsed.data.trim().is_empty() {
+            return Err(anyhow!("kefan upload failed: {}", body.trim()));
+        }
+        Ok(parsed.data)
+    }
+
+    async fn send_streaming_multipart(
+        &self,
+        runtime: &BlobRuntime,
+        blob: &BlobHandle,
+        target_url: &str,
+        field_name: &str,
+        mime_type: &str,
+        accept_json: bool,
+    ) -> Result<reqwest::Response> {
+        let reader = runtime.open_reader(blob).await?;
+        let body = Body::wrap_stream(ReaderStream::new(reader));
+        let part = Part::stream_with_length(body, blob.meta().size_bytes)
+            .file_name(format!("image{}", extension_from_mime(mime_type)))
+            .mime_str(mime_type)?;
+        let form = Form::new().part(field_name.to_string(), part);
+
+        let mut request = self
+            .client
+            .post(target_url)
+            .header(USER_AGENT, UPLOAD_USER_AGENT)
+            .multipart(form);
+        if accept_json {
+            request = request.header(reqwest::header::ACCEPT, "application/json");
+        }
+        Ok(request.send().await?)
+    }
+
+    async fn upload_r2_blob(
+        &self,
+        runtime: &BlobRuntime,
+        blob: &BlobHandle,
+        mime_type: &str,
+    ) -> Result<UploadResult> {
+        let endpoint = Url::parse(&self.config.r2_endpoint)?;
+        let key = build_r2_object_key(
+            &self.config.r2_object_prefix,
+            mime_type,
+            OffsetDateTime::now_utc(),
+            random_hex(4),
+        );
+        let (object_url, canonical_uri) =
+            build_r2_object_url(&endpoint, &self.config.r2_bucket, &key)?;
+
+        let amz_date_format: &[FormatItem<'static>] =
+            format_description!("[year][month][day]T[hour][minute][second]Z");
+        let date_stamp_format: &[FormatItem<'static>] = format_description!("[year][month][day]");
+        let now = OffsetDateTime::now_utc();
+        let amz_date = now.format(amz_date_format)?;
+        let date_stamp = now.format(date_stamp_format)?;
+        let payload_hash = sha256_hex_blob(blob, runtime).await?;
+
+        let canonical_headers = format!(
+            "content-type:{mime_type}\nhost:{}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{amz_date}\n",
+            endpoint.host_str().unwrap_or_default()
+        );
+        let signed_headers = "content-type;host;x-amz-content-sha256;x-amz-date";
+        let canonical_request = format!(
+            "PUT\n{canonical_uri}\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}"
+        );
+        let credential_scope = format!("{date_stamp}/auto/s3/aws4_request");
+        let string_to_sign = format!(
+            "AWS4-HMAC-SHA256\n{amz_date}\n{credential_scope}\n{}",
+            sha256_hex(canonical_request.as_bytes())
+        );
+        let signing_key =
+            derive_aws_v4_signing_key(&self.config.r2_secret_access_key, &date_stamp, "auto", "s3");
+        let signature = hex::encode(hmac_sha256(&signing_key, &string_to_sign)?);
+        let authorization = format!(
+            "AWS4-HMAC-SHA256 Credential={}/{}, SignedHeaders={}, Signature={}",
+            self.config.r2_access_key_id, credential_scope, signed_headers, signature
+        );
+
+        let reader = runtime.open_reader(blob).await?;
+        let response = put_object_stream(
+            &self.client,
+            object_url,
+            authorization,
+            amz_date,
+            payload_hash,
+            mime_type,
+            blob.meta().size_bytes,
+            reader,
+        )
+        .await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "r2 put object failed: status {}: {}",
+                status,
+                body.trim()
+            ));
+        }
+
+        Ok(UploadResult {
+            url: format!(
+                "{}/{}",
+                self.config.r2_public_base_url.trim_end_matches('/'),
+                key
+            ),
+            provider: "r2".to_string(),
+        })
+    }
 }
 
 pub async fn upload_image_with_mode<R2, Legacy>(
@@ -332,6 +528,51 @@ fn sha256_hex(data: &[u8]) -> String {
     hex::encode(hasher.finalize())
 }
 
+async fn sha256_hex_blob(blob: &BlobHandle, runtime: &BlobRuntime) -> Result<String> {
+    match blob.storage() {
+        BlobStorage::Inline(bytes) => Ok(sha256_hex(bytes)),
+        BlobStorage::Spilled(_) => {
+            let mut reader = runtime.open_reader(blob).await?;
+            let mut hasher = Sha256::new();
+            let mut chunk = [0_u8; 16 * 1024];
+            loop {
+                let read = reader.read(&mut chunk).await?;
+                if read == 0 {
+                    break;
+                }
+                hasher.update(&chunk[..read]);
+            }
+            Ok(hex::encode(hasher.finalize()))
+        }
+    }
+}
+
+async fn put_object_stream<R>(
+    client: &reqwest::Client,
+    object_url: String,
+    authorization: String,
+    amz_date: String,
+    payload_hash: String,
+    mime_type: &str,
+    content_length: u64,
+    reader: R,
+) -> Result<reqwest::Response>
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    let body = Body::wrap_stream(ReaderStream::new(reader));
+    Ok(client
+        .put(object_url)
+        .header(CONTENT_TYPE, mime_type)
+        .header(CONTENT_LENGTH, content_length.to_string())
+        .header("X-Amz-Content-Sha256", payload_hash)
+        .header("X-Amz-Date", amz_date)
+        .header(AUTHORIZATION, authorization)
+        .body(body)
+        .send()
+        .await?)
+}
+
 fn hmac_sha256(key: &[u8], data: &str) -> Result<Vec<u8>> {
     let mut mac = HmacSha256::new_from_slice(key)?;
     mac.update(data.as_bytes());
@@ -355,4 +596,139 @@ fn random_hex(bytes_len: usize) -> String {
     let mut bytes = vec![0u8; bytes_len];
     rand::rng().fill(bytes.as_mut_slice());
     hex::encode(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::task::{Context, Poll};
+
+    use axum::Router;
+    use axum::body::{Body, to_bytes};
+    use axum::extract::{Request, State};
+    use axum::http::StatusCode;
+    use axum::routing::put;
+    use tokio::io::{AsyncRead, ReadBuf};
+    use tokio::net::TcpListener;
+    use tokio::sync::{Mutex, oneshot};
+    use tokio::time::{Duration, timeout};
+
+    use super::put_object_stream;
+
+    #[derive(Clone)]
+    struct R2StreamState {
+        request_started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+        body: Arc<Mutex<Vec<u8>>>,
+    }
+
+    struct GateReader {
+        first: &'static [u8],
+        second: &'static [u8],
+        gate: Pin<Box<oneshot::Receiver<()>>>,
+        stage: GateStage,
+    }
+
+    enum GateStage {
+        First,
+        Waiting,
+        Second,
+        Done,
+    }
+
+    #[tokio::test]
+    async fn put_object_stream_starts_request_before_reader_finishes() {
+        let (started_tx, started_rx) = oneshot::channel();
+        let state = R2StreamState {
+            request_started: Arc::new(Mutex::new(Some(started_tx))),
+            body: Arc::new(Mutex::new(Vec::new())),
+        };
+        let server_addr = spawn_r2_server(state.clone()).await;
+
+        let response = timeout(
+            Duration::from_millis(500),
+            put_object_stream(
+                &reqwest::Client::new(),
+                format!("http://{server_addr}/bucket/demo.png"),
+                "AWS4-HMAC-SHA256 Credential=test".to_string(),
+                "20260409T000000Z".to_string(),
+                "deadbeef".to_string(),
+                "image/png",
+                6,
+                GateReader::new(started_rx),
+            ),
+        )
+        .await
+        .expect("streaming request should start before reader fully drains")
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(state.body.lock().await.as_slice(), b"abcdef");
+    }
+
+    impl GateReader {
+        fn new(gate: oneshot::Receiver<()>) -> Self {
+            Self {
+                first: b"abc",
+                second: b"def",
+                gate: Box::pin(gate),
+                stage: GateStage::First,
+            }
+        }
+    }
+
+    impl AsyncRead for GateReader {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            loop {
+                match self.stage {
+                    GateStage::First => {
+                        buf.put_slice(self.first);
+                        self.stage = GateStage::Waiting;
+                        return Poll::Ready(Ok(()));
+                    }
+                    GateStage::Waiting => match self.gate.as_mut().poll(cx) {
+                        Poll::Ready(_) => {
+                            self.stage = GateStage::Second;
+                            continue;
+                        }
+                        Poll::Pending => return Poll::Pending,
+                    },
+                    GateStage::Second => {
+                        buf.put_slice(self.second);
+                        self.stage = GateStage::Done;
+                        return Poll::Ready(Ok(()));
+                    }
+                    GateStage::Done => return Poll::Ready(Ok(())),
+                }
+            }
+        }
+    }
+
+    async fn spawn_r2_server(app_state: R2StreamState) -> std::net::SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/{*path}", put(handle_r2_stream))
+            .with_state(app_state);
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        address
+    }
+
+    async fn handle_r2_stream(
+        State(state): State<R2StreamState>,
+        request: Request<Body>,
+    ) -> StatusCode {
+        if let Some(sender) = state.request_started.lock().await.take() {
+            let _ = sender.send(());
+        }
+        let body = to_bytes(request.into_body(), usize::MAX).await.unwrap();
+        *state.body.lock().await = body.to_vec();
+        StatusCode::OK
+    }
 }
