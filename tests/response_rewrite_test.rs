@@ -102,6 +102,38 @@ async fn markdown_base64_normalization_uses_fetch_service_cache() {
     assert_eq!(request_count.load(Ordering::Relaxed), 1);
 }
 
+#[tokio::test]
+async fn markdown_url_normalization_uses_external_proxy_prefix() {
+    let mut config = rust_sync_proxy::test_config();
+    config.external_image_proxy_prefix = "https://proxy.example.com/fetch?url=".to_string();
+    config.proxy_special_upstream_urls = true;
+
+    let body = json!({
+        "candidates": [{
+            "content": {
+                "parts": [{
+                    "text": "![img](https://example.com/path/demo.png)"
+                }]
+            }
+        }]
+    });
+
+    let output = rust_sync_proxy::response_rewrite::normalize_special_markdown_image_response(
+        body,
+        rust_sync_proxy::response_rewrite::OutputMode::Url,
+        &reqwest::Client::new(),
+        None,
+        &config,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        output["candidates"][0]["content"]["parts"][0]["inlineData"]["data"],
+        "https://proxy.example.com/fetch?url=https%3A%2F%2Fexample.com%2Fpath%2Fdemo.png"
+    );
+}
+
 async fn serve_markdown_png(
     State(state): State<MarkdownImageState>,
 ) -> (StatusCode, HeaderMap, Vec<u8>) {

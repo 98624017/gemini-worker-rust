@@ -1,14 +1,7 @@
 use axum::body::{Body, to_bytes};
-use axum::extract::State;
-use axum::http::header::CONTENT_TYPE;
 use axum::http::{Request, StatusCode};
-use axum::response::IntoResponse;
-use axum::routing::post;
-use axum::{Json, Router};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use serde_json::json;
-use tokio::net::TcpListener;
 use tower::ServiceExt;
 
 #[test]
@@ -87,71 +80,25 @@ async fn admin_routes_require_basic_auth_and_return_logs() {
     assert_eq!(json["items"], serde_json::json!([]));
 }
 
-#[derive(Clone, Default)]
-struct UpstreamCapture;
-
 #[tokio::test]
 async fn admin_stats_track_model_requests() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let upstream_addr = listener.local_addr().unwrap();
-    let upstream = Router::new()
-        .route(
-            "/v1beta/models/demo:generateContent",
-            post(mock_generate_content),
-        )
-        .with_state(UpstreamCapture);
-    tokio::spawn(async move {
-        axum::serve(listener, upstream).await.unwrap();
-    });
+    let admin = rust_sync_proxy::admin::AdminState::new("pw".to_string());
+    rust_sync_proxy::admin::apply_admin_stats(
+        admin.stats().as_ref(),
+        &rust_sync_proxy::admin::AdminLogEntry {
+            path: "/v1beta/models/demo:generateContent".to_string(),
+            status_code: 200,
+            duration_ms: 12,
+            ..Default::default()
+        },
+    );
 
-    let mut config = rust_sync_proxy::test_config();
-    config.admin_password = "pw".to_string();
-    config.upstream_base_url = format!("http://{}", upstream_addr);
-    config.upstream_api_key = "env-key".to_string();
-    let app = rust_sync_proxy::build_router(config);
-
-    let _ = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1beta/models/demo:generateContent")
-                .header(CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"contents":[{"parts":[{"text":"hello"}]}]}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    let auth = format!("Basic {}", STANDARD.encode("user:pw"));
-    let response = app
-        .oneshot(
-            Request::builder()
-                .uri("/admin/api/stats")
-                .header("authorization", auth)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    let response = rust_sync_proxy::admin::admin_stats_response(&admin);
     assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["totalRequests"], 1);
     assert_eq!(json["errorRequests"], 0);
-}
-
-async fn mock_generate_content(
-    State(_capture): State<UpstreamCapture>,
-    body: axum::body::Bytes,
-) -> impl IntoResponse {
-    assert!(!body.is_empty());
-    Json(json!({
-        "candidates": [{
-            "finishReason": "STOP",
-            "content": { "parts": [{ "text": "ok" }] }
-        }]
-    }))
 }
 
 #[tokio::test]

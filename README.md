@@ -90,12 +90,12 @@ export UPSTREAM_API_KEY="your-upstream-key"
 
 - `ALLOWED_PROXY_DOMAINS`
   逗号分隔；显式设置后会覆盖默认列表
-- `PUBLIC_BASE_URL`
-  用于把 legacy 图床 URL 包装为 `${PUBLIC_BASE_URL}/proxy/image?url=...`
+- `EXTERNAL_IMAGE_PROXY_PREFIX`
+  非空时，把上传后的真实图片 URL 包装为 `${EXTERNAL_IMAGE_PROXY_PREFIX}<escaped-url>`
 - `SLOW_LOG_THRESHOLD_MS`
   默认 `100000`；`0` 表示关闭慢请求日志
 - `PROXY_SPECIAL_UPSTREAM_URLS`
-  默认开启；影响 Markdown 图片结果是否包装为 `/proxy/image?u=...`
+  默认开启；影响 Markdown 图片结果是否包装为 `EXTERNAL_IMAGE_PROXY_PREFIX`
 - `ADMIN_PASSWORD`
   非空时启用 admin 路由并要求 Basic Auth
 - `IMAGE_FETCH_TIMEOUT_MS`
@@ -134,8 +134,6 @@ export UPSTREAM_API_KEY="your-upstream-key"
   - `legacy`
   - `r2`
   - `r2_then_legacy`
-- `PROXY_STANDARD_OUTPUT_URLS`
-  默认开启；仅影响 legacy 图床结果是否继续包装 `/proxy/image`
 - `UPLOAD_TIMEOUT_MS`
   默认 `10000`
 - `UPLOAD_TLS_HANDSHAKE_TIMEOUT_MS`
@@ -155,8 +153,9 @@ R2 模式还需要：
 
 行为规则：
 
-- `legacy` 成功后，若 `PROXY_STANDARD_OUTPUT_URLS=1` 且 `PUBLIC_BASE_URL` 非空，则返回 `/proxy/image?url=...`
-- `r2` 成功后直出 `R2_PUBLIC_BASE_URL/<objectKey>`
+- 若 `EXTERNAL_IMAGE_PROXY_PREFIX` 非空，则上传成功后统一返回 `EXTERNAL_IMAGE_PROXY_PREFIX + escaped(real_url)`
+- 若 `EXTERNAL_IMAGE_PROXY_PREFIX` 为空，则返回真实图床 URL
+- `r2` 成功后真实 URL 为 `R2_PUBLIC_BASE_URL/<objectKey>`
 - `r2_then_legacy` 先尝试 R2，失败后回退 legacy
 - 上传失败统一走 fail-open，保留原始 base64
 
@@ -174,7 +173,7 @@ curl -sS \
 ### `output=url` + legacy
 
 ```bash
-export PUBLIC_BASE_URL="https://proxy.example.com"
+export EXTERNAL_IMAGE_PROXY_PREFIX="https://proxy.example.com/fetch?url="
 export IMAGE_HOST_MODE="legacy"
 
 curl -sS \

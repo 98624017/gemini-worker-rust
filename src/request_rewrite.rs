@@ -1,13 +1,19 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, anyhow};
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD;
 use serde_json::Value;
 
+use crate::blob_runtime::{BlobRuntime, BlobRuntimeConfig};
 use crate::cache::InlineDataUrlFetchService;
-use crate::image_io::{DEFAULT_MAX_IMAGE_BYTES, fetch_image_as_inline_data_with_options};
+use crate::image_io::DEFAULT_MAX_IMAGE_BYTES;
+use crate::request_encode::encode_request_body;
+use crate::request_materialize::{
+    RequestMaterializeServices, materialize_request_images_with_services,
+};
+use crate::request_scan::scan_request_image_urls;
 
 const MAX_INLINE_DATA_URLS: usize = 5;
 
@@ -39,52 +45,24 @@ impl Default for RewriteServices {
 }
 
 pub fn scan_inline_data_urls(body: &Value) -> Result<InlineDataScan> {
-    let mut unique_urls = HashSet::new();
-    let mut total_refs = 0usize;
-
-    fn walk(
-        node: &Value,
-        unique_urls: &mut HashSet<String>,
-        total_refs: &mut usize,
-    ) -> Result<()> {
-        match node {
-            Value::Object(map) => {
-                if let Some(Value::Object(inline_data)) = map.get("inlineData") {
-                    if let Some(Value::String(data)) = inline_data.get("data") {
-                        if is_http_url(data) {
-                            *total_refs += 1;
-                            if *total_refs > MAX_INLINE_DATA_URLS {
-                                return Err(anyhow!("too many inlineData URLs"));
-                            }
-                            unique_urls.insert(data.clone());
-                        }
-                    }
-                }
-
-                for child in map.values() {
-                    walk(child, unique_urls, total_refs)?;
-                }
-            }
-            Value::Array(items) => {
-                for child in items {
-                    walk(child, unique_urls, total_refs)?;
-                }
-            }
-            _ => {}
-        }
-        Ok(())
+    let refs = scan_request_image_urls(body)?;
+    if refs.len() > MAX_INLINE_DATA_URLS {
+        return Err(anyhow!("too many inlineData URLs"));
     }
 
-    walk(body, &mut unique_urls, &mut total_refs)?;
+    let mut unique_urls = HashSet::new();
+    for image_ref in &refs {
+        unique_urls.insert(image_ref.url.clone());
+    }
 
     Ok(InlineDataScan {
         unique_urls: unique_urls.into_iter().collect(),
-        total_refs,
+        total_refs: refs.len(),
     })
 }
 
 pub async fn rewrite_request_inline_data(
-    mut body: Value,
+    body: Value,
     services: &RewriteServices,
 ) -> Result<Value> {
     let scan = scan_inline_data_urls(&body)?;
@@ -92,63 +70,47 @@ pub async fn rewrite_request_inline_data(
         return Ok(body);
     }
 
-    let mut replacements = HashMap::new();
-    for raw_url in &scan.unique_urls {
-        let fetched = if let Some(fetch_service) = &services.fetch_service {
-            let fetched = fetch_service.fetch(raw_url).await?;
-            if let Some(observer) = &services.cache_observer {
-                observer(raw_url, fetched.from_cache);
-            }
-            crate::image_io::FetchedInlineData {
-                mime_type: fetched.mime_type,
-                bytes: fetched.bytes,
-            }
-        } else {
-            fetch_image_as_inline_data_with_options(
-                &services.image_client,
-                raw_url,
-                services.max_image_bytes,
-                services.allow_private_networks,
-            )
-            .await?
-        };
-        replacements.insert(
-            raw_url.clone(),
-            (fetched.mime_type, STANDARD.encode(fetched.bytes.as_ref())),
-        );
-    }
+    let runtime = compat_blob_runtime();
+    let materialized = materialize_request_images_with_services(
+        body,
+        &runtime,
+        &RequestMaterializeServices {
+            image_client: services.image_client.clone(),
+            max_image_bytes: services.max_image_bytes,
+            allow_private_networks: services.allow_private_networks,
+            fetch_service: services.fetch_service.clone(),
+            cache_observer: services.cache_observer.clone(),
+        },
+    )
+    .await?;
+    let encoded = encode_request_body(
+        materialized.request,
+        materialized.replacements.clone(),
+        &runtime,
+    )
+    .await?;
+    let bytes = runtime.read_bytes(&encoded.body_blob).await?;
 
-    // 二次遍历只做补丁回填，避免把可变引用跨 await 传播。
-    patch_inline_data_urls(&mut body, &replacements);
-    Ok(body)
+    for replacement in &materialized.replacements {
+        runtime.remove(&replacement.blob).await?;
+    }
+    runtime.remove(&encoded.body_blob).await?;
+
+    Ok(serde_json::from_slice(&bytes)?)
 }
 
-fn patch_inline_data_urls(node: &mut Value, replacements: &HashMap<String, (String, String)>) {
-    match node {
-        Value::Object(map) => {
-            if let Some(Value::Object(inline_data)) = map.get_mut("inlineData") {
-                if let Some(Value::String(data)) = inline_data.get("data") {
-                    if let Some((mime_type, base64_data)) = replacements.get(data) {
-                        inline_data.insert("data".to_string(), Value::String(base64_data.clone()));
-                        inline_data
-                            .insert("mimeType".to_string(), Value::String(mime_type.clone()));
-                    }
-                }
-            }
+fn compat_blob_runtime() -> BlobRuntime {
+    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
-            for child in map.values_mut() {
-                patch_inline_data_urls(child, replacements);
-            }
-        }
-        Value::Array(items) => {
-            for child in items {
-                patch_inline_data_urls(child, replacements);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn is_http_url(value: &str) -> bool {
-    value.starts_with("http://") || value.starts_with("https://")
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    let unix_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    BlobRuntime::new(BlobRuntimeConfig {
+        inline_max_bytes: 8 * 1024 * 1024,
+        request_hot_budget_bytes: 24 * 1024 * 1024,
+        global_hot_budget_bytes: 384 * 1024 * 1024,
+        spill_dir: std::env::temp_dir().join(format!("rust-sync-proxy-request-rewrite-{unix_ms}-{id}")),
+    })
 }

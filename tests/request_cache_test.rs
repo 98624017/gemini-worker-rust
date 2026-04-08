@@ -6,6 +6,7 @@ use axum::Router;
 use axum::extract::State;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header::CONTENT_TYPE};
 use axum::routing::get;
+use serde_json::json;
 use tokio::net::TcpListener;
 
 #[derive(Clone)]
@@ -91,6 +92,64 @@ async fn request_cache_still_populates_cache_when_background_bridge_disabled() {
     assert!(!first.from_cache);
     let second = service.fetch(&url).await.unwrap();
     assert!(second.from_cache);
+    assert_eq!(request_count.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn request_materialize_reuses_fetch_service_cache_between_calls() {
+    let (address, request_count) = spawn_image_server(0).await;
+    let mut config = rust_sync_proxy::test_config();
+    config.inline_data_url_memory_cache_max_bytes = 1024;
+    config.inline_data_url_background_fetch_wait_timeout = Duration::from_millis(100);
+    config.inline_data_url_background_fetch_total_timeout = Duration::from_millis(500);
+    let service = rust_sync_proxy::cache::InlineDataUrlFetchService::from_config(
+        &config,
+        reqwest::Client::new(),
+        rust_sync_proxy::image_io::DEFAULT_MAX_IMAGE_BYTES,
+        true,
+    )
+    .unwrap();
+
+    let runtime = rust_sync_proxy::test_blob_runtime(8 * 1024 * 1024);
+    let request = json!({
+        "contents": [{
+            "parts": [{
+                "inlineData": {
+                    "data": format!("http://{address}/image.png")
+                }
+            }]
+        }]
+    });
+
+    let first = rust_sync_proxy::request_materialize::materialize_request_images_with_services(
+        request.clone(),
+        &runtime,
+        &rust_sync_proxy::request_materialize::RequestMaterializeServices {
+            image_client: reqwest::Client::new(),
+            max_image_bytes: rust_sync_proxy::image_io::DEFAULT_MAX_IMAGE_BYTES,
+            allow_private_networks: true,
+            fetch_service: Some(service.clone()),
+            cache_observer: None,
+        },
+    )
+    .await
+    .unwrap();
+    let second = rust_sync_proxy::request_materialize::materialize_request_images_with_services(
+        request,
+        &runtime,
+        &rust_sync_proxy::request_materialize::RequestMaterializeServices {
+            image_client: reqwest::Client::new(),
+            max_image_bytes: rust_sync_proxy::image_io::DEFAULT_MAX_IMAGE_BYTES,
+            allow_private_networks: true,
+            fetch_service: Some(service),
+            cache_observer: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(first.replacements.len(), 1);
+    assert_eq!(second.replacements.len(), 1);
     assert_eq!(request_count.load(Ordering::Relaxed), 1);
 }
 

@@ -18,7 +18,9 @@ use crate::blob_runtime::{BlobRuntime, BlobRuntimeConfig};
 use crate::cache::InlineDataUrlFetchService;
 use crate::config::Config;
 use crate::request_encode::encode_request_body;
-use crate::request_materialize::materialize_request_images;
+use crate::request_materialize::{
+    RequestMaterializeServices, materialize_request_images_with_services,
+};
 use crate::response_materialize::finalize_output_urls;
 use crate::response_rewrite::{
     OutputMode, keep_largest_inline_image, normalize_special_markdown_image_response,
@@ -217,8 +219,29 @@ async fn forward_gemini_request(
         serde_json::from_slice(&request_body).map_err(|err| anyhow!("invalid json body: {err}"))?;
     let output_mode = get_output_mode(request_query.as_deref(), &body);
 
-    let materialized =
-        materialize_request_images(body, state.blob_runtime.as_ref(), &state.image_client).await?;
+    let admin_stats = state.admin.as_ref().map(|admin| admin.stats());
+    let cache_observer = admin_stats.map(|stats| {
+        Arc::new(move |_raw_url: &str, from_cache: bool| {
+            if from_cache {
+                stats
+                    .cache_hits
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }) as Arc<dyn Fn(&str, bool) + Send + Sync>
+    });
+
+    let materialized = materialize_request_images_with_services(
+        body,
+        state.blob_runtime.as_ref(),
+        &RequestMaterializeServices {
+            image_client: state.image_client.clone(),
+            max_image_bytes: crate::image_io::DEFAULT_MAX_IMAGE_BYTES,
+            allow_private_networks: false,
+            fetch_service: state.inline_data_fetch_service.clone(),
+            cache_observer,
+        },
+    )
+    .await?;
     let encoded = encode_request_body(
         materialized.request,
         materialized.replacements.clone(),
@@ -436,23 +459,7 @@ async fn finalize_admin_response(
     entry.status_code = parts.status.as_u16();
 
     let stats = admin_state.stats();
-    // Relaxed: 独立统计计数器，不与其他原子操作构成同步链。
-    // 读端（admin stats API）可接受最终一致。
-    stats
-        .total_requests
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if entry.status_code >= 400 {
-        // Relaxed: 独立统计计数器，不与其他原子操作构成同步链。
-        // 读端（admin stats API）可接受最终一致。
-        stats
-            .error_requests
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
-    // Relaxed: 独立统计计数器，不与其他原子操作构成同步链。
-    // 读端（admin stats API）可接受最终一致。
-    stats
-        .total_duration_ms
-        .fetch_add(entry.duration_ms, std::sync::atomic::Ordering::Relaxed);
+    admin::apply_admin_stats(stats.as_ref(), &entry);
     admin_state.record(entry).await;
 
     Response::from_parts(parts, Body::from(body_bytes))

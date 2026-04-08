@@ -1051,6 +1051,16 @@ pub fn sanitize_json_for_log(raw: &[u8]) -> SanitizedAdminLog {
     SanitizedAdminLog { pretty, image_urls }
 }
 
+pub fn apply_admin_stats(stats: &AdminStats, entry: &AdminLogEntry) {
+    stats.total_requests.fetch_add(1, Ordering::Relaxed);
+    if entry.status_code >= 400 {
+        stats.error_requests.fetch_add(1, Ordering::Relaxed);
+    }
+    stats
+        .total_duration_ms
+        .fetch_add(entry.duration_ms, Ordering::Relaxed);
+}
+
 pub fn extract_finish_reason(body: &Value) -> Option<String> {
     body.get("candidates")
         .and_then(Value::as_array)
