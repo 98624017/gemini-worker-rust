@@ -3,22 +3,18 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
 use axum::body::{Body, to_bytes};
-use axum::extract::{Path, Query, Request, State};
-use axum::http::header::{ACCEPT, ACCESS_CONTROL_ALLOW_ORIGIN, AUTHORIZATION, CONTENT_TYPE};
+use axum::extract::{Path, Request, State};
+use axum::http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use serde::Deserialize;
 use serde_json::{Value, json};
 use url::{Url, form_urlencoded};
 
 use crate::admin::{self, AdminLogEntry, AdminState};
 use crate::cache::InlineDataUrlFetchService;
 use crate::config::Config;
-use crate::proxy_image::{hostname_matches_domain_patterns, is_forbidden_fetch_target};
 use crate::request_rewrite::{RewriteServices, rewrite_request_inline_data};
 use crate::response_rewrite::{
     OutputMode, keep_largest_inline_image, normalize_special_markdown_image_response,
@@ -37,12 +33,6 @@ struct AppState {
     uploader: Arc<Uploader>,
     admin: Option<Arc<AdminState>>,
     inline_data_fetch_service: Option<Arc<InlineDataUrlFetchService>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ProxyImageQuery {
-    url: Option<String>,
-    u: Option<String>,
 }
 
 pub fn build_router(config: Config) -> Router {
@@ -82,7 +72,6 @@ pub fn build_router(config: Config) -> Router {
         .route("/admin/logs", get(admin_logs_page))
         .route("/admin/api/logs", get(admin_logs_api))
         .route("/admin/api/stats", get(admin_stats_api))
-        .route("/proxy/image", get(proxy_image))
         .route("/v1beta/models/{*rest}", post(model_action))
         .with_state(state)
 }
@@ -125,7 +114,7 @@ async fn model_action(
                     path: request_path,
                     query: request_query,
                     remote_addr,
-                    is_stream: rest.ends_with(":streamGenerateContent"),
+                    is_stream: false,
                     status_code: StatusCode::UNAUTHORIZED.as_u16(),
                     duration_ms: started_at.elapsed().as_millis() as i64,
                     ..Default::default()
@@ -135,12 +124,7 @@ async fn model_action(
         }
     };
 
-    let target_path = format!("/v1beta/models/{rest}");
-    let is_stream = if rest.ends_with(":streamGenerateContent") {
-        true
-    } else if rest.ends_with(":generateContent") {
-        false
-    } else {
+    if !rest.ends_with(":generateContent") {
         let response = (
             StatusCode::NOT_FOUND,
             Json(json!({"error": {"code": 404, "message": "Not Found"}})),
@@ -162,16 +146,17 @@ async fn model_action(
             },
         )
         .await;
-    };
+    }
+    let target_path = format!("/v1beta/models/{rest}");
 
-    match forward_gemini_request(state.clone(), resolved, target_path, request, is_stream).await {
+    match forward_gemini_request(state.clone(), resolved, target_path, request).await {
         Ok((response, mut admin_entry)) => {
             admin_entry.created_at = created_at;
             admin_entry.method = request_method;
             admin_entry.path = request_path;
             admin_entry.query = request_query;
             admin_entry.remote_addr = remote_addr;
-            admin_entry.is_stream = is_stream;
+            admin_entry.is_stream = false;
             admin_entry.duration_ms = started_at.elapsed().as_millis() as i64;
             finalize_admin_response(&state, response, admin_entry).await
         }
@@ -190,7 +175,7 @@ async fn model_action(
                     path: request_path,
                     query: request_query,
                     remote_addr,
-                    is_stream,
+                    is_stream: false,
                     status_code: StatusCode::BAD_GATEWAY.as_u16(),
                     duration_ms: started_at.elapsed().as_millis() as i64,
                     ..Default::default()
@@ -206,7 +191,6 @@ async fn forward_gemini_request(
     resolved: ResolvedUpstream,
     target_path: String,
     request: Request,
-    is_stream: bool,
 ) -> Result<(Response, AdminLogEntry)> {
     let content_type_header = request.headers().get(CONTENT_TYPE).cloned();
     let accept_header = request.headers().get(ACCEPT).cloned();
@@ -275,31 +259,17 @@ async fn forward_gemini_request(
         ..Default::default()
     };
 
-    if is_stream {
-        let response = handle_stream_response(
-            upstream_response,
-            output_mode,
-            &state.image_client,
-            state.inline_data_fetch_service.as_ref(),
-            state.uploader.as_ref(),
-            state.config.as_ref(),
-        )
-        .await?;
-        admin_entry.status_code = response.status().as_u16();
-        Ok((response, admin_entry))
-    } else {
-        let response = handle_non_stream_response(
-            upstream_response,
-            output_mode,
-            &state.image_client,
-            state.inline_data_fetch_service.as_ref(),
-            state.uploader.as_ref(),
-            state.config.as_ref(),
-        )
-        .await?;
-        admin_entry.status_code = response.status().as_u16();
-        Ok((response, admin_entry))
-    }
+    let response = handle_non_stream_response(
+        upstream_response,
+        output_mode,
+        &state.image_client,
+        state.inline_data_fetch_service.as_ref(),
+        state.uploader.as_ref(),
+        state.config.as_ref(),
+    )
+    .await?;
+    admin_entry.status_code = response.status().as_u16();
+    Ok((response, admin_entry))
 }
 
 async fn handle_non_stream_response(
@@ -359,107 +329,6 @@ async fn handle_non_stream_response(
     *response.status_mut() = StatusCode::from_u16(status.as_u16())?;
     response.headers_mut().insert(CONTENT_TYPE, content_type);
     Ok(response)
-}
-
-async fn handle_stream_response(
-    upstream_response: reqwest::Response,
-    output_mode: OutputMode,
-    image_client: &reqwest::Client,
-    fetch_service: Option<&Arc<InlineDataUrlFetchService>>,
-    uploader: &Uploader,
-    config: &Config,
-) -> Result<Response> {
-    let status = upstream_response.status();
-    let body_text = upstream_response.text().await?;
-
-    let mut response = if !status.is_success() {
-        Response::new(Body::from(body_text))
-    } else {
-        let rewritten = rewrite_stream_text(
-            &body_text,
-            output_mode,
-            image_client,
-            fetch_service,
-            uploader,
-            config,
-        )
-        .await?;
-        let mut response = Response::new(Body::from(rewritten));
-        response
-            .headers_mut()
-            .insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
-        response
-    };
-
-    *response.status_mut() = StatusCode::from_u16(status.as_u16())?;
-    if !status.is_success() {
-        response
-            .headers_mut()
-            .insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
-    }
-    Ok(response)
-}
-
-async fn rewrite_stream_text(
-    input: &str,
-    output_mode: OutputMode,
-    image_client: &reqwest::Client,
-    fetch_service: Option<&Arc<InlineDataUrlFetchService>>,
-    uploader: &Uploader,
-    config: &Config,
-) -> Result<String> {
-    let mut output = String::with_capacity(input.len());
-
-    for line in input.split_inclusive('\n') {
-        let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
-        let line_ending = &line[trimmed.len()..];
-
-        if !trimmed.starts_with("data:") {
-            output.push_str(trimmed);
-            output.push_str(line_ending);
-            continue;
-        }
-
-        let raw = trimmed.trim_start_matches("data:").trim();
-        if raw.is_empty() || raw == "[DONE]" {
-            output.push_str(trimmed);
-            output.push_str(line_ending);
-            continue;
-        }
-
-        match serde_json::from_str::<Value>(raw) {
-            Ok(value) => {
-                let mut rewritten = normalize_special_markdown_image_response(
-                    value,
-                    output_mode,
-                    image_client,
-                    fetch_service,
-                    config,
-                )
-                .await?;
-                remove_thought_signatures(&mut rewritten);
-                rewritten = keep_largest_inline_image(rewritten);
-                if output_mode == OutputMode::Url {
-                    rewritten = rewrite_inline_data_base64_to_urls(
-                        rewritten,
-                        uploader,
-                        &config.public_base_url,
-                        config.proxy_standard_output_urls,
-                    )
-                    .await;
-                }
-                output.push_str("data: ");
-                output.push_str(&serde_json::to_string(&rewritten)?);
-                output.push_str(line_ending);
-            }
-            Err(_) => {
-                output.push_str(trimmed);
-                output.push_str(line_ending);
-            }
-        }
-    }
-
-    Ok(output)
 }
 
 async fn admin_root(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -584,71 +453,6 @@ fn log_slow_request(config: &Config, entry: &AdminLogEntry) {
         duration_ms = entry.duration_ms,
         "slow request"
     );
-}
-
-async fn proxy_image(
-    State(state): State<AppState>,
-    Query(query): Query<ProxyImageQuery>,
-) -> Response {
-    let target = match query
-        .url
-        .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-    {
-        Some(url) => url.to_string(),
-        None => match query.u.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
-            Some(encoded) => match URL_SAFE_NO_PAD.decode(encoded) {
-                Ok(bytes) => String::from_utf8(bytes).unwrap_or_default(),
-                Err(_) => return (StatusCode::BAD_REQUEST, "Invalid u param").into_response(),
-            },
-            None => return (StatusCode::BAD_REQUEST, "Missing url param").into_response(),
-        },
-    };
-
-    let parsed = match Url::parse(&target) {
-        Ok(url)
-            if matches!(url.scheme(), "http" | "https")
-                && !url.host_str().unwrap_or("").is_empty() =>
-        {
-            url
-        }
-        _ => return (StatusCode::FORBIDDEN, "Forbidden proxy target").into_response(),
-    };
-
-    if is_forbidden_fetch_target(&parsed)
-        || !hostname_matches_domain_patterns(
-            parsed.host_str().unwrap_or_default(),
-            &state.config.allowed_proxy_domains,
-        )
-    {
-        return (StatusCode::FORBIDDEN, "Forbidden proxy target").into_response();
-    }
-
-    match state.image_client.get(parsed).send().await {
-        Ok(upstream_response) => {
-            let status = upstream_response.status();
-            let content_type = upstream_response
-                .headers()
-                .get(CONTENT_TYPE)
-                .cloned()
-                .unwrap_or_else(|| HeaderValue::from_static("application/octet-stream"));
-            match upstream_response.bytes().await {
-                Ok(body_bytes) => {
-                    let mut response = Response::new(Body::from(body_bytes));
-                    *response.status_mut() =
-                        StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-                    response
-                        .headers_mut()
-                        .insert(ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*"));
-                    response.headers_mut().insert(CONTENT_TYPE, content_type);
-                    response
-                }
-                Err(_) => (StatusCode::BAD_GATEWAY, "Proxy fetch failed").into_response(),
-            }
-        }
-        Err(_) => (StatusCode::BAD_GATEWAY, "Proxy fetch failed").into_response(),
-    }
 }
 
 fn get_output_mode(query: Option<&str>, body: &Value) -> OutputMode {

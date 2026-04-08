@@ -10,7 +10,7 @@
 
 当前状态：
 
-- 已实现同步 `generateContent` / `streamGenerateContent` 转发
+- 已实现同步 `generateContent` 转发
 - 已实现请求侧 `inlineData.data=http(s)://...` 拉图转 base64
 - 已实现响应侧 `thoughtSignature` 移除
 - 已实现多图结果只保留同一 candidate 中 payload 最大的图片
@@ -18,7 +18,6 @@
   - `legacy`
   - `r2`
   - `r2_then_legacy`
-- 已实现 `/proxy/image`
 - 已实现 Go 风格 `admin` 路由与 Basic Auth
 - 已实现特殊上游 Markdown 图片结果归一化
 - 已实现请求侧内存缓存、磁盘缓存与后台桥接下载
@@ -28,15 +27,12 @@
 ## 路由
 
 - `POST /v1beta/models/{model}:generateContent`
-- `POST /v1beta/models/{model}:streamGenerateContent`
-- `GET /proxy/image?url=<escaped-url>`
-- `GET /proxy/image?u=<base64url(url)>`
 - `GET /admin`
 - `GET /admin/logs`
 - `GET /admin/api/logs`
 - `GET /admin/api/stats`
 
-只有 `:generateContent` 和 `:streamGenerateContent` 会被转发；其余模型路由返回 `404`。
+只有 `:generateContent` 会被转发；其余模型路由返回 `404`。
 
 ## 快速开始
 
@@ -221,9 +217,7 @@ GO_IMPL_ROOT=/path/to/go-implementation \
 当前对照脚本会验证：
 
 - 非流式 base64 输出
-- 流式 base64 输出
 - 非流式 `output=url + r2`
-- 流式 `output=url + r2`
 - Markdown 图片归一化
 - `admin/api/stats` 可访问且输出一致
 

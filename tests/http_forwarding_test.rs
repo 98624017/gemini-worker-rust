@@ -3,7 +3,7 @@ use std::sync::Arc;
 use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::State;
 use axum::http::header::CONTENT_TYPE;
-use axum::http::{HeaderMap, HeaderValue, Request, StatusCode, Uri};
+use axum::http::{HeaderMap, Request, StatusCode, Uri};
 use axum::response::IntoResponse;
 use axum::routing::{post, put};
 use axum::{Json, Router};
@@ -161,109 +161,6 @@ async fn generate_content_rewrites_inline_data_to_wrapped_urls_when_output_url_e
         *upload_capture.user_agent.lock().await,
         "ComfyUI-Banana/1.0"
     );
-}
-
-#[tokio::test]
-async fn stream_generate_content_forwards_and_rewrites_sse_in_base64_mode() {
-    let capture = UpstreamCapture::default();
-    let upstream = Router::new()
-        .route(
-            "/v1beta/models/demo:streamGenerateContent",
-            post(mock_stream_generate_content),
-        )
-        .with_state(capture.clone());
-    let upstream_addr = spawn_server(upstream).await;
-
-    let mut config = rust_sync_proxy::test_config();
-    config.upstream_base_url = format!("http://{}", upstream_addr);
-    config.upstream_api_key = "env-key".to_string();
-
-    let app = rust_sync_proxy::build_router(config);
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1beta/models/demo:streamGenerateContent")
-                .header(CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"contents":[{"parts":[{"text":"hello"}]}]}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        response.headers().get(CONTENT_TYPE).unwrap(),
-        "text/event-stream"
-    );
-
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let text = String::from_utf8(body.to_vec()).unwrap();
-    assert!(text.contains("data: [DONE]"));
-    assert!(text.contains("\"data\":\"bbbbbbbb\""));
-    assert!(!text.contains("\"data\":\"aaaa\""));
-    assert!(!text.contains("thoughtSignature"));
-}
-
-#[tokio::test]
-async fn stream_generate_content_rewrites_inline_data_to_wrapped_urls_when_output_url_enabled() {
-    let capture = UpstreamCapture::default();
-    let upstream = Router::new()
-        .route(
-            "/v1beta/models/demo:streamGenerateContent",
-            post(mock_stream_generate_content),
-        )
-        .with_state(capture.clone());
-    let upstream_addr = spawn_server(upstream).await;
-
-    let upload_capture = UploadCapture::default();
-    let upload = Router::new()
-        .route("/uguu", post(mock_legacy_upload))
-        .with_state(upload_capture.clone());
-    let upload_addr = spawn_server(upload).await;
-
-    let mut config = rust_sync_proxy::test_config();
-    config.upstream_base_url = format!("http://{}", upstream_addr);
-    config.upstream_api_key = "env-key".to_string();
-    config.public_base_url = "https://proxy.example.com".to_string();
-    config.legacy_uguu_upload_url = format!("http://{upload_addr}/uguu");
-
-    let app = rust_sync_proxy::build_router(config);
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1beta/models/demo:streamGenerateContent")
-                .header(CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    r#"{"output":"url","contents":[{"parts":[{"text":"hello"}]}]}"#,
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        response.headers().get(CONTENT_TYPE).unwrap(),
-        "text/event-stream"
-    );
-
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let text = String::from_utf8(body.to_vec()).unwrap();
-    assert!(text.contains("data: [DONE]"));
-    assert!(text.contains(
-        "\"data\":\"https://proxy.example.com/proxy/image?url=https%3A%2F%2Fh.uguu.se%2Ffixed-image.png\""
-    ));
-    assert!(!text.contains("\"data\":\"bbbbbbbb\""));
-    assert!(!text.contains("\"data\":\"aaaa\""));
-    assert!(!text.contains("thoughtSignature"));
-    assert_eq!(*upload_capture.request_count.lock().await, 1);
-
-    let captured_body = String::from_utf8(capture.request_body.lock().await.clone()).unwrap();
-    assert!(!captured_body.contains("\"output\""));
-    assert_eq!(*capture.api_key.lock().await, "env-key");
-    assert_eq!(*capture.authorization.lock().await, "Bearer env-key");
 }
 
 #[tokio::test]
@@ -536,28 +433,6 @@ async fn mock_generate_content(
             }
         }]
     }))
-}
-
-async fn mock_stream_generate_content(
-    State(capture): State<UpstreamCapture>,
-    headers: HeaderMap,
-    uri: Uri,
-    body: Bytes,
-) -> impl IntoResponse {
-    store_request_capture(&capture, &headers, &uri).await;
-    *capture.request_body.lock().await = body.to_vec();
-
-    let mut response_headers = HeaderMap::new();
-    response_headers.insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
-    (
-        response_headers,
-        concat!(
-            "event: message\n",
-            "data: {\"thoughtSignature\":\"secret\",\"candidates\":[{\"content\":{\"parts\":[{\"inlineData\":{\"mimeType\":\"image/png\",\"data\":\"aaaa\"}},{\"inlineData\":{\"mimeType\":\"image/png\",\"data\":\"bbbbbbbb\"}}]}}]}\n",
-            "\n",
-            "data: [DONE]\n"
-        ),
-    )
 }
 
 async fn mock_generate_markdown_content(

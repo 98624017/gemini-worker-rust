@@ -13,8 +13,9 @@ use tokio::sync::{Mutex, Notify};
 use url::Url;
 use url::form_urlencoded;
 
-use crate::image_io::{FetchedInlineData, fetch_image_as_inline_data_with_options};
-use crate::proxy_image::hostname_matches_domain_patterns;
+use crate::image_io::{
+    FetchedInlineData, fetch_image_as_inline_data_with_options, hostname_matches_domain_patterns,
+};
 
 const EXTERNAL_IMAGE_FETCH_PROXY_PREFIX: &str = "https://gemini.xinbaoai.com/proxy/image?url=";
 
