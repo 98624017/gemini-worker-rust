@@ -899,12 +899,17 @@ mod tests {
     use axum::body::to_bytes;
     use axum::extract::{Path as AxumPath, State as AxumState};
     use axum::http::header::AUTHORIZATION;
+    use axum::http::Uri;
+    use axum::response::IntoResponse;
     use axum::routing::{get, post};
     use axum::{Json, Router};
     use serde_json::json;
     use std::collections::VecDeque;
+    use std::convert::Infallible;
     use tokio::net::TcpListener;
     use tokio::sync::Mutex;
+    use tower::make::Shared;
+    use tower::service_fn;
 
     #[derive(Clone, Default)]
     struct AiapidevMockState {
@@ -1017,6 +1022,90 @@ mod tests {
             create_bodies[0]["contents"][0]["parts"][0]["text"],
             "两张图片合并"
         );
+    }
+
+    #[tokio::test]
+    async fn forward_gemini_request_rewrites_aiapidev_base64_inline_data_before_create_call() {
+        let mock_state = AiapidevMockState::default();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let proxy_state = mock_state.clone();
+        tokio::spawn(async move {
+            let service = service_fn(move |request| {
+                let state = proxy_state.clone();
+                async move { Ok::<_, Infallible>(mock_aiapidev_proxy(state, request).await) }
+            });
+            axum::serve(listener, Shared::new(service)).await.unwrap();
+        });
+
+        let resolved = ResolvedUpstream {
+            base_url: "http://www.aiapidev.com".to_string(),
+            api_key: "special-key".to_string(),
+        };
+        let upstream_client = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::http(format!("http://127.0.0.1:{}", address.port())).unwrap())
+            .build()
+            .unwrap();
+        let config = crate::test_config();
+        let state = AppState {
+            config: Arc::new(config.clone()),
+            upstream_client,
+            image_client: reqwest::Client::new(),
+            uploader: Arc::new(Uploader::new(reqwest::Client::new(), config)),
+            admin: None,
+            inline_data_fetch_service: None,
+            blob_runtime: Arc::new(crate::test_blob_runtime(8 * 1024 * 1024)),
+        };
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1beta/models/gemini-3-pro-image-preview:generateContent?output=url")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({
+                    "contents": [{
+                        "role": "user",
+                        "parts": [{
+                            "inlineData": {
+                                "data": "iVBORw0KGgoAAAANSUhEUgAAAAUA",
+                                "mimeType": "image/png"
+                            }
+                        }]
+                    }]
+                })
+                .to_string(),
+            ))
+            .unwrap();
+
+        let (response, admin_entry) = forward_gemini_request(
+            state,
+            resolved,
+            "/v1beta/models/gemini-3-pro-image-preview:generateContent".to_string(),
+            request,
+        )
+        .await
+        .unwrap();
+
+        let status = response.status();
+        let response_body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected body: {}",
+            String::from_utf8_lossy(&response_body)
+        );
+        assert_eq!(admin_entry.output_mode, "url");
+
+        let create_bodies = mock_state.create_bodies.lock().await;
+        assert_eq!(
+            create_bodies[0]["contents"][0]["parts"][0]["inline_data"],
+            json!({
+                "data": "iVBORw0KGgoAAAANSUhEUgAAAAUA",
+                "mime_type": "image/png"
+            })
+        );
+        assert!(create_bodies[0]["contents"][0]["parts"][0]
+            .get("inlineData")
+            .is_none());
     }
 
     #[tokio::test]
@@ -1259,5 +1348,51 @@ mod tests {
             MockPollResponse::Success(body) => Json(body).into_response(),
             MockPollResponse::Error(status, body) => (status, Json(body)).into_response(),
         }
+    }
+
+    async fn mock_aiapidev_proxy(
+        state: AiapidevMockState,
+        request: Request,
+    ) -> Response {
+        let path = extract_proxy_path(request.uri());
+        let headers = request.headers().clone();
+
+        if path == "/v1beta/models/nanobananapro:generateContent" {
+            let body = to_bytes(request.into_body(), usize::MAX).await.unwrap();
+            let parsed: Value = serde_json::from_slice(&body).unwrap();
+            state.create_paths.lock().await.push(path);
+            state.create_headers.lock().await.push(headers);
+            state.create_bodies.lock().await.push(parsed);
+            return Json(json!({
+                "requestId": "req_demo",
+                "status": "created"
+            }))
+            .into_response();
+        }
+
+        if path == "/v1beta/tasks/req_demo" {
+            state.poll_headers.lock().await.push(headers);
+            return Json(json!({
+                "requestId": "req_demo",
+                "status": "succeeded",
+                "result": {
+                    "items": [{
+                        "url": "https://pub.example.com/result.png",
+                        "type": "image"
+                    }]
+                }
+            }))
+            .into_response();
+        }
+
+        StatusCode::NOT_FOUND.into_response()
+    }
+
+    fn extract_proxy_path(uri: &Uri) -> String {
+        let raw = uri.to_string();
+        if let Ok(parsed) = Url::parse(&raw) {
+            return parsed.path().to_string();
+        }
+        uri.path().to_string()
     }
 }

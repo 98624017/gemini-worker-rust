@@ -116,9 +116,9 @@ fn rewrite_aiapidev_value(value: Value, path: &str) -> Value {
 }
 
 fn rewrite_aiapidev_object(map: Map<String, Value>, path: &str) -> Value {
-    if let Some(file_data) = inline_data_to_file_data(&map) {
+    if let Some((key, payload)) = rewrite_inline_data_payload(&map) {
         let mut out = Map::new();
-        out.insert("file_data".to_string(), file_data);
+        out.insert(key.to_string(), payload);
         return Value::Object(out);
     }
 
@@ -151,25 +151,35 @@ fn rewrite_aiapidev_object(map: Map<String, Value>, path: &str) -> Value {
     Value::Object(out)
 }
 
-fn inline_data_to_file_data(map: &Map<String, Value>) -> Option<Value> {
+fn rewrite_inline_data_payload(map: &Map<String, Value>) -> Option<(&'static str, Value)> {
     let inline_data = map
         .get("inlineData")
         .or_else(|| map.get("inline_data"))?
         .as_object()?;
     let data = inline_data.get("data")?.as_str()?;
-    if !is_http_url(data) {
-        return None;
-    }
     let mime_type = inline_data
         .get("mimeType")
         .or_else(|| inline_data.get("mime_type"))
         .and_then(Value::as_str)
         .unwrap_or("image/png");
 
-    Some(serde_json::json!({
-        "file_uri": data,
-        "mime_type": mime_type,
-    }))
+    if is_http_url(data) {
+        return Some((
+            "file_data",
+            serde_json::json!({
+                "file_uri": data,
+                "mime_type": mime_type,
+            }),
+        ));
+    }
+
+    Some((
+        "inline_data",
+        serde_json::json!({
+            "data": data,
+            "mime_type": mime_type,
+        }),
+    ))
 }
 
 fn rewrite_aiapidev_key(key: &str) -> String {

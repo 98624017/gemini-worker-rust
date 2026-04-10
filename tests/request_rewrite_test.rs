@@ -69,3 +69,29 @@ fn rewrites_aiapidev_request_body_to_file_data_and_snake_case() {
         })
     );
 }
+
+#[test]
+fn rewrites_aiapidev_request_body_base64_inline_data_to_snake_case_inline_data() {
+    let body = json!({
+        "contents": [{
+            "parts": [{
+                "inlineData": {
+                    "data": "iVBORw0KGgoAAAANSUhEUgAAAAUA",
+                    "mimeType": "image/png"
+                }
+            }],
+            "role": "user"
+        }]
+    });
+
+    let rewritten = rust_sync_proxy::request_rewrite::rewrite_aiapidev_request_body(body);
+
+    assert_eq!(
+        rewritten["contents"][0]["parts"][0]["inline_data"],
+        json!({
+            "data": "iVBORw0KGgoAAAANSUhEUgAAAAUA",
+            "mime_type": "image/png"
+        })
+    );
+    assert!(rewritten["contents"][0]["parts"][0].get("inlineData").is_none());
+}
