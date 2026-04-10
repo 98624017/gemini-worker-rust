@@ -1,4 +1,5 @@
 pub mod admin;
+pub mod allocator;
 pub mod blob_runtime;
 pub mod cache;
 pub mod config;
@@ -6,8 +7,8 @@ pub mod http;
 pub mod image_io;
 pub mod request_encode;
 pub mod request_materialize;
-pub mod request_scan;
 pub mod request_rewrite;
+pub mod request_scan;
 pub mod response_materialize;
 pub mod response_rewrite;
 pub mod upload;

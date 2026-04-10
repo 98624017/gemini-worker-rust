@@ -61,11 +61,19 @@ pub struct BlobRuntime {
     inner: Arc<BlobRuntimeInner>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BlobRuntimeStatsSnapshot {
+    pub spill_count: u64,
+    pub spill_bytes_total: u64,
+}
+
 #[derive(Debug)]
 struct BlobRuntimeInner {
     cfg: BlobRuntimeConfig,
     next_id: AtomicU64,
     global_hot_bytes: AtomicU64,
+    spill_count: AtomicU64,
+    spill_bytes_total: AtomicU64,
 }
 
 impl BlobRuntime {
@@ -75,6 +83,8 @@ impl BlobRuntime {
                 cfg,
                 next_id: AtomicU64::new(1),
                 global_hot_bytes: AtomicU64::new(0),
+                spill_count: AtomicU64::new(0),
+                spill_bytes_total: AtomicU64::new(0),
             }),
         }
     }
@@ -85,7 +95,9 @@ impl BlobRuntime {
         let storage = if self.try_inline_reserve(size_bytes) {
             BlobStorage::Inline(Bytes::from(bytes))
         } else {
-            BlobStorage::Spilled(self.write_spilled_bytes(id, &bytes).await?)
+            let spilled_path = self.write_spilled_bytes(id, &bytes).await?;
+            self.record_spill(size_bytes);
+            BlobStorage::Spilled(spilled_path)
         };
 
         Ok(self.build_handle(id, mime_type, size_bytes, storage))
@@ -139,6 +151,7 @@ impl BlobRuntime {
             file.flush().await?;
             let path = spill_path.expect("spill path must exist");
             let metadata = fs::metadata(&path).await?;
+            self.record_spill(metadata.len());
             return Ok(self.build_handle(
                 id,
                 mime_type,
@@ -152,7 +165,9 @@ impl BlobRuntime {
         let storage = if self.try_inline_reserve(size_bytes) {
             BlobStorage::Inline(Bytes::from(buffer))
         } else {
-            BlobStorage::Spilled(self.write_spilled_bytes(id, &buffer).await?)
+            let spilled_path = self.write_spilled_bytes(id, &buffer).await?;
+            self.record_spill(size_bytes);
+            BlobStorage::Spilled(spilled_path)
         };
 
         Ok(self.build_handle(id, mime_type, size_bytes, storage))
@@ -199,6 +214,13 @@ impl BlobRuntime {
 
     pub async fn is_spilled(&self, handle: &BlobHandle) -> bool {
         matches!(handle.storage(), BlobStorage::Spilled(_))
+    }
+
+    pub fn stats_snapshot(&self) -> BlobRuntimeStatsSnapshot {
+        BlobRuntimeStatsSnapshot {
+            spill_count: self.inner.spill_count.load(Ordering::Relaxed),
+            spill_bytes_total: self.inner.spill_bytes_total.load(Ordering::Relaxed),
+        }
     }
 
     fn build_handle(
@@ -256,6 +278,13 @@ impl BlobRuntime {
         self.inner
             .global_hot_bytes
             .fetch_sub(size_bytes, Ordering::AcqRel);
+    }
+
+    fn record_spill(&self, size_bytes: u64) {
+        self.inner.spill_count.fetch_add(1, Ordering::Relaxed);
+        self.inner
+            .spill_bytes_total
+            .fetch_add(size_bytes, Ordering::Relaxed);
     }
 
     async fn write_spilled_bytes(&self, id: u64, bytes: &[u8]) -> Result<PathBuf> {

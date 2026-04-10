@@ -21,15 +21,22 @@ use crate::request_encode::encode_request_body;
 use crate::request_materialize::{
     RequestMaterializeServices, materialize_request_images_with_services,
 };
+use crate::request_rewrite::rewrite_aiapidev_request_body;
 use crate::response_materialize::finalize_output_urls;
 use crate::response_rewrite::{
-    OutputMode, keep_largest_inline_image, normalize_special_markdown_image_response,
-    remove_thought_signatures,
+    OutputMode, keep_largest_inline_image, normalize_aiapidev_task_response,
+    normalize_special_markdown_image_response, remove_thought_signatures,
 };
 use crate::upload::Uploader;
-use crate::upstream::{ResolvedUpstream, resolve_upstream_from_header_map};
+use crate::upstream::{
+    ResolvedUpstream, is_aiapidev_base_url, resolve_upstream_from_header_map,
+    rewrite_aiapidev_model_path,
+};
 
 const MAX_REQUEST_BODY_BYTES: usize = 20 * 1024 * 1024;
+const AIAPIDEV_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const AIAPIDEV_MAX_POLL_TIME: Duration = Duration::from_secs(300);
+const AIAPIDEV_MAX_CONSECUTIVE_POLL_FAILURES: usize = 5;
 
 #[derive(Clone)]
 struct AppState {
@@ -145,14 +152,14 @@ async fn model_action(
         )
             .into_response();
         return finalize_admin_response(
-                &state,
-                response,
-                AdminLogEntry {
-                    created_at,
-                    method: request_method,
-                    path: request_path,
-                    query: request_query,
-                    remote_addr,
+            &state,
+            response,
+            AdminLogEntry {
+                created_at,
+                method: request_method,
+                path: request_path,
+                query: request_query,
+                remote_addr,
                 is_stream: false,
                 status_code: StatusCode::NOT_FOUND.as_u16(),
                 duration_ms: started_at.elapsed().as_millis() as i64,
@@ -218,6 +225,7 @@ async fn forward_gemini_request(
     let body: Value =
         serde_json::from_slice(&request_body).map_err(|err| anyhow!("invalid json body: {err}"))?;
     let output_mode = get_output_mode(request_query.as_deref(), &body);
+    let is_aiapidev = is_aiapidev_base_url(&resolved.base_url);
 
     let admin_stats = state.admin.as_ref().map(|admin| admin.stats());
     let cache_observer = admin_stats.map(|stats| {
@@ -229,6 +237,55 @@ async fn forward_gemini_request(
             }
         }) as Arc<dyn Fn(&str, bool) + Send + Sync>
     });
+
+    if is_aiapidev {
+        let rewritten_body = rewrite_aiapidev_request_body(body);
+        let target_path = rewrite_aiapidev_model_path(&target_path);
+        let request_upstream = if admin_enabled {
+            let request_upstream_bytes = serde_json::to_vec(&rewritten_body)?;
+            admin::maybe_sanitize_json_for_log(&request_upstream_bytes, true)
+        } else {
+            None
+        };
+        let response = handle_aiapidev_response(
+            &resolved,
+            &target_path,
+            request_query.as_deref(),
+            rewritten_body,
+            output_mode,
+            &state.upstream_client,
+            &state.image_client,
+            state.inline_data_fetch_service.as_ref(),
+            state.config.as_ref(),
+        )
+        .await;
+
+        let admin_entry = AdminLogEntry {
+            output_mode: match output_mode {
+                OutputMode::Base64 => "base64".to_string(),
+                OutputMode::Url => "url".to_string(),
+            },
+            request_raw: request_raw
+                .as_ref()
+                .map(|value| value.pretty.clone())
+                .unwrap_or_default(),
+            request_raw_images: request_raw
+                .as_ref()
+                .map(|value| value.image_urls.clone())
+                .unwrap_or_default(),
+            request_upstream: request_upstream
+                .as_ref()
+                .map(|value| value.pretty.clone())
+                .unwrap_or_default(),
+            request_upstream_images: request_upstream
+                .as_ref()
+                .map(|value| value.image_urls.clone())
+                .unwrap_or_default(),
+            status_code: response.status().as_u16(),
+            ..Default::default()
+        };
+        return Ok((response, admin_entry));
+    }
 
     let materialized = materialize_request_images_with_services(
         body,
@@ -375,7 +432,7 @@ async fn handle_non_stream_response(
             &mut final_json,
             blob_runtime,
             uploader,
-            &config.external_image_proxy_prefix,
+            config,
         )
         .await?;
     }
@@ -384,6 +441,282 @@ async fn handle_non_stream_response(
     *response.status_mut() = StatusCode::from_u16(status.as_u16())?;
     response.headers_mut().insert(CONTENT_TYPE, content_type);
     Ok(response)
+}
+
+async fn handle_aiapidev_response(
+    resolved: &ResolvedUpstream,
+    target_path: &str,
+    request_query: Option<&str>,
+    request_body: Value,
+    output_mode: OutputMode,
+    upstream_client: &reqwest::Client,
+    image_client: &reqwest::Client,
+    fetch_service: Option<&Arc<InlineDataUrlFetchService>>,
+    config: &Config,
+) -> Response {
+    let upstream_url = match build_upstream_url(&resolved.base_url, target_path, request_query) {
+        Ok(url) => url,
+        Err(err) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({"error": {"code": 502, "message": err.to_string()}})),
+            )
+                .into_response();
+        }
+    };
+    let create_response = upstream_client
+        .post(upstream_url)
+        .header(CONTENT_TYPE, "application/json")
+        .header("x-goog-api-key", resolved.api_key.clone())
+        .json(&request_body)
+        .send()
+        .await;
+
+    let create_response = match create_response {
+        Ok(response) => response,
+        Err(err) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({"error": {"code": 502, "message": err.to_string()}})),
+            )
+                .into_response();
+        }
+    };
+
+    if !create_response.status().is_success() {
+        return raw_reqwest_response(create_response).await;
+    }
+
+    let created_task: Value = match create_response.json().await {
+        Ok(body) => body,
+        Err(err) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({"error": {"code": 502, "message": err.to_string()}})),
+            )
+                .into_response();
+        }
+    };
+    let request_id = created_task
+        .get("requestId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(ToOwned::to_owned);
+    let Some(request_id) = request_id else {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({"error": {"code": 502, "message": "aiapidev task create response missing requestId"}})),
+        )
+            .into_response();
+    };
+
+    let task_body = match poll_aiapidev_task(upstream_client, resolved, &request_id).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+    let status = task_body
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    if status != "succeeded" {
+        let message = task_body
+            .get("errorMessage")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                task_body
+                    .get("errorCode")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .unwrap_or("aiapidev task failed");
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({"error": {"code": 502, "message": message}})),
+        )
+            .into_response();
+    }
+
+    let final_json = normalize_aiapidev_task_response(
+        task_body,
+        output_mode,
+        image_client,
+        fetch_service,
+        config,
+    )
+    .await;
+    let mut final_json = match final_json {
+        Ok(body) => body,
+        Err(err) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({"error": {"code": 502, "message": err.to_string()}})),
+            )
+                .into_response();
+        }
+    };
+    remove_thought_signatures(&mut final_json);
+    final_json = keep_largest_inline_image(final_json);
+
+    match serde_json::to_vec(&final_json) {
+        Ok(final_body) => {
+            let mut response = Response::new(Body::from(final_body));
+            *response.status_mut() = StatusCode::OK;
+            response
+                .headers_mut()
+                .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+            response
+        }
+        Err(err) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({"error": {"code": 502, "message": err.to_string()}})),
+        )
+            .into_response(),
+    }
+}
+
+async fn poll_aiapidev_task(
+    upstream_client: &reqwest::Client,
+    resolved: &ResolvedUpstream,
+    request_id: &str,
+) -> std::result::Result<Value, Response> {
+    let deadline = Instant::now() + AIAPIDEV_MAX_POLL_TIME;
+    let mut consecutive_failures = 0usize;
+    loop {
+        let task_path = format!("/v1beta/tasks/{request_id}");
+        let task_url = match build_upstream_url(&resolved.base_url, &task_path, None) {
+            Ok(url) => url,
+            Err(err) => {
+                return Err((
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({"error": {"code": 502, "message": err.to_string()}})),
+                )
+                    .into_response());
+            }
+        };
+        let response = upstream_client
+            .get(task_url)
+            .header("x-goog-api-key", resolved.api_key.clone())
+            .send()
+            .await;
+
+        let response = match response {
+            Ok(response) => response,
+            Err(err) => {
+                consecutive_failures += 1;
+                if consecutive_failures >= AIAPIDEV_MAX_CONSECUTIVE_POLL_FAILURES {
+                    return Err((
+                        StatusCode::BAD_GATEWAY,
+                        Json(json!({"error": {"code": 502, "message": err.to_string()}})),
+                    )
+                        .into_response());
+                }
+                if Instant::now() >= deadline {
+                    return Err((
+                        StatusCode::BAD_GATEWAY,
+                        Json(json!({"error": {"code": 502, "message": "aiapidev task poll timed out"}})),
+                    )
+                        .into_response());
+                }
+                tokio::time::sleep(AIAPIDEV_POLL_INTERVAL).await;
+                continue;
+            }
+        };
+
+        if !response.status().is_success() {
+            if !is_aiapidev_retryable_poll_status(response.status()) {
+                return Err(raw_reqwest_response(response).await);
+            }
+            consecutive_failures += 1;
+            if consecutive_failures >= AIAPIDEV_MAX_CONSECUTIVE_POLL_FAILURES {
+                return Err(raw_reqwest_response(response).await);
+            }
+            if Instant::now() >= deadline {
+                return Err((
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({"error": {"code": 502, "message": "aiapidev task poll timed out"}})),
+                )
+                    .into_response());
+            }
+            tokio::time::sleep(AIAPIDEV_POLL_INTERVAL).await;
+            continue;
+        }
+        consecutive_failures = 0;
+
+        let task_body: Value = match response.json().await {
+            Ok(body) => body,
+            Err(err) => {
+                return Err((
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({"error": {"code": 502, "message": err.to_string()}})),
+                )
+                    .into_response());
+            }
+        };
+        let status = task_body
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if is_aiapidev_terminal_status(&status) {
+            return Ok(task_body);
+        }
+        if Instant::now() >= deadline {
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                Json(json!({"error": {"code": 502, "message": "aiapidev task poll timed out"}})),
+            )
+                .into_response());
+        }
+        tokio::time::sleep(AIAPIDEV_POLL_INTERVAL).await;
+    }
+}
+
+fn is_aiapidev_terminal_status(status: &str) -> bool {
+    matches!(
+        status,
+        "succeeded" | "failed" | "error" | "cancelled" | "canceled" | "timeout"
+    )
+}
+
+fn is_aiapidev_retryable_poll_status(status: StatusCode) -> bool {
+    matches!(
+        status,
+        StatusCode::REQUEST_TIMEOUT
+            | StatusCode::TOO_EARLY
+            | StatusCode::TOO_MANY_REQUESTS
+            | StatusCode::INTERNAL_SERVER_ERROR
+            | StatusCode::BAD_GATEWAY
+            | StatusCode::SERVICE_UNAVAILABLE
+            | StatusCode::GATEWAY_TIMEOUT
+    )
+}
+
+async fn raw_reqwest_response(upstream_response: reqwest::Response) -> Response {
+    let status = upstream_response.status();
+    let content_type = upstream_response
+        .headers()
+        .get(CONTENT_TYPE)
+        .cloned()
+        .unwrap_or_else(|| HeaderValue::from_static("application/json"));
+    let body_bytes = match upstream_response.bytes().await {
+        Ok(body) => body,
+        Err(err) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({"error": {"code": 502, "message": err.to_string()}})),
+            )
+                .into_response();
+        }
+    };
+
+    let mut response = Response::new(Body::from(body_bytes));
+    *response.status_mut() =
+        StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    response.headers_mut().insert(CONTENT_TYPE, content_type);
+    response
 }
 
 async fn admin_root(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -418,7 +751,7 @@ async fn admin_stats_api(State(state): State<AppState>, headers: HeaderMap) -> R
         return response;
     }
     match state.admin.as_ref() {
-        Some(admin) => admin::admin_stats_response(admin),
+        Some(admin) => admin::admin_stats_response(admin, state.blob_runtime.stats_snapshot()),
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
@@ -558,4 +891,373 @@ fn query_contains_output_url(query: Option<&str>) -> bool {
         .into_iter()
         .flat_map(|query| form_urlencoded::parse(query.as_bytes()))
         .any(|(key, value)| key == "output" && value.trim().eq_ignore_ascii_case("url"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::to_bytes;
+    use axum::extract::{Path as AxumPath, State as AxumState};
+    use axum::http::header::AUTHORIZATION;
+    use axum::routing::{get, post};
+    use axum::{Json, Router};
+    use serde_json::json;
+    use std::collections::VecDeque;
+    use tokio::net::TcpListener;
+    use tokio::sync::Mutex;
+
+    #[derive(Clone, Default)]
+    struct AiapidevMockState {
+        create_paths: Arc<Mutex<Vec<String>>>,
+        create_headers: Arc<Mutex<Vec<HeaderMap>>>,
+        create_bodies: Arc<Mutex<Vec<Value>>>,
+        poll_headers: Arc<Mutex<Vec<HeaderMap>>>,
+        poll_responses: Arc<Mutex<VecDeque<MockPollResponse>>>,
+    }
+
+    #[derive(Clone)]
+    enum MockPollResponse {
+        Success(Value),
+        Error(StatusCode, Value),
+    }
+
+    impl Default for MockPollResponse {
+        fn default() -> Self {
+            Self::Success(json!({
+                "requestId": "req_demo",
+                "status": "succeeded",
+                "result": {
+                    "items": [{
+                        "url": "https://pub.example.com/result.png",
+                        "type": "image"
+                    }]
+                }
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn aiapidev_flow_polls_task_and_rewrites_result() {
+        let state = AiapidevMockState::default();
+        let app = Router::new()
+            .route(
+                "/v1beta/models/nanobananapro:generateContent",
+                post(mock_aiapidev_create),
+            )
+            .route("/v1beta/tasks/{request_id}", get(mock_aiapidev_poll))
+            .with_state(state.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let resolved = ResolvedUpstream {
+            base_url: format!("http://{address}"),
+            api_key: "special-key".to_string(),
+        };
+        let request_body = json!({
+            "contents": [{
+                "role": "user",
+                "parts": [{
+                    "text": "两张图片合并"
+                }]
+            }]
+        });
+
+        let response = handle_aiapidev_response(
+            &resolved,
+            "/v1beta/models/nanobananapro:generateContent",
+            Some("output=url"),
+            request_body,
+            OutputMode::Url,
+            &reqwest::Client::new(),
+            &reqwest::Client::new(),
+            None,
+            &crate::test_config(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json_body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            json_body["candidates"][0]["content"]["parts"][0]["inlineData"]["data"],
+            "https://pub.example.com/result.png"
+        );
+
+        let create_paths = state.create_paths.lock().await.clone();
+        assert_eq!(
+            create_paths.as_slice(),
+            ["/v1beta/models/nanobananapro:generateContent"]
+        );
+
+        let create_headers = state.create_headers.lock().await;
+        assert_eq!(
+            create_headers[0]
+                .get("x-goog-api-key")
+                .and_then(|value| value.to_str().ok()),
+            Some("special-key")
+        );
+        assert!(create_headers[0].get(AUTHORIZATION).is_none());
+        drop(create_headers);
+
+        let poll_headers = state.poll_headers.lock().await;
+        assert_eq!(
+            poll_headers[0]
+                .get("x-goog-api-key")
+                .and_then(|value| value.to_str().ok()),
+            Some("special-key")
+        );
+        assert!(poll_headers[0].get(AUTHORIZATION).is_none());
+        drop(poll_headers);
+
+        let create_bodies = state.create_bodies.lock().await;
+        assert_eq!(
+            create_bodies[0]["contents"][0]["parts"][0]["text"],
+            "两张图片合并"
+        );
+    }
+
+    #[tokio::test]
+    async fn aiapidev_poll_failure_preserves_upstream_status_and_body() {
+        let state = AiapidevMockState::default();
+        let app = Router::new()
+            .route(
+                "/v1beta/models/nanobananapro:generateContent",
+                post(mock_aiapidev_create),
+            )
+            .route(
+                "/v1beta/tasks/{request_id}",
+                get(mock_aiapidev_poll_rate_limited),
+            )
+            .with_state(state);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let resolved = ResolvedUpstream {
+            base_url: format!("http://{address}"),
+            api_key: "special-key".to_string(),
+        };
+
+        let response = handle_aiapidev_response(
+            &resolved,
+            "/v1beta/models/nanobananapro:generateContent",
+            None,
+            json!({"contents": []}),
+            OutputMode::Url,
+            &reqwest::Client::new(),
+            &reqwest::Client::new(),
+            None,
+            &crate::test_config(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json_body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json_body["error"]["message"], "rate limited");
+    }
+
+    #[tokio::test]
+    async fn aiapidev_poll_retryable_failure_recovers_before_failure_limit() {
+        let state = AiapidevMockState {
+            poll_responses: Arc::new(Mutex::new(VecDeque::from(vec![
+                MockPollResponse::Error(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    json!({"error": {"message": "rate limited once"}}),
+                ),
+                MockPollResponse::Error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    json!({"error": {"message": "upstream busy"}}),
+                ),
+                MockPollResponse::default(),
+            ]))),
+            ..Default::default()
+        };
+        let app = Router::new()
+            .route(
+                "/v1beta/models/nanobananapro:generateContent",
+                post(mock_aiapidev_create),
+            )
+            .route(
+                "/v1beta/tasks/{request_id}",
+                get(mock_aiapidev_poll_from_sequence),
+            )
+            .with_state(state.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let resolved = ResolvedUpstream {
+            base_url: format!("http://{address}"),
+            api_key: "special-key".to_string(),
+        };
+
+        let response = handle_aiapidev_response(
+            &resolved,
+            "/v1beta/models/nanobananapro:generateContent",
+            Some("output=url"),
+            json!({"contents": []}),
+            OutputMode::Url,
+            &reqwest::Client::new(),
+            &reqwest::Client::new(),
+            None,
+            &crate::test_config(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json_body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            json_body["candidates"][0]["content"]["parts"][0]["inlineData"]["data"],
+            "https://pub.example.com/result.png"
+        );
+        assert_eq!(state.poll_headers.lock().await.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn aiapidev_poll_returns_last_retryable_response_after_five_failures() {
+        let state = AiapidevMockState {
+            poll_responses: Arc::new(Mutex::new(VecDeque::from(vec![
+                MockPollResponse::Error(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    json!({"error": {"message": "rate limited 1"}}),
+                ),
+                MockPollResponse::Error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    json!({"error": {"message": "busy 2"}}),
+                ),
+                MockPollResponse::Error(
+                    StatusCode::BAD_GATEWAY,
+                    json!({"error": {"message": "gateway 3"}}),
+                ),
+                MockPollResponse::Error(
+                    StatusCode::GATEWAY_TIMEOUT,
+                    json!({"error": {"message": "timeout 4"}}),
+                ),
+                MockPollResponse::Error(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    json!({"error": {"message": "rate limited 5"}}),
+                ),
+            ]))),
+            ..Default::default()
+        };
+        let app = Router::new()
+            .route(
+                "/v1beta/models/nanobananapro:generateContent",
+                post(mock_aiapidev_create),
+            )
+            .route(
+                "/v1beta/tasks/{request_id}",
+                get(mock_aiapidev_poll_from_sequence),
+            )
+            .with_state(state.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let resolved = ResolvedUpstream {
+            base_url: format!("http://{address}"),
+            api_key: "special-key".to_string(),
+        };
+
+        let response = handle_aiapidev_response(
+            &resolved,
+            "/v1beta/models/nanobananapro:generateContent",
+            None,
+            json!({"contents": []}),
+            OutputMode::Url,
+            &reqwest::Client::new(),
+            &reqwest::Client::new(),
+            None,
+            &crate::test_config(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json_body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json_body["error"]["message"], "rate limited 5");
+        assert_eq!(state.poll_headers.lock().await.len(), 5);
+    }
+
+    async fn mock_aiapidev_create(
+        AxumState(state): AxumState<AiapidevMockState>,
+        headers: HeaderMap,
+        request: Request,
+    ) -> Json<Value> {
+        let path = request.uri().path().to_string();
+        let body = to_bytes(request.into_body(), usize::MAX).await.unwrap();
+        let parsed: Value = serde_json::from_slice(&body).unwrap();
+
+        state.create_paths.lock().await.push(path);
+        state.create_headers.lock().await.push(headers);
+        state.create_bodies.lock().await.push(parsed);
+
+        Json(json!({
+            "requestId": "req_demo",
+            "status": "created"
+        }))
+    }
+
+    async fn mock_aiapidev_poll(
+        AxumState(state): AxumState<AiapidevMockState>,
+        AxumPath(_request_id): AxumPath<String>,
+        headers: HeaderMap,
+    ) -> Json<Value> {
+        state.poll_headers.lock().await.push(headers);
+        Json(json!({
+            "requestId": "req_demo",
+            "status": "succeeded",
+            "result": {
+                "items": [{
+                    "url": "https://pub.example.com/result.png",
+                    "type": "image"
+                }]
+            }
+        }))
+    }
+
+    async fn mock_aiapidev_poll_rate_limited(
+        AxumState(state): AxumState<AiapidevMockState>,
+        AxumPath(_request_id): AxumPath<String>,
+        headers: HeaderMap,
+    ) -> (StatusCode, Json<Value>) {
+        state.poll_headers.lock().await.push(headers);
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({
+                "error": {
+                    "message": "rate limited"
+                }
+            })),
+        )
+    }
+
+    async fn mock_aiapidev_poll_from_sequence(
+        AxumState(state): AxumState<AiapidevMockState>,
+        AxumPath(_request_id): AxumPath<String>,
+        headers: HeaderMap,
+    ) -> Response {
+        state.poll_headers.lock().await.push(headers);
+        let next = state
+            .poll_responses
+            .lock()
+            .await
+            .pop_front()
+            .unwrap_or_default();
+        match next {
+            MockPollResponse::Success(body) => Json(body).into_response(),
+            MockPollResponse::Error(status, body) => (status, Json(body)).into_response(),
+        }
+    }
 }

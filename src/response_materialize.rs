@@ -6,6 +6,7 @@ use base64::engine::general_purpose::STANDARD;
 use serde_json::Value;
 
 use crate::blob_runtime::BlobRuntime;
+use crate::config::Config;
 use crate::upload::{Uploader, wrap_external_proxy_url};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -18,10 +19,11 @@ pub async fn finalize_output_urls(
     body: &mut Value,
     runtime: &BlobRuntime,
     uploader: &Uploader,
-    external_proxy_prefix: &str,
+    config: &Config,
 ) -> Result<()> {
     let entries = scan_inline_data_base64_entries(body);
     let mut replacements = HashMap::new();
+    let external_proxy_prefix = config.resolved_external_image_proxy_prefix();
 
     for entry in entries {
         let Ok(image_bytes) = STANDARD.decode(entry.data.as_bytes()) else {
@@ -42,10 +44,12 @@ pub async fn finalize_output_urls(
             continue;
         };
 
-        let final_url = if external_proxy_prefix.trim().is_empty() {
+        let final_url = if !should_proxy_standard_output_url(config, &upload_result.provider)
+            || external_proxy_prefix.trim().is_empty()
+        {
             upload_result.url
         } else {
-            wrap_external_proxy_url(external_proxy_prefix, &upload_result.url)
+            wrap_external_proxy_url(&external_proxy_prefix, &upload_result.url)
         };
         replacements.insert(entry, final_url);
     }
@@ -127,4 +131,8 @@ fn is_url_like(value: &str) -> bool {
     value.starts_with("http://")
         || value.starts_with("https://")
         || value.starts_with("/proxy/image")
+}
+
+fn should_proxy_standard_output_url(config: &Config, provider: &str) -> bool {
+    config.proxy_standard_output_urls && !provider.eq_ignore_ascii_case("r2")
 }

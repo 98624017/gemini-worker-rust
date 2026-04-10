@@ -27,8 +27,10 @@ fn admin_log_collects_proxy_and_http_image_urls() {
 
 #[test]
 fn maybe_sanitize_json_for_log_skips_when_admin_is_disabled() {
-    let sanitized =
-        rust_sync_proxy::admin::maybe_sanitize_json_for_log(br#"{"inlineData":{"data":"AQID"}}"#, false);
+    let sanitized = rust_sync_proxy::admin::maybe_sanitize_json_for_log(
+        br#"{"inlineData":{"data":"AQID"}}"#,
+        false,
+    );
     assert!(sanitized.is_none());
 }
 
@@ -93,7 +95,10 @@ async fn admin_stats_track_model_requests() {
         },
     );
 
-    let response = rust_sync_proxy::admin::admin_stats_response(&admin);
+    let response = rust_sync_proxy::admin::admin_stats_response(
+        &admin,
+        rust_sync_proxy::blob_runtime::BlobRuntimeStatsSnapshot::default(),
+    );
     assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -102,11 +107,32 @@ async fn admin_stats_track_model_requests() {
 }
 
 #[tokio::test]
+async fn admin_stats_include_spill_metrics() {
+    let admin = rust_sync_proxy::admin::AdminState::new("pw".to_string());
+    let response = rust_sync_proxy::admin::admin_stats_response(
+        &admin,
+        rust_sync_proxy::blob_runtime::BlobRuntimeStatsSnapshot {
+            spill_count: 3,
+            spill_bytes_total: 99,
+        },
+    );
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["spillCount"], 3);
+    assert_eq!(json["spillBytesTotal"], 99);
+}
+
+#[tokio::test]
 async fn admin_logs_page_contains_chartjs_and_theme_toggle() {
     let html = fetch_admin_logs_page_html().await;
 
     // Verify Chart.js is inlined
-    assert!(html.contains("Chart"), "HTML should contain inlined Chart.js");
+    assert!(
+        html.contains("Chart"),
+        "HTML should contain inlined Chart.js"
+    );
 
     // Verify theme toggle exists
     assert!(

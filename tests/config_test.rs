@@ -2,19 +2,22 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 #[test]
-fn defaults_match_go_proxy_expectations() {
+fn defaults_match_runtime_expectations() {
     let cfg = rust_sync_proxy::config::Config::from_env_map(&HashMap::new()).unwrap();
     assert_eq!(cfg.port, 8787);
     assert_eq!(cfg.upstream_base_url, "https://magic666.top");
     assert_eq!(cfg.image_host_mode.as_str(), "legacy");
     assert_eq!(cfg.slow_log_threshold, Duration::from_millis(100_000));
     assert_eq!(cfg.image_fetch_timeout, Duration::from_millis(20_000));
-    assert_eq!(cfg.upload_timeout, Duration::from_millis(10_000));
+    assert_eq!(cfg.upload_timeout, Duration::from_millis(20_000));
     assert_eq!(
         cfg.image_tls_handshake_timeout,
         Duration::from_millis(15_000)
     );
-    assert_eq!(cfg.upload_tls_handshake_timeout, Duration::from_millis(10_000));
+    assert_eq!(
+        cfg.upload_tls_handshake_timeout,
+        Duration::from_millis(10_000)
+    );
     assert!(!cfg.image_fetch_insecure_skip_verify);
     assert!(!cfg.upload_insecure_skip_verify);
     assert_eq!(
@@ -73,6 +76,38 @@ fn background_fetch_wait_timeout_defaults_to_image_fetch_timeout() {
     assert_eq!(
         cfg.inline_data_url_background_fetch_wait_timeout,
         Duration::from_millis(3456)
+    );
+}
+
+#[test]
+fn public_base_url_can_fallback_to_legacy_proxy_prefix() {
+    let env = HashMap::from([(
+        "PUBLIC_BASE_URL".to_string(),
+        "https://proxy.example.com/".to_string(),
+    )]);
+    let cfg = rust_sync_proxy::config::Config::from_env_map(&env).unwrap();
+    assert_eq!(
+        cfg.resolved_external_image_proxy_prefix(),
+        "https://proxy.example.com/proxy/image?url="
+    );
+}
+
+#[test]
+fn external_image_proxy_prefix_still_overrides_public_base_url() {
+    let env = HashMap::from([
+        (
+            "PUBLIC_BASE_URL".to_string(),
+            "https://proxy.example.com".to_string(),
+        ),
+        (
+            "EXTERNAL_IMAGE_PROXY_PREFIX".to_string(),
+            "https://external.example.com/fetch?url=".to_string(),
+        ),
+    ]);
+    let cfg = rust_sync_proxy::config::Config::from_env_map(&env).unwrap();
+    assert_eq!(
+        cfg.resolved_external_image_proxy_prefix(),
+        "https://external.example.com/fetch?url="
     );
 }
 

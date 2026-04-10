@@ -9,7 +9,7 @@ const DEFAULT_UPSTREAM_BASE_URL: &str = "https://magic666.top";
 const DEFAULT_PORT: u16 = 8787;
 const DEFAULT_SLOW_LOG_THRESHOLD_MS: u64 = 100_000;
 const DEFAULT_IMAGE_FETCH_TIMEOUT_MS: u64 = 20_000;
-const DEFAULT_UPLOAD_TIMEOUT_MS: u64 = 10_000;
+const DEFAULT_UPLOAD_TIMEOUT_MS: u64 = 20_000;
 const DEFAULT_IMAGE_TLS_HANDSHAKE_TIMEOUT_MS: u64 = 15_000;
 const DEFAULT_UPLOAD_TLS_HANDSHAKE_TIMEOUT_MS: u64 = 10_000;
 const DEFAULT_INSTANCE_MEMORY_BYTES: u64 = 2 * 1024 * 1024 * 1024;
@@ -80,12 +80,11 @@ impl Config {
     }
 
     pub fn from_env_map(env_map: &HashMap<String, String>) -> Result<Self> {
-        let blob_budget_defaults = blob_budget_defaults_for_memory(
-            parse_non_negative_u64_with_default(
+        let blob_budget_defaults =
+            blob_budget_defaults_for_memory(parse_non_negative_u64_with_default(
                 env_map.get("INSTANCE_MEMORY_BYTES"),
                 DEFAULT_INSTANCE_MEMORY_BYTES,
-            ),
-        );
+            ));
         let port = env_map
             .get("PORT")
             .map(String::as_str)
@@ -186,8 +185,8 @@ impl Config {
             ),
             inline_data_url_background_fetch_total_timeout: Duration::from_millis(
                 parse_non_negative_u64_with_default(
-                env_map.get("INLINE_DATA_URL_BACKGROUND_FETCH_TOTAL_TIMEOUT_MS"),
-                DEFAULT_INLINE_DATA_URL_BACKGROUND_FETCH_TOTAL_TIMEOUT_MS,
+                    env_map.get("INLINE_DATA_URL_BACKGROUND_FETCH_TOTAL_TIMEOUT_MS"),
+                    DEFAULT_INLINE_DATA_URL_BACKGROUND_FETCH_TOTAL_TIMEOUT_MS,
                 ),
             ),
             inline_data_url_background_fetch_max_inflight: parse_non_negative_usize_with_default(
@@ -255,6 +254,21 @@ impl Config {
 
         validate(&config)?;
         Ok(config)
+    }
+
+    pub fn resolved_external_image_proxy_prefix(&self) -> String {
+        let external_prefix = self.external_image_proxy_prefix.trim();
+        if !external_prefix.is_empty() {
+            return external_prefix.to_string();
+        }
+
+        let public_base_url = self.public_base_url.trim().trim_end_matches('/');
+        if public_base_url.is_empty() {
+            return String::new();
+        }
+
+        // 兼容旧版容器配置，避免只保留 PUBLIC_BASE_URL 时忘记同步改环境变量名。
+        format!("{public_base_url}/proxy/image?url=")
     }
 }
 

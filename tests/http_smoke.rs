@@ -24,11 +24,10 @@ async fn unknown_route_returns_404() {
 
 #[tokio::test]
 async fn generate_content_output_url_smoke_still_passes_after_blob_runtime_refactor() {
-    let upstream = Router::new()
-        .route(
-            "/v1beta/models/demo:generateContent",
-            post(mock_generate_content),
-        );
+    let upstream = Router::new().route(
+        "/v1beta/models/demo:generateContent",
+        post(mock_generate_content),
+    );
     let upstream_addr = spawn_server(upstream).await;
 
     let upload_server = Router::new().route("/uguu", post(mock_upload));

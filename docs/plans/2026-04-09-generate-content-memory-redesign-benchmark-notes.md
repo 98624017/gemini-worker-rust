@@ -1,7 +1,7 @@
 # generateContent BlobRuntime Benchmark Notes
 
 日期: 2026-04-09
-状态: 已记录
+状态: 已更新
 
 ## 观测清单
 
@@ -34,17 +34,16 @@ timeout 60s /usr/bin/time -v ~/.cargo/bin/cargo test --test http_forwarding_test
 - `Elapsed time`: `0.11s`
 - `Exit status`: `0`
 
-## 当前缺口
+## 当前进展
 
-- **spill 次数 / spill 总字节**：当前代码还没有把这些值暴露成计数器或日志，暂时无法在 benchmark 里自动采集
-- **小图 P95**：仓库里没有现成负载脚本，本次未跑持续压测
-- **大图混合场景吞吐**：同上，本次未跑真实并发负载
+- **spill 次数 / spill 总字节**：已补 `blob_runtime` 级别计数，并通过 `/admin/api/stats` 输出 `spillCount`、`spillBytesTotal`
+- **持续压测脚本**：已补 `scripts/benchmark_docker_mock_upstream.py`
+- **真实链路边界**：脚本当前采用“请求侧真实图片 URL + mock 上游 + 真实图床上传”
 
-如果要补齐这些指标，建议下一步增加：
+当前仍未补：
 
-- `blob_runtime` 级别的 `spill_count`、`spill_bytes_total` 原子计数器
-- 一条固定图片集的本地压测脚本，至少覆盖小图纯流量和大小图混合流量
-- benchmark 输出统一落盘，避免手工抄数
+- **小图 P95**：需要用真实图片 URL 集合实际跑一轮
+- **大图混合场景吞吐**：同上，当前只是工具已就位
 
 ## 默认预算
 
@@ -84,5 +83,5 @@ timeout 60s /usr/bin/time -v ~/.cargo/bin/cargo test --test http_forwarding_test
 ## 推荐复测顺序
 
 1. 先跑一次当前的 `time -v` 冒烟，确认链路与 RSS 基线正常
-2. 再补一条小图循环压测，记录 P95
-3. 最后补大小图混合压测，观察 spill 与 RSS 是否同步受控
+2. 再用 `scripts/benchmark_docker_mock_upstream.py` 跑一条真实图片 URL 压测，记录 P95
+3. 最后切换不同 `MALLOC_CONF` 档位，比较 RSS 回落和 `spill` 行为

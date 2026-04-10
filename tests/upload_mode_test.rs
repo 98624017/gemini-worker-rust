@@ -1,8 +1,7 @@
 use anyhow::{Result, anyhow};
 
 use rust_sync_proxy::upload::{
-    BoxUploadFuture, ImageHostMode, UploadResult, upload_image_with_mode,
-    wrap_external_proxy_url,
+    BoxUploadFuture, ImageHostMode, UploadResult, upload_image_with_mode, wrap_external_proxy_url,
 };
 
 #[tokio::test]

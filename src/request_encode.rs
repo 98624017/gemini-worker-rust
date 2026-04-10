@@ -38,9 +38,15 @@ pub async fn encode_request_body(
 
     let mut writer = writer;
     let mut content_length = 0_u64;
-    let write_result =
-        write_json_value(&mut writer, "", &request, &replacements, runtime, &mut content_length)
-            .await;
+    let write_result = write_json_value(
+        &mut writer,
+        "",
+        &request,
+        &replacements,
+        runtime,
+        &mut content_length,
+    )
+    .await;
 
     match write_result {
         Ok(()) => {

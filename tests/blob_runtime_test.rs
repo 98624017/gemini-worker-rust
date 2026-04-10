@@ -51,3 +51,50 @@ async fn blob_runtime_spills_large_blob_to_disk() {
 
     assert!(runtime.is_spilled(&handle).await);
 }
+
+#[tokio::test]
+async fn blob_runtime_records_spill_count_and_bytes() {
+    let runtime = test_blob_runtime(1024);
+
+    let first = runtime
+        .store_bytes(vec![7; 4096], "image/png".into())
+        .await
+        .unwrap();
+    let second = runtime
+        .store_bytes(vec![8; 2048], "image/png".into())
+        .await
+        .unwrap();
+
+    assert!(runtime.is_spilled(&first).await);
+    assert!(runtime.is_spilled(&second).await);
+
+    let stats = runtime.stats_snapshot();
+    assert_eq!(stats.spill_count, 2);
+    assert_eq!(stats.spill_bytes_total, 4096 + 2048);
+}
+
+#[tokio::test]
+async fn blob_runtime_does_not_record_spill_when_spill_write_fails() {
+    let guard = tempfile::NamedTempFile::new().unwrap();
+    let bad_dir = guard.path().to_path_buf();
+    let runtime = BlobRuntime::new(BlobRuntimeConfig {
+        inline_max_bytes: 1024,
+        request_hot_budget_bytes: 24 * 1024 * 1024,
+        global_hot_budget_bytes: 384 * 1024 * 1024,
+        spill_dir: bad_dir,
+    });
+
+    let err = runtime
+        .store_bytes(vec![7; 4096], "image/png".into())
+        .await
+        .unwrap_err();
+
+    let stats = runtime.stats_snapshot();
+    assert_eq!(stats.spill_count, 0);
+    assert_eq!(stats.spill_bytes_total, 0);
+    assert!(
+        err.to_string().contains("Not a directory")
+            || err.to_string().contains("not a directory")
+            || err.to_string().contains("os error")
+    );
+}

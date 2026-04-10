@@ -201,28 +201,20 @@ async fn mock_legacy_upload(
     _body: Bytes,
 ) -> Json<Value> {
     *state.upload_count.lock().await += 1;
-    state
-        .upload_content_types
-        .lock()
-        .await
-        .push(
-            headers
-                .get(CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok())
-                .unwrap_or_default()
-                .to_string(),
-        );
-    state
-        .upload_user_agents
-        .lock()
-        .await
-        .push(
-            headers
-                .get(USER_AGENT)
-                .and_then(|value| value.to_str().ok())
-                .unwrap_or_default()
-                .to_string(),
-        );
+    state.upload_content_types.lock().await.push(
+        headers
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string(),
+    );
+    state.upload_user_agents.lock().await.push(
+        headers
+            .get(USER_AGENT)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string(),
+    );
 
     Json(json!({
         "success": true,

@@ -2,6 +2,7 @@ use anyhow::Result;
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 
+use rust_sync_proxy::allocator::compiled_allocator_name;
 use rust_sync_proxy::build_router;
 use rust_sync_proxy::config::Config;
 
@@ -18,6 +19,7 @@ async fn main() -> Result<()> {
     let listener = TcpListener::bind(&address).await?;
 
     tracing::info!("starting rust sync proxy on {}", address);
+    tracing::info!("compiled allocator: {}", compiled_allocator_name());
     axum::serve(listener, build_router(config)).await?;
     Ok(())
 }

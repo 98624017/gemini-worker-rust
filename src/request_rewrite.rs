@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, anyhow};
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::blob_runtime::{BlobRuntime, BlobRuntimeConfig};
 use crate::cache::InlineDataUrlFetchService;
@@ -61,10 +61,7 @@ pub fn scan_inline_data_urls(body: &Value) -> Result<InlineDataScan> {
     })
 }
 
-pub async fn rewrite_request_inline_data(
-    body: Value,
-    services: &RewriteServices,
-) -> Result<Value> {
+pub async fn rewrite_request_inline_data(body: Value, services: &RewriteServices) -> Result<Value> {
     let scan = scan_inline_data_urls(&body)?;
     if scan.total_refs == 0 {
         return Ok(body);
@@ -99,6 +96,118 @@ pub async fn rewrite_request_inline_data(
     Ok(serde_json::from_slice(&bytes)?)
 }
 
+pub fn rewrite_aiapidev_request_body(mut body: Value) -> Value {
+    strip_output_fields(&mut body);
+    rewrite_aiapidev_value(body, "")
+}
+
+fn rewrite_aiapidev_value(value: Value, path: &str) -> Value {
+    match value {
+        Value::Object(map) => rewrite_aiapidev_object(map, path),
+        Value::Array(items) => Value::Array(
+            items
+                .into_iter()
+                .enumerate()
+                .map(|(index, item)| rewrite_aiapidev_value(item, &format!("{path}/{index}")))
+                .collect(),
+        ),
+        primitive => primitive,
+    }
+}
+
+fn rewrite_aiapidev_object(map: Map<String, Value>, path: &str) -> Value {
+    if let Some(file_data) = inline_data_to_file_data(&map) {
+        let mut out = Map::new();
+        out.insert("file_data".to_string(), file_data);
+        return Value::Object(out);
+    }
+
+    let mut out = Map::new();
+
+    if path.starts_with("/contents/") {
+        if let Some(role) = map.get("role").cloned() {
+            out.insert(
+                "role".to_string(),
+                rewrite_aiapidev_value(role, &format!("{path}/role")),
+            );
+        }
+        if let Some(parts) = map.get("parts").cloned() {
+            out.insert(
+                "parts".to_string(),
+                rewrite_aiapidev_value(parts, &format!("{path}/parts")),
+            );
+        }
+    }
+
+    for (key, child) in map {
+        if path.starts_with("/contents/") && matches!(key.as_str(), "role" | "parts") {
+            continue;
+        }
+        let rewritten_key = rewrite_aiapidev_key(&key);
+        let child_path = format!("{path}/{}", escape_json_pointer_token(&rewritten_key));
+        out.insert(rewritten_key, rewrite_aiapidev_value(child, &child_path));
+    }
+
+    Value::Object(out)
+}
+
+fn inline_data_to_file_data(map: &Map<String, Value>) -> Option<Value> {
+    let inline_data = map
+        .get("inlineData")
+        .or_else(|| map.get("inline_data"))?
+        .as_object()?;
+    let data = inline_data.get("data")?.as_str()?;
+    if !is_http_url(data) {
+        return None;
+    }
+    let mime_type = inline_data
+        .get("mimeType")
+        .or_else(|| inline_data.get("mime_type"))
+        .and_then(Value::as_str)
+        .unwrap_or("image/png");
+
+    Some(serde_json::json!({
+        "file_uri": data,
+        "mime_type": mime_type,
+    }))
+}
+
+fn rewrite_aiapidev_key(key: &str) -> String {
+    match key {
+        "generationConfig" => "generation_config".to_string(),
+        "imageConfig" => "image_config".to_string(),
+        "responseModalities" => "response_modalities".to_string(),
+        "aspectRatio" => "aspect_ratio".to_string(),
+        "imageSize" => "image_size".to_string(),
+        _ => key.to_string(),
+    }
+}
+
+fn strip_output_fields(body: &mut Value) {
+    if let Some(map) = body.as_object_mut() {
+        map.remove("output");
+    }
+
+    for pointer in [
+        "/generationConfig/imageConfig",
+        "/generation_config/image_config",
+    ] {
+        if let Some(image_config) = body.pointer_mut(pointer) {
+            if let Some(map) = image_config.as_object_mut() {
+                map.remove("output");
+            }
+        }
+    }
+}
+
+fn escape_json_pointer_token(token: &str) -> String {
+    token.replace('~', "~0").replace('/', "~1")
+}
+
+fn is_http_url(value: &str) -> bool {
+    value.starts_with("http://") || value.starts_with("https://")
+}
+
 fn compat_blob_runtime() -> BlobRuntime {
     static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -111,6 +220,7 @@ fn compat_blob_runtime() -> BlobRuntime {
         inline_max_bytes: 8 * 1024 * 1024,
         request_hot_budget_bytes: 24 * 1024 * 1024,
         global_hot_budget_bytes: 384 * 1024 * 1024,
-        spill_dir: std::env::temp_dir().join(format!("rust-sync-proxy-request-rewrite-{unix_ms}-{id}")),
+        spill_dir: std::env::temp_dir()
+            .join(format!("rust-sync-proxy-request-rewrite-{unix_ms}-{id}")),
     })
 }

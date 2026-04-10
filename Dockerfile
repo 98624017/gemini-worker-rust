@@ -22,6 +22,7 @@ COPY --from=builder /app/target/release/rust-sync-proxy /usr/local/bin/rust-sync
 
 ENV PORT=8787
 ENV RUST_LOG=info
+ENV MALLOC_CONF=background_thread:true,dirty_decay_ms:500,muzzy_decay_ms:500
 
 EXPOSE 8787
 

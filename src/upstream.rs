@@ -75,6 +75,33 @@ pub fn resolve_upstream_from_header_map(
     resolve_upstream(pairs, default_base_url, default_api_key)
 }
 
+pub fn is_aiapidev_base_url(raw: &str) -> bool {
+    let Ok(parsed) = Url::parse(raw) else {
+        return false;
+    };
+    matches!(
+        parsed.host_str(),
+        Some("www.aiapidev.com") | Some("aiapidev.com")
+    )
+}
+
+pub fn rewrite_aiapidev_model_path(path: &str) -> String {
+    let Some(model_part) = path.strip_prefix("/v1beta/models/") else {
+        return path.to_string();
+    };
+    let Some((model, suffix)) = model_part.split_once(":generateContent") else {
+        return path.to_string();
+    };
+
+    let mapped_model = match model {
+        "gemini-3-pro-image-preview" => "nanobananapro",
+        "gemini-3.1-flash-image-preview" => "nanobanana2",
+        _ => model,
+    };
+
+    format!("/v1beta/models/{mapped_model}:generateContent{suffix}")
+}
+
 fn validate_http_base_url(raw: &str) -> Result<()> {
     let parsed = Url::parse(raw)?;
     if !matches!(parsed.scheme(), "http" | "https") {

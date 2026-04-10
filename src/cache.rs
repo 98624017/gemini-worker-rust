@@ -109,7 +109,9 @@ impl InlineDataUrlFetchService {
         allow_private_networks: bool,
     ) -> Option<Arc<Self>> {
         if config.inline_data_url_cache_dir.trim().is_empty()
-            && config.inline_data_url_background_fetch_total_timeout.is_zero()
+            && config
+                .inline_data_url_background_fetch_total_timeout
+                .is_zero()
             && config.inline_data_url_memory_cache_max_bytes == 0
         {
             return None;

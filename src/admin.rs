@@ -15,6 +15,8 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tokio::sync::Mutex;
 
+use crate::blob_runtime::BlobRuntimeStatsSnapshot;
+
 pub const ADMIN_MAX_BODY_BYTES_PER_ENTRY: usize = 64 * 1024;
 const ADMIN_LOG_CAPACITY: usize = 100;
 
@@ -75,6 +77,8 @@ struct AdminStatsPayload {
     error_requests: i64,
     total_duration_ms: i64,
     cache_hits: i64,
+    spill_count: u64,
+    spill_bytes_total: u64,
 }
 
 impl AdminState {
@@ -997,7 +1001,10 @@ fn dedup_strings(v: &mut Vec<String>) {
     });
 }
 
-pub fn admin_stats_response(state: &AdminState) -> Response {
+pub fn admin_stats_response(
+    state: &AdminState,
+    runtime_stats: BlobRuntimeStatsSnapshot,
+) -> Response {
     let stats = state.stats();
     // Relaxed: 统计快照，读端可接受最终一致。
     Json(AdminStatsPayload {
@@ -1005,6 +1012,8 @@ pub fn admin_stats_response(state: &AdminState) -> Response {
         error_requests: stats.error_requests.load(Ordering::Relaxed),
         total_duration_ms: stats.total_duration_ms.load(Ordering::Relaxed),
         cache_hits: stats.cache_hits.load(Ordering::Relaxed),
+        spill_count: runtime_stats.spill_count,
+        spill_bytes_total: runtime_stats.spill_bytes_total,
     })
     .into_response()
 }
@@ -1091,6 +1100,14 @@ fn redact_inline_data_and_collect_image_urls(root: &mut Value) -> Vec<String> {
                                     Value::String(format!("[base64 omitted len={}]", data.len())),
                                 );
                             }
+                        }
+                    }
+                }
+                if let Some(Value::Object(file_data)) = map.get_mut("file_data") {
+                    if let Some(Value::String(file_uri)) = file_data.get("file_uri") {
+                        let trimmed = file_uri.trim().to_string();
+                        if is_image_url(&trimmed) && seen.insert(trimmed.clone()) {
+                            urls.push(trimmed);
                         }
                     }
                 }

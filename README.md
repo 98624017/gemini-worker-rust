@@ -64,6 +64,25 @@ export UPSTREAM_API_KEY="your-upstream-key"
 ~/.cargo/bin/cargo build --release --locked
 ```
 
+## 默认 allocator
+
+- `Linux + GNU libc` 构建默认使用 `jemalloc`
+- 其他平台默认回退系统 allocator
+- 当前镜像默认注入：
+
+```bash
+MALLOC_CONF=background_thread:true,dirty_decay_ms:500,muzzy_decay_ms:500
+```
+
+这组参数的目的，是在保留一小段短时页复用窗口的同时，让大流量突刺后的 RSS
+更积极回落。
+
+如果你想覆盖默认值，可以在运行前自行导出：
+
+```bash
+export MALLOC_CONF="background_thread:true,dirty_decay_ms:100,muzzy_decay_ms:100"
+```
+
 ## 常用环境变量
 
 ### 核心
@@ -74,6 +93,9 @@ export UPSTREAM_API_KEY="your-upstream-key"
   默认 `https://magic666.top`
 - `UPSTREAM_API_KEY`
   必填；为空时请求返回 `401`
+- `MALLOC_CONF`
+  `jemalloc` 运行时参数；镜像默认
+  `background_thread:true,dirty_decay_ms:500,muzzy_decay_ms:500`
 
 ### 上游覆盖
 
@@ -90,12 +112,19 @@ export UPSTREAM_API_KEY="your-upstream-key"
 
 - `ALLOWED_PROXY_DOMAINS`
   逗号分隔；显式设置后会覆盖默认列表
+- `PUBLIC_BASE_URL`
+  兼容旧版容器；若 `EXTERNAL_IMAGE_PROXY_PREFIX` 为空，则自动回退为
+  `${PUBLIC_BASE_URL}/proxy/image?url=`
 - `EXTERNAL_IMAGE_PROXY_PREFIX`
-  非空时，把上传后的真实图片 URL 包装为 `${EXTERNAL_IMAGE_PROXY_PREFIX}<escaped-url>`
+  非空时优先使用；把图片 URL 包装为
+  `${EXTERNAL_IMAGE_PROXY_PREFIX}<escaped-url>`
+- `PROXY_STANDARD_OUTPUT_URLS`
+  默认开启；控制标准链路里 `legacy` / `r2_then_legacy` 回退到 `legacy`
+  时是否包装代理前缀
 - `SLOW_LOG_THRESHOLD_MS`
   默认 `100000`；`0` 表示关闭慢请求日志
 - `PROXY_SPECIAL_UPSTREAM_URLS`
-  默认开启；影响 Markdown 图片结果是否包装为 `EXTERNAL_IMAGE_PROXY_PREFIX`
+  默认开启；影响 Markdown / `aiapidev` 特殊上游结果是否包装代理前缀
 - `ADMIN_PASSWORD`
   非空时启用 admin 路由并要求 Basic Auth
 - `IMAGE_FETCH_TIMEOUT_MS`
@@ -135,7 +164,7 @@ export UPSTREAM_API_KEY="your-upstream-key"
   - `r2`
   - `r2_then_legacy`
 - `UPLOAD_TIMEOUT_MS`
-  默认 `10000`
+  默认 `20000`
 - `UPLOAD_TLS_HANDSHAKE_TIMEOUT_MS`
   默认 `10000`
 - `UPLOAD_INSECURE_SKIP_VERIFY`
@@ -172,10 +201,14 @@ R2 模式还需要：
 
 行为规则：
 
-- 若 `EXTERNAL_IMAGE_PROXY_PREFIX` 非空，则上传成功后统一返回 `EXTERNAL_IMAGE_PROXY_PREFIX + escaped(real_url)`
-- 若 `EXTERNAL_IMAGE_PROXY_PREFIX` 为空，则返回真实图床 URL
+- 代理前缀解析优先级：
+  `EXTERNAL_IMAGE_PROXY_PREFIX` > `${PUBLIC_BASE_URL}/proxy/image?url=`
+- 标准链路里，`legacy` 上传结果会在 `PROXY_STANDARD_OUTPUT_URLS=true` 时包装代理前缀
 - `r2` 成功后真实 URL 为 `R2_PUBLIC_BASE_URL/<objectKey>`
+- 标准链路里，`r2` 成功后永远直接返回
+  `R2_PUBLIC_BASE_URL/<objectKey>`，不会再套一层代理
 - `r2_then_legacy` 先尝试 R2，失败后回退 legacy
+- `aiapidev` / Markdown 特殊上游结果受 `PROXY_SPECIAL_UPSTREAM_URLS` 控制
 - 上传失败统一走 fail-open，保留原始 base64
 
 ## 示例
@@ -217,6 +250,22 @@ curl -sS \
   'http://127.0.0.1:8787/v1beta/models/demo:generateContent'
 ```
 
+### `aiapidev` 特殊兼容
+
+- 当请求头里的上游地址是 `https://www.aiapidev.com` 或 `https://aiapidev.com` 时，代理会走专用分支：
+  - `gemini-3-pro-image-preview -> nanobananapro`
+  - `gemini-3.1-flash-image-preview -> nanobanana2`
+  - 请求体里的图片 URL 会从 `inlineData` 改写成 `file_data.file_uri`
+  - 创建任务后会同步轮询 `/v1beta/tasks/{requestId}`，直到成功、失败或总超时
+  - 轮询遇到网络错误或 `408/425/429/500/502/503/504` 会按 1 秒间隔重试；连续失败 5 次会提前返回最后一次错误
+- 成功结果会统一改写回 Gemini 风格响应。
+- 若 `output=url` 开启，返回 URL 风格 `inlineData.data`；否则会下载结果图并转成 base64。
+- 该上游不提供真实 token 统计，但部分下游网关依赖 `usageMetadata` 触发按次计费，因此这里会返回**稳定占位值**：
+  - `promptTokenCount = 1024`
+  - `candidatesTokenCount = 1024`
+  - `totalTokenCount = 2048`
+- 这组值**不是上游真实计费数据**，只用于兼容下游按次计费触发逻辑，不能拿来做 token 对账。
+
 ## 验证
 
 跑 Rust 测试：
@@ -230,6 +279,34 @@ curl -sS \
 ```bash
 sed -n '1,240p' docs/plans/2026-04-09-generate-content-memory-redesign-benchmark-notes.md
 ```
+
+跑 Docker 压测脚本：
+
+```bash
+python3 scripts/benchmark_docker_mock_upstream.py \
+  --image rust-sync-proxy:jemalloc-test \
+  --image-url "https://example.com/7mb-a.png" \
+  --image-url "https://example.com/7mb-b.png" \
+  --image-url "https://example.com/7mb-c.png" \
+  --concurrency 2 \
+  --total-requests 4 \
+  --cooldown-seconds 30
+```
+
+这条脚本的边界是：
+
+- Docker 里跑 `rust-sync-proxy`
+- 请求侧使用 3 个真实图片 URL
+- 上游使用本地 mock
+- mock 上游每次返回 1 张约 `20MB` 的 base64 图片
+- `output=url` 上传继续走真实图床链路
+
+压测结果会落到 `benchmark-output/<timestamp>/`，包含：
+
+- `summary.json`
+- `rss-samples.csv`
+- `stats-samples.csv`
+- `requests.csv`
 
 跑 Go/Rust 对照：
 
@@ -245,6 +322,11 @@ GO_IMPL_ROOT=/path/to/go-implementation \
 - Markdown 图片归一化
 - `admin/api/stats` 可访问且输出一致
 
+当前 `/admin/api/stats` 还会额外输出：
+
+- `spillCount`
+- `spillBytesTotal`
+
 ## Docker
 
 构建镜像：
@@ -253,12 +335,36 @@ GO_IMPL_ROOT=/path/to/go-implementation \
 docker build -t rust-sync-proxy:local .
 ```
 
+一条命令跑 Docker 回归：
+
+```bash
+export AIAPIDEV_TEST_KEY="sk_xxx"
+python3 scripts/docker_aiapidev_regression.py --image rust-sync-proxy:local
+```
+
+这条脚本会依次验证：
+
+- 标准 `output=url` 容器链路
+- `aiapidev + output=url`
+- `aiapidev + base64`
+- `aiapidev` 坏图源失败场景
+
 运行容器：
 
 ```bash
 docker run --rm -p 8787:8787 \
   -e UPSTREAM_BASE_URL="https://magic666.top" \
   -e UPSTREAM_API_KEY="your-upstream-key" \
+  rust-sync-proxy:local
+```
+
+如果要覆盖默认 `jemalloc` 参数：
+
+```bash
+docker run --rm -p 8787:8787 \
+  -e UPSTREAM_BASE_URL="https://magic666.top" \
+  -e UPSTREAM_API_KEY="your-upstream-key" \
+  -e MALLOC_CONF="background_thread:true,dirty_decay_ms:100,muzzy_decay_ms:100" \
   rust-sync-proxy:local
 ```
 

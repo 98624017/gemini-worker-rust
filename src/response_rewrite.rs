@@ -1,8 +1,7 @@
-use std::sync::Arc;
-
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use serde_json::Value;
+use std::sync::Arc;
 
 use crate::cache::InlineDataUrlFetchService;
 use crate::config::Config;
@@ -27,6 +26,7 @@ pub async fn normalize_special_markdown_image_response(
     fetch_service: Option<&Arc<InlineDataUrlFetchService>>,
     config: &Config,
 ) -> anyhow::Result<Value> {
+    let external_proxy_prefix = config.resolved_external_image_proxy_prefix();
     if contains_inline_data(&body) {
         return Ok(body);
     }
@@ -45,10 +45,8 @@ pub async fn normalize_special_markdown_image_response(
 
     let inline_data = match output_mode {
         OutputMode::Url => {
-            let data = if config.proxy_special_upstream_urls
-                && !config.external_image_proxy_prefix.trim().is_empty()
-            {
-                wrap_external_proxy_url(&config.external_image_proxy_prefix, &image_url)
+            let data = if config.proxy_special_upstream_urls && !external_proxy_prefix.is_empty() {
+                wrap_external_proxy_url(&external_proxy_prefix, &image_url)
             } else {
                 image_url.clone()
             };
@@ -79,6 +77,69 @@ pub async fn normalize_special_markdown_image_response(
         *target = Value::Array(vec![serde_json::json!({"inlineData": inline_data})]);
     }
     Ok(body)
+}
+
+pub async fn normalize_aiapidev_task_response(
+    body: Value,
+    output_mode: OutputMode,
+    image_client: &reqwest::Client,
+    fetch_service: Option<&Arc<InlineDataUrlFetchService>>,
+    config: &Config,
+) -> anyhow::Result<Value> {
+    let external_proxy_prefix = config.resolved_external_image_proxy_prefix();
+    let image_urls = extract_aiapidev_image_urls(&body);
+    if image_urls.is_empty() {
+        return Err(anyhow::anyhow!(
+            "aiapidev task result did not contain image urls"
+        ));
+    }
+
+    let mut parts = Vec::with_capacity(image_urls.len());
+    for image_url in image_urls {
+        let inline_data = match output_mode {
+            OutputMode::Url => {
+                let data = if config.proxy_special_upstream_urls && !external_proxy_prefix.is_empty()
+                {
+                    wrap_external_proxy_url(&external_proxy_prefix, &image_url)
+                } else {
+                    image_url.clone()
+                };
+                serde_json::json!({
+                    "mimeType": guess_image_mime_type_from_url(&image_url),
+                    "data": data,
+                })
+            }
+            OutputMode::Base64 => {
+                let fetched = if let Some(fetch_service) = fetch_service {
+                    let fetched = fetch_service.fetch(&image_url).await?;
+                    crate::image_io::FetchedInlineData {
+                        mime_type: fetched.mime_type,
+                        bytes: fetched.bytes,
+                    }
+                } else {
+                    fetch_image_as_inline_data(image_client, &image_url, DEFAULT_MAX_IMAGE_BYTES)
+                        .await?
+                };
+                serde_json::json!({
+                    "mimeType": fetched.mime_type,
+                    "data": STANDARD.encode(fetched.bytes),
+                })
+            }
+        };
+        parts.push(serde_json::json!({"inlineData": inline_data}));
+    }
+
+    Ok(serde_json::json!({
+        "candidates": [{
+            "content": {
+                "role": "model",
+                "parts": parts,
+            },
+            "finishReason": "STOP",
+            "safetyRatings": []
+        }],
+        "usageMetadata": build_aiapidev_usage_metadata()
+    }))
 }
 
 pub fn remove_thought_signatures(node: &mut Value) {
@@ -141,6 +202,25 @@ fn extract_markdown_image_url(text: &str) -> Option<String> {
     None
 }
 
+fn extract_aiapidev_image_urls(body: &Value) -> Vec<String> {
+    body.pointer("/result/items")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            let item_type = item.get("type").and_then(Value::as_str).unwrap_or_default();
+            let url = item.get("url").and_then(Value::as_str)?;
+            if item_type.eq_ignore_ascii_case("image")
+                && (url.starts_with("http://") || url.starts_with("https://"))
+            {
+                Some(url.to_string())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 fn guess_image_mime_type_from_url(raw_url: &str) -> &'static str {
     let lower = raw_url.to_ascii_lowercase();
     if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
@@ -153,6 +233,14 @@ fn guess_image_mime_type_from_url(raw_url: &str) -> &'static str {
         return "image/gif";
     }
     "image/png"
+}
+
+fn build_aiapidev_usage_metadata() -> Value {
+    serde_json::json!({
+        "candidatesTokenCount": 1024,
+        "promptTokenCount": 1024,
+        "totalTokenCount": 2048,
+    })
 }
 
 pub fn keep_largest_inline_image(mut body: Value) -> Value {
