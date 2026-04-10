@@ -1,16 +1,27 @@
 use std::net::IpAddr;
 
 use anyhow::{Result, anyhow};
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
+use image::ImageFormat;
+use jpeg_encoder::{ColorType as JpegColorType, Encoder as JpegEncoder, SamplingFactor};
 use reqwest::header::CONTENT_TYPE;
 use url::Url;
 
 use crate::blob_runtime::{BlobHandle, BlobRuntime};
 
-pub const DEFAULT_MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+pub const DEFAULT_MAX_IMAGE_BYTES: usize = 35 * 1024 * 1024;
+pub const REQUEST_MAX_IMAGE_BYTES: usize = 15 * 1024 * 1024;
+pub const PNG_COMPRESSION_THRESHOLD_BYTES: usize = 15 * 1024 * 1024;
+const JPEG_QUALITY: u8 = 97;
 
 #[derive(Clone, Debug)]
 pub struct FetchedInlineData {
+    pub mime_type: String,
+    pub bytes: Bytes,
+}
+
+#[derive(Clone, Debug)]
+pub struct OptimizedImage {
     pub mime_type: String,
     pub bytes: Bytes,
 }
@@ -62,18 +73,27 @@ pub async fn fetch_image_as_inline_data_with_options(
             response.status()
         ));
     }
+    if let Some(content_length) = response.content_length() {
+        enforce_max_size_u64(content_length, max_image_bytes)?;
+    }
 
     let content_type = response
         .headers()
         .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
-    let bytes = response.bytes().await?;
-    enforce_max_size(bytes.len(), max_image_bytes)?;
+    let mut total_bytes = 0_usize;
+    let mut bytes = BytesMut::new();
+    let mut response = response;
+    while let Some(chunk) = response.chunk().await? {
+        total_bytes += chunk.len();
+        enforce_max_size(total_bytes, max_image_bytes)?;
+        bytes.extend_from_slice(&chunk);
+    }
 
     Ok(FetchedInlineData {
         mime_type: normalize_image_mime_type(content_type.as_deref(), raw_url),
-        bytes,
+        bytes: bytes.freeze(),
     })
 }
 
@@ -156,6 +176,56 @@ pub fn normalize_image_mime_type(content_type: Option<&str>, raw_url: &str) -> S
     normalized
 }
 
+pub fn maybe_compress_png_bytes(
+    bytes: &[u8],
+    mime_type: &str,
+    enabled: bool,
+) -> Result<OptimizedImage> {
+    maybe_compress_png_bytes_with_threshold(
+        bytes,
+        mime_type,
+        enabled,
+        PNG_COMPRESSION_THRESHOLD_BYTES,
+    )
+}
+
+pub fn maybe_compress_png_bytes_with_threshold(
+    bytes: &[u8],
+    mime_type: &str,
+    enabled: bool,
+    threshold_bytes: usize,
+) -> Result<OptimizedImage> {
+    let normalized_mime = mime_type.trim().to_ascii_lowercase();
+    if !enabled || normalized_mime != "image/png" || bytes.len() <= threshold_bytes {
+        return Ok(OptimizedImage {
+            mime_type: normalized_mime,
+            bytes: Bytes::copy_from_slice(bytes),
+        });
+    }
+
+    let dynamic = image::load_from_memory_with_format(bytes, ImageFormat::Png)?;
+    let rgb = dynamic.to_rgb8();
+    let width = u16::try_from(rgb.width()).map_err(|_| anyhow!("image width too large"))?;
+    let height = u16::try_from(rgb.height()).map_err(|_| anyhow!("image height too large"))?;
+
+    let mut encoded = Vec::new();
+    let mut encoder = JpegEncoder::new(&mut encoded, JPEG_QUALITY);
+    encoder.set_sampling_factor(SamplingFactor::R_4_4_4);
+    encoder.encode(rgb.as_raw(), width, height, JpegColorType::Rgb)?;
+
+    if encoded.len() >= bytes.len() {
+        return Ok(OptimizedImage {
+            mime_type: normalized_mime,
+            bytes: Bytes::copy_from_slice(bytes),
+        });
+    }
+
+    Ok(OptimizedImage {
+        mime_type: "image/jpeg".to_string(),
+        bytes: Bytes::from(encoded),
+    })
+}
+
 fn guess_image_mime_type_from_url(raw_url: &str) -> String {
     let lower = raw_url.to_ascii_lowercase();
     if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
@@ -168,4 +238,39 @@ fn guess_image_mime_type_from_url(raw_url: &str) -> String {
         return "image/gif".to_string();
     }
     "image/png".to_string()
+}
+
+fn enforce_max_size_u64(actual: u64, limit: usize) -> Result<()> {
+    if actual > limit as u64 {
+        return Err(anyhow!("image too large: {} > {}", actual, limit));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use super::maybe_compress_png_bytes_with_threshold;
+
+    #[test]
+    fn large_png_can_be_reencoded_to_jpeg_when_compression_enabled() {
+        let image = image::RgbImage::from_fn(128, 128, |x, y| {
+            image::Rgb([
+                ((x * 31 + y * 17) % 255) as u8,
+                ((x * 13 + y * 29) % 255) as u8,
+                ((x * 7 + y * 47) % 255) as u8,
+            ])
+        });
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgb8(image)
+            .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+
+        let optimized =
+            maybe_compress_png_bytes_with_threshold(&png, "image/png", true, 1).unwrap();
+
+        assert_eq!(optimized.mime_type, "image/jpeg");
+        assert!(optimized.bytes.starts_with(&[0xFF, 0xD8, 0xFF]));
+    }
 }

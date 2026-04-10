@@ -93,5 +93,9 @@ fn rewrites_aiapidev_request_body_base64_inline_data_to_snake_case_inline_data()
             "mime_type": "image/png"
         })
     );
-    assert!(rewritten["contents"][0]["parts"][0].get("inlineData").is_none());
+    assert!(
+        rewritten["contents"][0]["parts"][0]
+            .get("inlineData")
+            .is_none()
+    );
 }

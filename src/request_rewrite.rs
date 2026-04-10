@@ -8,7 +8,7 @@ use serde_json::{Map, Value};
 
 use crate::blob_runtime::{BlobRuntime, BlobRuntimeConfig};
 use crate::cache::InlineDataUrlFetchService;
-use crate::image_io::DEFAULT_MAX_IMAGE_BYTES;
+use crate::image_io::REQUEST_MAX_IMAGE_BYTES;
 use crate::request_encode::encode_request_body;
 use crate::request_materialize::{
     RequestMaterializeServices, materialize_request_images_with_services,
@@ -36,7 +36,7 @@ impl Default for RewriteServices {
     fn default() -> Self {
         Self {
             image_client: reqwest::Client::new(),
-            max_image_bytes: DEFAULT_MAX_IMAGE_BYTES,
+            max_image_bytes: REQUEST_MAX_IMAGE_BYTES,
             allow_private_networks: false,
             fetch_service: None,
             cache_observer: None,

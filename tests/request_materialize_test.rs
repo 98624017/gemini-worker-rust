@@ -67,25 +67,51 @@ async fn request_materialize_fetches_unique_urls_concurrently() {
     );
 }
 
+#[tokio::test]
+async fn request_materialize_rejects_images_over_request_limit() {
+    let oversized_png = vec![0_u8; rust_sync_proxy::image_io::REQUEST_MAX_IMAGE_BYTES + 1];
+    let (image_url, _server) = spawn_named_png_server("/oversized.png", oversized_png).await;
+    let runtime = rust_sync_proxy::test_blob_runtime(8 * 1024 * 1024);
+    let request = json!({
+        "contents": [{"parts": [{"inlineData": {"data": image_url}}]}]
+    });
+
+    let err = rust_sync_proxy::request_materialize::materialize_request_images(
+        request,
+        &runtime,
+        &reqwest::Client::new(),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(err.to_string().contains(&format!(
+        "image too large: {} > {}",
+        rust_sync_proxy::image_io::REQUEST_MAX_IMAGE_BYTES + 1,
+        rust_sync_proxy::image_io::REQUEST_MAX_IMAGE_BYTES
+    )));
+}
+
 async fn spawn_png_server() -> (String, tokio::task::JoinHandle<()>) {
+    spawn_named_png_server("/image.png", vec![137, 80, 78, 71, 13, 10, 26, 10]).await
+}
+
+async fn spawn_named_png_server(path: &str, png: Vec<u8>) -> (String, tokio::task::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let state = ImageState {
-        png: vec![137, 80, 78, 71, 13, 10, 26, 10],
+        png,
         delay: Duration::ZERO,
         in_flight: Arc::new(AtomicUsize::new(0)),
         peak_in_flight: Arc::new(AtomicUsize::new(0)),
     };
 
-    let app = Router::new()
-        .route("/image.png", get(serve_png))
-        .with_state(state);
+    let app = Router::new().route(path, get(serve_png)).with_state(state);
 
     let server = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
 
-    (format!("http://{address}/image.png"), server)
+    (format!("http://{address}{path}"), server)
 }
 
 async fn spawn_delayed_png_server(

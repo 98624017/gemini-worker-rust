@@ -44,6 +44,7 @@ pub struct Config {
     pub slow_log_threshold: Duration,
     pub proxy_standard_output_urls: bool,
     pub proxy_special_upstream_urls: bool,
+    pub enable_image_compression: bool,
     pub admin_password: String,
     pub image_fetch_timeout: Duration,
     pub image_tls_handshake_timeout: Duration,
@@ -141,6 +142,7 @@ impl Config {
                 env_map.get("PROXY_SPECIAL_UPSTREAM_URLS"),
                 true,
             ),
+            enable_image_compression: parse_bool(env_map.get("ENABLE_IMAGE_COMPRESSION"), false),
             admin_password: env_map
                 .get("ADMIN_PASSWORD")
                 .map(String::as_str)

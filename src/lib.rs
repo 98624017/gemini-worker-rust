@@ -38,6 +38,7 @@ pub fn test_config() -> Config {
         slow_log_threshold: Duration::from_millis(100_000),
         proxy_standard_output_urls: true,
         proxy_special_upstream_urls: true,
+        enable_image_compression: false,
         admin_password: String::new(),
         image_fetch_timeout: Duration::from_millis(20_000),
         image_tls_handshake_timeout: Duration::from_millis(15_000),

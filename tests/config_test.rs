@@ -10,6 +10,7 @@ fn defaults_match_runtime_expectations() {
     assert_eq!(cfg.slow_log_threshold, Duration::from_millis(100_000));
     assert_eq!(cfg.image_fetch_timeout, Duration::from_millis(20_000));
     assert_eq!(cfg.upload_timeout, Duration::from_millis(20_000));
+    assert!(!cfg.enable_image_compression);
     assert_eq!(
         cfg.image_tls_handshake_timeout,
         Duration::from_millis(15_000)
@@ -59,6 +60,13 @@ fn disabled_values_follow_go_semantics() {
     assert_eq!(cfg.inline_data_url_memory_cache_max_bytes, 0);
     assert!(cfg.image_fetch_insecure_skip_verify);
     assert!(cfg.upload_insecure_skip_verify);
+}
+
+#[test]
+fn image_compression_flag_can_be_enabled_from_env() {
+    let env = HashMap::from([("ENABLE_IMAGE_COMPRESSION".to_string(), "true".to_string())]);
+    let cfg = rust_sync_proxy::config::Config::from_env_map(&env).unwrap();
+    assert!(cfg.enable_image_compression);
 }
 
 #[test]

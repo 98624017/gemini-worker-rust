@@ -98,12 +98,12 @@ pub async fn normalize_aiapidev_task_response(
     for image_url in image_urls {
         let inline_data = match output_mode {
             OutputMode::Url => {
-                let data = if config.proxy_special_upstream_urls && !external_proxy_prefix.is_empty()
-                {
-                    wrap_external_proxy_url(&external_proxy_prefix, &image_url)
-                } else {
-                    image_url.clone()
-                };
+                let data =
+                    if config.proxy_special_upstream_urls && !external_proxy_prefix.is_empty() {
+                        wrap_external_proxy_url(&external_proxy_prefix, &image_url)
+                    } else {
+                        image_url.clone()
+                    };
                 serde_json::json!({
                     "mimeType": guess_image_mime_type_from_url(&image_url),
                     "data": data,

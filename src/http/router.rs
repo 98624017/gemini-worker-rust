@@ -22,7 +22,7 @@ use crate::request_materialize::{
     RequestMaterializeServices, materialize_request_images_with_services,
 };
 use crate::request_rewrite::rewrite_aiapidev_request_body;
-use crate::response_materialize::finalize_output_urls;
+use crate::response_materialize::{finalize_output_urls, optimize_inline_data_images};
 use crate::response_rewrite::{
     OutputMode, keep_largest_inline_image, normalize_aiapidev_task_response,
     normalize_special_markdown_image_response, remove_thought_signatures,
@@ -45,7 +45,8 @@ struct AppState {
     image_client: reqwest::Client,
     uploader: Arc<Uploader>,
     admin: Option<Arc<AdminState>>,
-    inline_data_fetch_service: Option<Arc<InlineDataUrlFetchService>>,
+    request_inline_data_fetch_service: Option<Arc<InlineDataUrlFetchService>>,
+    response_inline_data_fetch_service: Option<Arc<InlineDataUrlFetchService>>,
     blob_runtime: Arc<BlobRuntime>,
 }
 
@@ -65,7 +66,13 @@ pub fn build_router(config: Config) -> Router {
         config.upload_tls_handshake_timeout,
         config.upload_insecure_skip_verify,
     );
-    let inline_data_fetch_service = InlineDataUrlFetchService::from_config(
+    let request_inline_data_fetch_service = InlineDataUrlFetchService::from_config(
+        &config,
+        image_client.clone(),
+        crate::image_io::REQUEST_MAX_IMAGE_BYTES,
+        false,
+    );
+    let response_inline_data_fetch_service = InlineDataUrlFetchService::from_config(
         &config,
         image_client.clone(),
         crate::image_io::DEFAULT_MAX_IMAGE_BYTES,
@@ -83,7 +90,8 @@ pub fn build_router(config: Config) -> Router {
         upstream_client: reqwest::Client::new(),
         image_client,
         admin,
-        inline_data_fetch_service,
+        request_inline_data_fetch_service,
+        response_inline_data_fetch_service,
         blob_runtime,
     };
 
@@ -255,7 +263,7 @@ async fn forward_gemini_request(
             output_mode,
             &state.upstream_client,
             &state.image_client,
-            state.inline_data_fetch_service.as_ref(),
+            state.response_inline_data_fetch_service.as_ref(),
             state.config.as_ref(),
         )
         .await;
@@ -292,9 +300,9 @@ async fn forward_gemini_request(
         state.blob_runtime.as_ref(),
         &RequestMaterializeServices {
             image_client: state.image_client.clone(),
-            max_image_bytes: crate::image_io::DEFAULT_MAX_IMAGE_BYTES,
+            max_image_bytes: crate::image_io::REQUEST_MAX_IMAGE_BYTES,
             allow_private_networks: false,
-            fetch_service: state.inline_data_fetch_service.clone(),
+            fetch_service: state.request_inline_data_fetch_service.clone(),
             cache_observer,
         },
     )
@@ -373,7 +381,7 @@ async fn forward_gemini_request(
         upstream_response,
         output_mode,
         &state.image_client,
-        state.inline_data_fetch_service.as_ref(),
+        state.response_inline_data_fetch_service.as_ref(),
         state.uploader.as_ref(),
         state.blob_runtime.as_ref(),
         state.config.as_ref(),
@@ -427,14 +435,9 @@ async fn handle_non_stream_response(
     .await?;
     remove_thought_signatures(&mut final_json);
     final_json = keep_largest_inline_image(final_json);
+    optimize_inline_data_images(&mut final_json, config)?;
     if output_mode == OutputMode::Url {
-        finalize_output_urls(
-            &mut final_json,
-            blob_runtime,
-            uploader,
-            config,
-        )
-        .await?;
+        finalize_output_urls(&mut final_json, blob_runtime, uploader, config).await?;
     }
     let final_body = serde_json::to_vec(&final_json)?;
     let mut response = Response::new(Body::from(final_body));
@@ -559,6 +562,13 @@ async fn handle_aiapidev_response(
     };
     remove_thought_signatures(&mut final_json);
     final_json = keep_largest_inline_image(final_json);
+    if let Err(err) = optimize_inline_data_images(&mut final_json, config) {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({"error": {"code": 502, "message": err.to_string()}})),
+        )
+            .into_response();
+    }
 
     match serde_json::to_vec(&final_json) {
         Ok(final_body) => {
@@ -636,7 +646,9 @@ async fn poll_aiapidev_task(
             if Instant::now() >= deadline {
                 return Err((
                     StatusCode::BAD_GATEWAY,
-                    Json(json!({"error": {"code": 502, "message": "aiapidev task poll timed out"}})),
+                    Json(
+                        json!({"error": {"code": 502, "message": "aiapidev task poll timed out"}}),
+                    ),
                 )
                     .into_response());
             }
@@ -898,8 +910,8 @@ mod tests {
     use super::*;
     use axum::body::to_bytes;
     use axum::extract::{Path as AxumPath, State as AxumState};
-    use axum::http::header::AUTHORIZATION;
     use axum::http::Uri;
+    use axum::http::header::AUTHORIZATION;
     use axum::response::IntoResponse;
     use axum::routing::{get, post};
     use axum::{Json, Router};
@@ -1053,7 +1065,8 @@ mod tests {
             image_client: reqwest::Client::new(),
             uploader: Arc::new(Uploader::new(reqwest::Client::new(), config)),
             admin: None,
-            inline_data_fetch_service: None,
+            request_inline_data_fetch_service: None,
+            response_inline_data_fetch_service: None,
             blob_runtime: Arc::new(crate::test_blob_runtime(8 * 1024 * 1024)),
         };
         let request = Request::builder()
@@ -1103,9 +1116,11 @@ mod tests {
                 "mime_type": "image/png"
             })
         );
-        assert!(create_bodies[0]["contents"][0]["parts"][0]
-            .get("inlineData")
-            .is_none());
+        assert!(
+            create_bodies[0]["contents"][0]["parts"][0]
+                .get("inlineData")
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -1350,10 +1365,7 @@ mod tests {
         }
     }
 
-    async fn mock_aiapidev_proxy(
-        state: AiapidevMockState,
-        request: Request,
-    ) -> Response {
+    async fn mock_aiapidev_proxy(state: AiapidevMockState, request: Request) -> Response {
         let path = extract_proxy_path(request.uri());
         let headers = request.headers().clone();
 

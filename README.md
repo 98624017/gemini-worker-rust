@@ -125,6 +125,9 @@ export MALLOC_CONF="background_thread:true,dirty_decay_ms:100,muzzy_decay_ms:100
   默认 `100000`；`0` 表示关闭慢请求日志
 - `PROXY_SPECIAL_UPSTREAM_URLS`
   默认开启；影响 Markdown / `aiapidev` 特殊上游结果是否包装代理前缀
+- `ENABLE_IMAGE_COMPRESSION`
+  默认关闭；开启后，响应侧 PNG 图片超过 `15MiB` 时会尝试转成
+  `4:4:4 / quality=97` 的 JPEG，以降低上传图床 / R2 或返回 base64 的体积
 - `ADMIN_PASSWORD`
   非空时启用 admin 路由并要求 Basic Auth
 - `IMAGE_FETCH_TIMEOUT_MS`
@@ -135,6 +138,7 @@ export MALLOC_CONF="background_thread:true,dirty_decay_ms:100,muzzy_decay_ms:100
   默认关闭；仅用于对齐 Go 原版 TLS 配置
 - `IMAGE_FETCH_EXTERNAL_PROXY_DOMAINS`
   命中时改走外部代理抓图
+  响应侧按 URL 拉图转 base64 时，单张图片默认最大 `35MiB`
 - `INLINE_DATA_URL_CACHE_DIR`
   非空时启用请求侧磁盘缓存
 - `INLINE_DATA_URL_CACHE_TTL_MS`

@@ -37,10 +37,7 @@ async fn output_url_response_rewrites_uploaded_url_with_external_proxy_prefix() 
     });
 
     rust_sync_proxy::response_materialize::finalize_output_urls(
-        &mut body,
-        &runtime,
-        &uploader,
-        &config,
+        &mut body, &runtime, &uploader, &config,
     )
     .await
     .unwrap();
@@ -80,10 +77,7 @@ async fn output_url_response_respects_proxy_standard_output_urls_flag() {
     });
 
     rust_sync_proxy::response_materialize::finalize_output_urls(
-        &mut body,
-        &runtime,
-        &uploader,
-        &config,
+        &mut body, &runtime, &uploader, &config,
     )
     .await
     .unwrap();
@@ -126,10 +120,7 @@ async fn output_url_response_keeps_custom_r2_public_url_without_proxy_prefix() {
     });
 
     rust_sync_proxy::response_materialize::finalize_output_urls(
-        &mut body,
-        &runtime,
-        &uploader,
-        &config,
+        &mut body, &runtime, &uploader, &config,
     )
     .await
     .unwrap();

@@ -8,7 +8,7 @@ use tokio::task::JoinSet;
 
 use crate::blob_runtime::{BlobHandle, BlobRuntime};
 use crate::cache::InlineDataUrlFetchService;
-use crate::image_io::{DEFAULT_MAX_IMAGE_BYTES, FetchedBlob, fetch_image_into_blob};
+use crate::image_io::{FetchedBlob, REQUEST_MAX_IMAGE_BYTES, fetch_image_into_blob};
 use crate::request_scan::scan_request_image_urls;
 
 const MAX_CONCURRENT_REQUEST_IMAGE_FETCHES: usize = 4;
@@ -42,7 +42,7 @@ pub async fn materialize_request_images(
 ) -> Result<MaterializedRequestImages> {
     let services = RequestMaterializeServices {
         image_client: client.clone(),
-        max_image_bytes: DEFAULT_MAX_IMAGE_BYTES,
+        max_image_bytes: REQUEST_MAX_IMAGE_BYTES,
         allow_private_networks: true,
         fetch_service: None,
         cache_observer: None,
