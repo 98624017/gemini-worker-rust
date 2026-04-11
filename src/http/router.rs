@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use std::{error::Error as StdError, fmt};
 
 use anyhow::{Result, anyhow};
 use axum::body::{Body, to_bytes};
@@ -51,44 +52,50 @@ fn proxy_error_json(code: u16, message: &str, source: &str, stage: &str, kind: &
     })
 }
 
-fn classify_standard_proxy_error(err: &anyhow::Error) -> Option<Value> {
-    let message = err.to_string();
-    if message.starts_with("invalid request json body:") {
-        return Some(proxy_error_json(
-            502,
-            "invalid request json body",
-            "proxy",
-            "parse_request_json",
-            "invalid_json",
-        ));
-    }
+#[derive(Debug)]
+struct StructuredProxyError {
+    message: &'static str,
+    stage: &'static str,
+    kind: &'static str,
+    detail: String,
+}
 
-    if is_upstream_body_decode_error(err) {
+impl StructuredProxyError {
+    fn new(
+        message: &'static str,
+        stage: &'static str,
+        kind: &'static str,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            message,
+            stage,
+            kind,
+            detail: detail.into(),
+        }
+    }
+}
+
+impl fmt::Display for StructuredProxyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.detail)
+    }
+}
+
+impl StdError for StructuredProxyError {}
+
+fn classify_standard_proxy_error(err: &anyhow::Error) -> Option<Value> {
+    if let Some(structured) = err.downcast_ref::<StructuredProxyError>() {
         return Some(proxy_error_json(
             502,
-            "failed to decode upstream response body",
+            structured.message,
             "proxy",
-            "decode_upstream_body",
-            "body_decode_failed",
+            structured.stage,
+            structured.kind,
         ));
     }
 
     None
-}
-
-fn is_upstream_body_decode_error(err: &anyhow::Error) -> bool {
-    if let Some(reqwest_error) = err.downcast_ref::<reqwest::Error>()
-        && (reqwest_error.is_body() || reqwest_error.is_decode())
-    {
-        return true;
-    }
-
-    err.chain().any(|cause| {
-        cause
-            .downcast_ref::<reqwest::Error>()
-            .is_some_and(|reqwest_error| reqwest_error.is_body() || reqwest_error.is_decode())
-            || cause.to_string().contains("error decoding response body")
-    })
 }
 
 #[derive(Clone)]
@@ -296,8 +303,14 @@ async fn forward_gemini_request(
         .map_err(|err| anyhow!("failed to read request body: {err}"))?;
     let request_raw = admin::maybe_sanitize_json_for_log(&request_body, admin_enabled);
 
-    let body: Value = serde_json::from_slice(&request_body)
-        .map_err(|err| anyhow!("invalid request json body: {err}"))?;
+    let body: Value = serde_json::from_slice(&request_body).map_err(|err| {
+        StructuredProxyError::new(
+            "invalid request json body",
+            "parse_request_json",
+            "invalid_json",
+            format!("invalid request json body: {err}"),
+        )
+    })?;
     let output_mode = get_output_mode(request_query.as_deref(), &body);
     let is_aiapidev = is_aiapidev_base_url(&resolved.base_url);
 
@@ -472,7 +485,14 @@ async fn handle_non_stream_response(
         .get(CONTENT_TYPE)
         .cloned()
         .unwrap_or_else(|| HeaderValue::from_static("application/json"));
-    let body_bytes = upstream_response.bytes().await?;
+    let body_bytes = upstream_response.bytes().await.map_err(|err| {
+        StructuredProxyError::new(
+            "failed to read upstream response body",
+            "read_upstream_body",
+            "body_truncated",
+            err.to_string(),
+        )
+    })?;
 
     if !status.is_success() {
         let mut response = Response::new(Body::from(body_bytes));

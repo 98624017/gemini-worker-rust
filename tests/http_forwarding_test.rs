@@ -216,11 +216,11 @@ async fn truncated_upstream_body_returns_structured_proxy_error() {
     assert_eq!(json_body["error"]["code"], 502);
     assert_eq!(
         json_body["error"]["message"],
-        "failed to decode upstream response body"
+        "failed to read upstream response body"
     );
     assert_eq!(json_body["error"]["source"], "proxy");
-    assert_eq!(json_body["error"]["stage"], "decode_upstream_body");
-    assert_eq!(json_body["error"]["kind"], "body_decode_failed");
+    assert_eq!(json_body["error"]["stage"], "read_upstream_body");
+    assert_eq!(json_body["error"]["kind"], "body_truncated");
 }
 
 async fn mock_generate_content(
