@@ -52,6 +52,15 @@ fn proxy_error_json(code: u16, message: &str, source: &str, stage: &str, kind: &
     })
 }
 
+fn proxy_error_response(
+    status: StatusCode,
+    message: &str,
+    stage: &str,
+    kind: &str,
+) -> Response {
+    (status, Json(proxy_error_json(status.as_u16(), message, "proxy", stage, kind))).into_response()
+}
+
 #[derive(Debug)]
 struct StructuredProxyError {
     message: &'static str,
@@ -601,12 +610,13 @@ async fn handle_aiapidev_response(
 
     let created_task: Value = match create_response.json().await {
         Ok(body) => body,
-        Err(err) => {
-            return (
+        Err(_) => {
+            return proxy_error_response(
                 StatusCode::BAD_GATEWAY,
-                Json(json!({"error": {"code": 502, "message": err.to_string()}})),
-            )
-                .into_response();
+                "failed to parse aiapidev create response",
+                "aiapidev_create_task",
+                "invalid_json",
+            );
         }
     };
     let request_id = created_task
@@ -733,11 +743,12 @@ async fn poll_aiapidev_task(
                         .into_response());
                 }
                 if Instant::now() >= deadline {
-                    return Err((
+                    return Err(proxy_error_response(
                         StatusCode::BAD_GATEWAY,
-                        Json(json!({"error": {"code": 502, "message": "aiapidev task poll timed out"}})),
-                    )
-                        .into_response());
+                        "aiapidev task poll timed out",
+                        "aiapidev_poll_task",
+                        "timeout",
+                    ));
                 }
                 tokio::time::sleep(AIAPIDEV_POLL_INTERVAL).await;
                 continue;
@@ -753,13 +764,12 @@ async fn poll_aiapidev_task(
                 return Err(raw_reqwest_response(response).await);
             }
             if Instant::now() >= deadline {
-                return Err((
+                return Err(proxy_error_response(
                     StatusCode::BAD_GATEWAY,
-                    Json(
-                        json!({"error": {"code": 502, "message": "aiapidev task poll timed out"}}),
-                    ),
-                )
-                    .into_response());
+                    "aiapidev task poll timed out",
+                    "aiapidev_poll_task",
+                    "timeout",
+                ));
             }
             tokio::time::sleep(AIAPIDEV_POLL_INTERVAL).await;
             continue;
@@ -768,12 +778,13 @@ async fn poll_aiapidev_task(
 
         let task_body: Value = match response.json().await {
             Ok(body) => body,
-            Err(err) => {
-                return Err((
+            Err(_) => {
+                return Err(proxy_error_response(
                     StatusCode::BAD_GATEWAY,
-                    Json(json!({"error": {"code": 502, "message": err.to_string()}})),
-                )
-                    .into_response());
+                    "failed to parse aiapidev poll response",
+                    "aiapidev_parse_task_response",
+                    "invalid_json",
+                ));
             }
         };
         let status = task_body
@@ -785,11 +796,12 @@ async fn poll_aiapidev_task(
             return Ok(task_body);
         }
         if Instant::now() >= deadline {
-            return Err((
+            return Err(proxy_error_response(
                 StatusCode::BAD_GATEWAY,
-                Json(json!({"error": {"code": 502, "message": "aiapidev task poll timed out"}})),
-            )
-                .into_response());
+                "aiapidev task poll timed out",
+                "aiapidev_poll_task",
+                "timeout",
+            ));
         }
         tokio::time::sleep(AIAPIDEV_POLL_INTERVAL).await;
     }
@@ -1301,6 +1313,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn aiapidev_create_invalid_json_returns_structured_proxy_error() {
+        let app = Router::new().route(
+            "/v1beta/models/nanobananapro:generateContent",
+            post(mock_aiapidev_create_invalid_json),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let resolved = ResolvedUpstream {
+            base_url: format!("http://{address}"),
+            api_key: "special-key".to_string(),
+        };
+
+        let response = handle_aiapidev_response(
+            &resolved,
+            "/v1beta/models/nanobananapro:generateContent",
+            None,
+            json!({"contents": []}),
+            OutputMode::Url,
+            &reqwest::Client::new(),
+            &reqwest::Client::new(),
+            None,
+            &crate::test_config(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json_body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            json_body["error"]["message"],
+            "failed to parse aiapidev create response"
+        );
+        assert_eq!(json_body["error"]["source"], "proxy");
+        assert_eq!(json_body["error"]["stage"], "aiapidev_create_task");
+        assert_eq!(json_body["error"]["kind"], "invalid_json");
+    }
+
+    #[tokio::test]
+    async fn aiapidev_poll_invalid_json_returns_structured_proxy_error() {
+        let app = Router::new()
+            .route(
+                "/v1beta/models/nanobananapro:generateContent",
+                post(mock_aiapidev_create),
+            )
+            .route(
+                "/v1beta/tasks/{request_id}",
+                get(mock_aiapidev_poll_invalid_json),
+            )
+            .with_state(AiapidevMockState::default());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let resolved = ResolvedUpstream {
+            base_url: format!("http://{address}"),
+            api_key: "special-key".to_string(),
+        };
+
+        let response = handle_aiapidev_response(
+            &resolved,
+            "/v1beta/models/nanobananapro:generateContent",
+            None,
+            json!({"contents": []}),
+            OutputMode::Url,
+            &reqwest::Client::new(),
+            &reqwest::Client::new(),
+            None,
+            &crate::test_config(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json_body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            json_body["error"]["message"],
+            "failed to parse aiapidev poll response"
+        );
+        assert_eq!(json_body["error"]["source"], "proxy");
+        assert_eq!(json_body["error"]["stage"], "aiapidev_parse_task_response");
+        assert_eq!(json_body["error"]["kind"], "invalid_json");
+    }
+
+    #[tokio::test]
     async fn aiapidev_poll_retryable_failure_recovers_before_failure_limit() {
         let state = AiapidevMockState {
             poll_responses: Arc::new(Mutex::new(VecDeque::from(vec![
@@ -1447,6 +1549,15 @@ mod tests {
         }))
     }
 
+    async fn mock_aiapidev_create_invalid_json() -> Response {
+        (
+            StatusCode::OK,
+            [(CONTENT_TYPE, HeaderValue::from_static("application/json"))],
+            "not-json",
+        )
+            .into_response()
+    }
+
     async fn mock_aiapidev_poll(
         AxumState(state): AxumState<AiapidevMockState>,
         AxumPath(_request_id): AxumPath<String>,
@@ -1463,6 +1574,20 @@ mod tests {
                 }]
             }
         }))
+    }
+
+    async fn mock_aiapidev_poll_invalid_json(
+        AxumState(state): AxumState<AiapidevMockState>,
+        AxumPath(_request_id): AxumPath<String>,
+        headers: HeaderMap,
+    ) -> Response {
+        state.poll_headers.lock().await.push(headers);
+        (
+            StatusCode::OK,
+            [(CONTENT_TYPE, HeaderValue::from_static("application/json"))],
+            "not-json",
+        )
+            .into_response()
     }
 
     async fn mock_aiapidev_poll_rate_limited(
