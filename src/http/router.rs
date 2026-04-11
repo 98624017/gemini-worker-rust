@@ -52,13 +52,18 @@ fn proxy_error_json(code: u16, message: &str, source: &str, stage: &str, kind: &
     })
 }
 
-fn proxy_error_response(
-    status: StatusCode,
-    message: &str,
-    stage: &str,
-    kind: &str,
-) -> Response {
-    (status, Json(proxy_error_json(status.as_u16(), message, "proxy", stage, kind))).into_response()
+fn proxy_error_response(status: StatusCode, message: &str, stage: &str, kind: &str) -> Response {
+    (
+        status,
+        Json(proxy_error_json(
+            status.as_u16(),
+            message,
+            "proxy",
+            stage,
+            kind,
+        )),
+    )
+        .into_response()
 }
 
 #[derive(Debug)]
@@ -105,6 +110,43 @@ fn classify_standard_proxy_error(err: &anyhow::Error) -> Option<Value> {
     }
 
     None
+}
+
+fn apply_admin_error_fields(
+    entry: &mut AdminLogEntry,
+    status: StatusCode,
+    response_json: &Value,
+    sanitized_response: &str,
+) {
+    let Some(error) = response_json.get("error").and_then(Value::as_object) else {
+        return;
+    };
+
+    entry.error_source = error
+        .get("source")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    entry.error_stage = error
+        .get("stage")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    entry.error_kind = error
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    entry.error_message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+
+    if entry.error_source == "upstream" {
+        entry.upstream_status_code = status.as_u16();
+        entry.upstream_error_body = sanitized_response.to_string();
+    }
 }
 
 fn annotate_upstream_error_json(status: StatusCode, body_bytes: &[u8]) -> Option<Vec<u8>> {
@@ -280,8 +322,31 @@ async fn model_action(
             finalize_admin_response(&state, response, admin_entry).await
         }
         Err(err) => {
+            let mut admin_entry = AdminLogEntry {
+                created_at,
+                method: request_method,
+                path: request_path,
+                query: request_query,
+                remote_addr,
+                is_stream: false,
+                status_code: StatusCode::BAD_GATEWAY.as_u16(),
+                duration_ms: started_at.elapsed().as_millis() as i64,
+                ..Default::default()
+            };
             let response = if !is_aiapidev_upstream {
-                if let Some(structured_error) = classify_standard_proxy_error(&err) {
+                if let Some(structured) = err.downcast_ref::<StructuredProxyError>() {
+                    admin_entry.error_source = "proxy".to_string();
+                    admin_entry.error_stage = structured.stage.to_string();
+                    admin_entry.error_kind = structured.kind.to_string();
+                    admin_entry.error_message = structured.message.to_string();
+                    admin_entry.error_detail = structured.detail.clone();
+                    proxy_error_response(
+                        StatusCode::BAD_GATEWAY,
+                        structured.message,
+                        structured.stage,
+                        structured.kind,
+                    )
+                } else if let Some(structured_error) = classify_standard_proxy_error(&err) {
                     (StatusCode::BAD_GATEWAY, Json(structured_error)).into_response()
                 } else {
                     (
@@ -297,22 +362,7 @@ async fn model_action(
                 )
                     .into_response()
             };
-            finalize_admin_response(
-                &state,
-                response,
-                AdminLogEntry {
-                    created_at,
-                    method: request_method,
-                    path: request_path,
-                    query: request_query,
-                    remote_addr,
-                    is_stream: false,
-                    status_code: StatusCode::BAD_GATEWAY.as_u16(),
-                    duration_ms: started_at.elapsed().as_millis() as i64,
-                    ..Default::default()
-                },
-            )
-            .await
+            finalize_admin_response(&state, response, admin_entry).await
         }
     }
 }
@@ -915,10 +965,12 @@ async fn finalize_admin_response(
 
     if !body_bytes.is_empty() {
         let sanitized = admin::sanitize_json_for_log(&body_bytes);
-        entry.response_downstream = sanitized.pretty;
+        let response_downstream = sanitized.pretty;
         entry.response_images = sanitized.image_urls;
+        entry.response_downstream = response_downstream.clone();
         if let Ok(value) = serde_json::from_slice::<Value>(&body_bytes) {
             entry.finish_reason = admin::extract_finish_reason(&value).unwrap_or_default();
+            apply_admin_error_fields(&mut entry, parts.status, &value, &response_downstream);
         }
     }
 

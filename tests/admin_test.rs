@@ -1,7 +1,11 @@
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
+use axum::routing::post;
+use axum::{Json, Router};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
+use serde_json::json;
+use tokio::net::TcpListener;
 use tower::ServiceExt;
 
 #[test]
@@ -125,6 +129,115 @@ async fn admin_stats_include_spill_metrics() {
 }
 
 #[tokio::test]
+async fn admin_logs_capture_structured_proxy_error_fields() {
+    let mut config = rust_sync_proxy::test_config();
+    config.admin_password = "pw".to_string();
+
+    let app = rust_sync_proxy::build_router(config);
+    let invalid_json_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1beta/models/demo:generateContent")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"contents":[{"parts":[{"text":"hello"}]}]"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(invalid_json_response.status(), StatusCode::BAD_GATEWAY);
+
+    let auth = format!("Basic {}", STANDARD.encode("user:pw"));
+    let logs_response = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/api/logs")
+                .header("authorization", auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(logs_response.status(), StatusCode::OK);
+    let body = to_bytes(logs_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let item = &json["items"][0];
+    assert_eq!(item["errorSource"], "proxy");
+    assert_eq!(item["errorStage"], "parse_request_json");
+    assert_eq!(item["errorKind"], "invalid_json");
+    assert_eq!(item["errorMessage"], "invalid request json body");
+}
+
+#[tokio::test]
+async fn admin_logs_capture_upstream_error_fields() {
+    let server = Router::new().route(
+        "/v1beta/models/demo:generateContent",
+        post(mock_upstream_rate_limited),
+    );
+    let server_addr = spawn_admin_test_server(server).await;
+
+    let mut config = rust_sync_proxy::test_config();
+    config.admin_password = "pw".to_string();
+    config.upstream_base_url = format!("http://{server_addr}");
+
+    let app = rust_sync_proxy::build_router(config);
+    let upstream_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1beta/models/demo:generateContent")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "contents": [{
+                            "parts": [{
+                                "text": "hello"
+                            }]
+                        }]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(upstream_response.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    let auth = format!("Basic {}", STANDARD.encode("user:pw"));
+    let logs_response = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/api/logs")
+                .header("authorization", auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(logs_response.status(), StatusCode::OK);
+    let body = to_bytes(logs_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let item = &json["items"][0];
+    assert_eq!(item["errorSource"], "upstream");
+    assert_eq!(item["errorStage"], "upstream_response");
+    assert_eq!(item["errorKind"], "upstream_error");
+    assert_eq!(item["errorMessage"], "rate limited");
+    assert_eq!(item["upstreamStatusCode"], 429);
+    assert!(
+        item["upstreamErrorBody"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("rate limited")
+    );
+}
+
+#[tokio::test]
 async fn admin_logs_page_contains_chartjs_and_theme_toggle() {
     let html = fetch_admin_logs_page_html().await;
 
@@ -196,6 +309,19 @@ async fn admin_logs_page_preserves_system_theme_without_override() {
     );
 }
 
+#[tokio::test]
+async fn admin_logs_page_contains_error_detail_section() {
+    let html = fetch_admin_logs_page_html().await;
+    assert!(
+        html.contains("error detail"),
+        "HTML should contain error detail section"
+    );
+    assert!(
+        html.contains("upstream status"),
+        "HTML should contain upstream status label"
+    );
+}
+
 async fn fetch_admin_logs_page_html() -> String {
     let mut config = rust_sync_proxy::test_config();
     config.admin_password = "pw".to_string();
@@ -215,4 +341,24 @@ async fn fetch_admin_logs_page_html() -> String {
     assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     String::from_utf8_lossy(&body).into_owned()
+}
+
+async fn mock_upstream_rate_limited() -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        Json(json!({
+            "error": {
+                "message": "rate limited"
+            }
+        })),
+    )
+}
+
+async fn spawn_admin_test_server(app: Router) -> std::net::SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    address
 }

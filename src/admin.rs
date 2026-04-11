@@ -47,6 +47,13 @@ pub struct AdminLogEntry {
     pub request_upstream_images: Vec<String>,
     pub response_downstream: String,
     pub response_images: Vec<String>,
+    pub error_source: String,
+    pub error_stage: String,
+    pub error_kind: String,
+    pub error_message: String,
+    pub error_detail: String,
+    pub upstream_status_code: u16,
+    pub upstream_error_body: String,
 }
 
 #[derive(Default)]
@@ -772,6 +779,33 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
         + renderImgs(item.responseImages)
         + '<pre>'+esc(item.responseDownstream || '')+'</pre>'
       + '</div>'
+      + '</div>'
+      + renderErrorDetail(item);
+  }
+
+  function renderErrorDetail(item) {
+    var hasError = !!(item.errorSource || item.errorStage || item.errorKind
+      || item.errorMessage || item.errorDetail || item.upstreamStatusCode
+      || item.upstreamErrorBody);
+    if (!hasError) return '';
+
+    var lines = [];
+    if (item.errorSource) lines.push('source: ' + item.errorSource);
+    if (item.errorStage) lines.push('stage: ' + item.errorStage);
+    if (item.errorKind) lines.push('kind: ' + item.errorKind);
+    if (item.errorMessage) lines.push('message: ' + item.errorMessage);
+    if (item.errorDetail) lines.push('detail: ' + item.errorDetail);
+    if (item.upstreamStatusCode) lines.push('upstream status: ' + item.upstreamStatusCode);
+
+    var upstreamBody = item.upstreamErrorBody
+      ? '<div><div class="detail-col-label">upstream error body</div><pre>'
+        + esc(item.upstreamErrorBody) + '</pre></div>'
+      : '';
+
+    return '<div class="detail-grid">'
+      + '<div><div class="detail-col-label">error detail</div><pre>'
+      + esc(lines.join('\n')) + '</pre></div>'
+      + upstreamBody
       + '</div>';
   }
 
