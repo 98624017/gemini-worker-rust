@@ -7,6 +7,7 @@ use axum::extract::State;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header::CONTENT_TYPE};
 use axum::routing::get;
 use serde_json::json;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 #[derive(Clone)]
@@ -153,6 +154,56 @@ async fn request_materialize_reuses_fetch_service_cache_between_calls() {
     assert_eq!(request_count.load(Ordering::Relaxed), 1);
 }
 
+#[tokio::test]
+async fn request_cache_retries_once_after_connection_drops_before_headers() {
+    let (address, request_count) = spawn_flaky_connection_server().await;
+    let mut config = rust_sync_proxy::test_config();
+    config.inline_data_url_memory_cache_max_bytes = 1024;
+    config.inline_data_url_background_fetch_wait_timeout = Duration::from_secs(2);
+    config.inline_data_url_background_fetch_total_timeout = Duration::from_secs(2);
+    let service = rust_sync_proxy::cache::InlineDataUrlFetchService::from_config(
+        &config,
+        reqwest::Client::new(),
+        rust_sync_proxy::image_io::DEFAULT_MAX_IMAGE_BYTES,
+        true,
+    )
+    .unwrap();
+
+    let url = format!("http://{address}/image.png");
+    let fetched = service.fetch(&url).await.unwrap();
+    assert_eq!(fetched.mime_type, "image/png");
+    assert_eq!(
+        fetched.bytes,
+        bytes::Bytes::from_static(&[137, 80, 78, 71, 13, 10, 26, 10])
+    );
+    assert_eq!(request_count.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn request_cache_does_not_retry_non_retryable_status() {
+    let (address, request_count) = spawn_status_server(StatusCode::NOT_FOUND).await;
+    let mut config = rust_sync_proxy::test_config();
+    config.inline_data_url_memory_cache_max_bytes = 1024;
+    config.inline_data_url_background_fetch_wait_timeout = Duration::from_secs(2);
+    config.inline_data_url_background_fetch_total_timeout = Duration::from_secs(2);
+    let service = rust_sync_proxy::cache::InlineDataUrlFetchService::from_config(
+        &config,
+        reqwest::Client::new(),
+        rust_sync_proxy::image_io::DEFAULT_MAX_IMAGE_BYTES,
+        true,
+    )
+    .unwrap();
+
+    let url = format!("http://{address}/image.png");
+    let err = service.fetch(&url).await.unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("image fetch failed with status 404"),
+        "unexpected error: {err:#}"
+    );
+    assert_eq!(request_count.load(Ordering::Relaxed), 1);
+}
+
 async fn spawn_image_server(delay_ms: u64) -> (std::net::SocketAddr, Arc<AtomicUsize>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -168,6 +219,54 @@ async fn spawn_image_server(delay_ms: u64) -> (std::net::SocketAddr, Arc<AtomicU
             .route("/image.png", get(serve_png))
             .with_state(state);
         axum::serve(listener, app).await.unwrap();
+    });
+
+    (address, request_count)
+}
+
+async fn spawn_status_server(status: StatusCode) -> (std::net::SocketAddr, Arc<AtomicUsize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let request_count = Arc::new(AtomicUsize::new(0));
+    let request_count_for_task = Arc::clone(&request_count);
+
+    tokio::spawn(async move {
+        let app = Router::new().route(
+            "/image.png",
+            get(move || async move {
+                request_count_for_task.fetch_add(1, Ordering::Relaxed);
+                (status, HeaderMap::new(), Vec::<u8>::new())
+            }),
+        );
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    (address, request_count)
+}
+
+async fn spawn_flaky_connection_server() -> (std::net::SocketAddr, Arc<AtomicUsize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let request_count = Arc::new(AtomicUsize::new(0));
+    let request_count_for_task = Arc::clone(&request_count);
+
+    tokio::spawn(async move {
+        let (mut first_stream, _) = listener.accept().await.unwrap();
+        request_count_for_task.fetch_add(1, Ordering::Relaxed);
+        let mut discard = [0_u8; 1024];
+        let _ = first_stream.read(&mut discard).await;
+        drop(first_stream);
+
+        let (mut second_stream, _) = listener.accept().await.unwrap();
+        request_count_for_task.fetch_add(1, Ordering::Relaxed);
+        let _ = second_stream.read(&mut discard).await;
+        second_stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\ncontent-type: image/png\r\ncontent-length: 8\r\nconnection: close\r\n\r\n\x89PNG\r\n\x1a\n",
+            )
+            .await
+            .unwrap();
+        second_stream.shutdown().await.unwrap();
     });
 
     (address, request_count)

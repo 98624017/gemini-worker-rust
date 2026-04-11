@@ -7,6 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use lru::LruCache;
+use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, Notify};
@@ -18,6 +19,7 @@ use crate::image_io::{
 };
 
 const EXTERNAL_IMAGE_FETCH_PROXY_PREFIX: &str = "https://gemini.xinbaoai.com/proxy/image?url=";
+const INLINE_DATA_FETCH_RETRY_DELAY: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Debug)]
 pub struct CachedInlineData {
@@ -49,6 +51,19 @@ impl Display for BackgroundFetchWaitTimeoutError {
 }
 
 impl std::error::Error for BackgroundFetchWaitTimeoutError {}
+
+#[derive(Debug)]
+pub(crate) struct ImageFetchStatusError {
+    pub(crate) status: StatusCode,
+}
+
+impl Display for ImageFetchStatusError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "image fetch failed with status {}", self.status)
+    }
+}
+
+impl std::error::Error for ImageFetchStatusError {}
 
 #[derive(Clone)]
 pub struct InlineDataUrlFetchService {
@@ -242,19 +257,36 @@ impl InlineDataUrlFetchService {
 
     async fn direct_fetch(&self, raw_url: &str) -> Result<FetchedInlineData> {
         let fetch_url = maybe_wrap_external_proxy_url(raw_url, &self.external_proxy_domains)?;
+        for attempt in 0..2 {
+            let result = self.fetch_once(&fetch_url).await;
+            match result {
+                Ok(fetched) => return Ok(fetched),
+                Err(err) if attempt == 0 && should_retry_fetch_error(&err) => {
+                    tokio::time::sleep(INLINE_DATA_FETCH_RETRY_DELAY).await;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+
+        unreachable!("image fetch retry loop must return within bounded attempts");
+    }
+
+    async fn fetch_once(&self, fetch_url: &str) -> Result<FetchedInlineData> {
         let future = fetch_image_as_inline_data_with_options(
             &self.client,
-            &fetch_url,
+            fetch_url,
             self.max_image_bytes,
             self.allow_private_networks,
         );
-        if self.total_timeout.is_zero() {
-            future.await
+        let fetched = if self.total_timeout.is_zero() {
+            future.await?
         } else {
             tokio::time::timeout(self.total_timeout, future)
                 .await
-                .map_err(|_| anyhow!("inlineData 图片抓取超时"))?
-        }
+                .map_err(|_| anyhow!("inlineData 图片抓取超时"))??
+        };
+
+        Ok(fetched)
     }
 
     async fn store_in_caches(&self, raw_url: &str, hit: &CachedInlineData) {
@@ -467,6 +499,35 @@ fn maybe_wrap_external_proxy_url(raw_url: &str, patterns: &[String]) -> Result<S
         "{EXTERNAL_IMAGE_FETCH_PROXY_PREFIX}{}",
         form_urlencoded::byte_serialize(raw_url.as_bytes()).collect::<String>()
     ))
+}
+
+fn should_retry_fetch_error(err: &anyhow::Error) -> bool {
+    if err.to_string() == "inlineData 图片抓取超时" {
+        return false;
+    }
+
+    if let Some(status_err) = err.downcast_ref::<ImageFetchStatusError>() {
+        return matches!(
+            status_err.status,
+            StatusCode::REQUEST_TIMEOUT
+                | StatusCode::TOO_EARLY
+                | StatusCode::TOO_MANY_REQUESTS
+                | StatusCode::INTERNAL_SERVER_ERROR
+                | StatusCode::BAD_GATEWAY
+                | StatusCode::SERVICE_UNAVAILABLE
+                | StatusCode::GATEWAY_TIMEOUT
+        );
+    }
+
+    let Some(reqwest_err) = err.downcast_ref::<reqwest::Error>() else {
+        return false;
+    };
+
+    if reqwest_err.is_body() || reqwest_err.is_decode() {
+        return false;
+    }
+
+    reqwest_err.is_connect() || reqwest_err.is_request()
 }
 
 fn cache_key(url: &str) -> String {

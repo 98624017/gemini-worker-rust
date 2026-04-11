@@ -8,6 +8,7 @@ use reqwest::header::CONTENT_TYPE;
 use url::Url;
 
 use crate::blob_runtime::{BlobHandle, BlobRuntime};
+use crate::cache::ImageFetchStatusError;
 
 pub const DEFAULT_MAX_IMAGE_BYTES: usize = 35 * 1024 * 1024;
 pub const REQUEST_MAX_IMAGE_BYTES: usize = 15 * 1024 * 1024;
@@ -68,10 +69,10 @@ pub async fn fetch_image_as_inline_data_with_options(
 
     let response = client.get(parsed).send().await?;
     if !response.status().is_success() {
-        return Err(anyhow!(
-            "image fetch failed with status {}",
-            response.status()
-        ));
+        return Err(ImageFetchStatusError {
+            status: response.status(),
+        }
+        .into());
     }
     if let Some(content_length) = response.content_length() {
         enforce_max_size_u64(content_length, max_image_bytes)?;
