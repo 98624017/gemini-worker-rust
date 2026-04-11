@@ -38,6 +38,19 @@ const AIAPIDEV_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const AIAPIDEV_MAX_POLL_TIME: Duration = Duration::from_secs(450);
 const AIAPIDEV_MAX_CONSECUTIVE_POLL_FAILURES: usize = 5;
 
+#[cfg_attr(not(test), allow(dead_code))]
+fn proxy_error_json(code: u16, message: &str, source: &str, stage: &str, kind: &str) -> Value {
+    json!({
+        "error": {
+            "code": code,
+            "message": message,
+            "source": source,
+            "stage": stage,
+            "kind": kind
+        }
+    })
+}
+
 #[derive(Clone)]
 struct AppState {
     config: Arc<Config>,
@@ -956,6 +969,26 @@ mod tests {
     #[test]
     fn aiapidev_poll_timeout_is_450_seconds() {
         assert_eq!(AIAPIDEV_MAX_POLL_TIME, Duration::from_secs(450));
+    }
+
+    #[test]
+    fn proxy_error_json_contains_structured_fields() {
+        let body = proxy_error_json(
+            502,
+            "failed to decode upstream response body",
+            "proxy",
+            "decode_upstream_body",
+            "body_decode_failed",
+        );
+
+        assert_eq!(body["error"]["code"], 502);
+        assert_eq!(
+            body["error"]["message"],
+            "failed to decode upstream response body"
+        );
+        assert_eq!(body["error"]["source"], "proxy");
+        assert_eq!(body["error"]["stage"], "decode_upstream_body");
+        assert_eq!(body["error"]["kind"], "body_decode_failed");
     }
 
     #[tokio::test]
