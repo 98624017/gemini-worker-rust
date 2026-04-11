@@ -276,18 +276,20 @@ curl -sS \
 
 ## 错误返回与排障
 
-- **上游显式错误优先透传**
-  - 如果上游返回非 `2xx` 且响应体是 JSON，并且包含 `error` 对象，代理会尽量保留上游
-    `error.message` 等原始语义。
+- **标准链路的上游 JSON 错误会补齐元信息**
+  - 对**标准链路**（非 `aiapidev` 分支），如果上游返回非 `2xx` 且响应体是 JSON，
+    并且包含 `error` 对象，代理会尽量保留上游 `error.message` 等原始语义。
   - 同时会补齐稳定元信息：
     - `error.code`
     - `error.source = upstream`
     - `error.stage = upstream_response`
     - `error.kind = upstream_error`
   - 如果上游返回的不是 JSON，当前仍按原始响应体透传，不强行改写。
+  - `aiapidev` 目前**不承诺**这一组元信息总是存在：create 非 `2xx`、轮询非重试型
+    非 `2xx`、以及连续重试后返回的最后一次 poll 错误，当前仍按原始上游响应透传。
 
-- **代理本层错误统一结构化**
-  - 代理自己生成的错误，当前统一返回：
+- **代理本层错误以结构化 JSON 为主，但 `aiapidev` 仍有例外**
+  - 下述结构化格式当前已用于标准链路，以及部分 `aiapidev` 代理侧错误：
 
 ```json
 {
@@ -302,10 +304,17 @@ curl -sS \
 ```
 
   - 当前已覆盖的典型本层错误包括：
-    - 请求 JSON 非法
+    - 标准链路上的请求 JSON 非法
     - 标准链路读取上游响应体失败
     - `aiapidev` create / poll 响应 JSON 解析失败
     - `aiapidev` 轮询总超时
+  - `aiapidev` 目前仍有一批代理侧失败只返回 `error.code` 和 `error.message`，
+    例如：
+    - `aiapidev` 分支上的请求 JSON 非法
+    - `build_upstream_url` 失败
+    - create 成功后响应缺少 `requestId`
+    - 轮询阶段连续传输失败后直接返回最后一次错误
+    - task 终态失败、结果归一化失败、最终编码失败等 `502`
 
 - **admin 日志会补充诊断字段**
   - `/admin/api/logs` 中每条日志现在会额外记录：
@@ -319,6 +328,8 @@ curl -sS \
   - 其中：
     - `errorDetail` 主要用于记录代理内部原始错误细节，便于排障，不承诺对下游稳定。
     - `upstreamStatusCode` 和 `upstreamErrorBody` 只会在 `source=upstream` 时填充。
+    - 因此这两个字段在**标准链路**的结构化上游错误里最稳定；`aiapidev` 原样透传
+      或只返回 `{code,message}` 的场景下，当前不能保证一定可用。
   - `/admin/logs` 详情页也会显示这些字段，便于区分到底是上游业务错误，还是代理链路自己的错误。
 
 ## 验证

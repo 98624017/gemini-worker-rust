@@ -1,78 +1,139 @@
 # Tasks Document
 
-> Adapt this checklist to the concrete feature before implementation.
-> Replace placeholders such as `[feature]`, `[module]`, `[route]`,
-> and `[config_key]` with project-specific names, and remove any task
-> that does not apply.
-
-- [ ] 1. Confirm feature boundaries and affected Rust modules
-  - Files: `src/[feature].rs`, `src/lib.rs`, `src/http/router.rs` (if HTTP-facing), `tests/[feature]_test.rs`
-  - Identify which existing modules own the change and whether a new module is required
-  - Record public API, configuration, and test impact before implementation
-  - Purpose: Keep the task plan aligned with the current Rust crate layout
-  - _Leverage: src/lib.rs, Cargo.toml, existing modules under src/_
+- [ ] 1. Create core interfaces in src/types/feature.ts
+  - File: src/types/feature.ts
+  - Define TypeScript interfaces for feature data structures
+  - Extend existing base interfaces from base.ts
+  - Purpose: Establish type safety for feature implementation
+  - _Leverage: src/types/base.ts_
   - _Requirements: 1.1_
-  - _Prompt: Role: Rust architect specializing in backend service design | Task: Map the feature to the correct Rust modules, runtime entry points, and test files following requirement 1.1 | Restrictions: Do not invent non-existent project layers; follow the crate structure that already exists in src/ and tests/ | Success: The affected files are identified up front, module ownership is clear, and the implementation plan matches the repository layout_
+  - _Prompt: Role: TypeScript Developer specializing in type systems and interfaces | Task: Create comprehensive TypeScript interfaces for the feature data structures following requirements 1.1, extending existing base interfaces from src/types/base.ts | Restrictions: Do not modify existing base interfaces, maintain backward compatibility, follow project naming conventions | Success: All interfaces compile without errors, proper inheritance from base types, full type coverage for feature requirements_
 
-- [ ] 2. Implement core feature logic in `src/[feature].rs`
-  - File: `src/[feature].rs`
-  - Add structs, enums, helper functions, and async logic required by the feature
-  - Reuse existing serialization, validation, and error-handling patterns where applicable
-  - Purpose: Implement the main Rust business logic in a focused module
-  - _Leverage: src/request_rewrite.rs, src/response_rewrite.rs, src/request_materialize.rs, src/response_materialize.rs, src/cache.rs, src/blob_runtime.rs_
+- [ ] 2. Create base model class in src/models/FeatureModel.ts
+  - File: src/models/FeatureModel.ts
+  - Implement base model extending BaseModel class
+  - Add validation methods using existing validation utilities
+  - Purpose: Provide data layer foundation for feature
+  - _Leverage: src/models/BaseModel.ts, src/utils/validation.ts_
+  - _Requirements: 2.1_
+  - _Prompt: Role: Backend Developer with expertise in Node.js and data modeling | Task: Create a base model class extending BaseModel and implementing validation following requirement 2.1, leveraging existing patterns from src/models/BaseModel.ts and src/utils/validation.ts | Restrictions: Must follow existing model patterns, do not bypass validation utilities, maintain consistent error handling | Success: Model extends BaseModel correctly, validation methods implemented and tested, follows project architecture patterns_
+
+- [ ] 3. Add specific model methods to FeatureModel.ts
+  - File: src/models/FeatureModel.ts (continue from task 2)
+  - Implement create, update, delete methods
+  - Add relationship handling for foreign keys
+  - Purpose: Complete model functionality for CRUD operations
+  - _Leverage: src/models/BaseModel.ts_
+  - _Requirements: 2.2, 2.3_
+  - _Prompt: Role: Backend Developer with expertise in ORM and database operations | Task: Implement CRUD methods and relationship handling in FeatureModel.ts following requirements 2.2 and 2.3, extending patterns from src/models/BaseModel.ts | Restrictions: Must maintain transaction integrity, follow existing relationship patterns, do not duplicate base model functionality | Success: All CRUD operations work correctly, relationships are properly handled, database operations are atomic and efficient_
+
+- [ ] 4. Create model unit tests in tests/models/FeatureModel.test.ts
+  - File: tests/models/FeatureModel.test.ts
+  - Write tests for model validation and CRUD methods
+  - Use existing test utilities and fixtures
+  - Purpose: Ensure model reliability and catch regressions
+  - _Leverage: tests/helpers/testUtils.ts, tests/fixtures/data.ts_
   - _Requirements: 2.1, 2.2_
-  - _Prompt: Role: Rust developer with expertise in async services and module design | Task: Implement the core feature module in src/[feature].rs following requirements 2.1 and 2.2, reusing established patterns from adjacent Rust modules | Restrictions: Preserve existing behavior unless the spec explicitly changes it, avoid duplicate abstractions, and keep ownership and error propagation idiomatic | Success: The module compiles cleanly, covers the required behavior, and integrates with existing Rust code without introducing stack-incompatible patterns_
+  - _Prompt: Role: QA Engineer with expertise in unit testing and Jest/Mocha frameworks | Task: Create comprehensive unit tests for FeatureModel validation and CRUD methods covering requirements 2.1 and 2.2, using existing test utilities from tests/helpers/testUtils.ts and fixtures from tests/fixtures/data.ts | Restrictions: Must test both success and failure scenarios, do not test external dependencies directly, maintain test isolation | Success: All model methods are tested with good coverage, edge cases covered, tests run independently and consistently_
 
-- [ ] 3. Wire module exports and internal boundaries
-  - File: `src/lib.rs`
-  - Add `pub mod [feature];` and selective re-exports only when the public crate API needs them
-  - Keep dependency direction consistent with existing module boundaries
-  - Purpose: Make the new functionality reachable without leaking internals
-  - _Leverage: src/lib.rs, src/http/mod.rs_
-  - _Requirements: 2.3_
-  - _Prompt: Role: Rust maintainer focused on crate API design | Task: Register the new module and expose only the minimal public surface needed for requirement 2.3 | Restrictions: Do not over-export internals, do not create circular module dependencies, and keep the crate API coherent | Success: Module wiring is explicit, public exports are minimal, and internal boundaries remain clear_
+- [ ] 5. Create service interface in src/services/IFeatureService.ts
+  - File: src/services/IFeatureService.ts
+  - Define service contract with method signatures
+  - Extend base service interface patterns
+  - Purpose: Establish service layer contract for dependency injection
+  - _Leverage: src/services/IBaseService.ts_
+  - _Requirements: 3.1_
+  - _Prompt: Role: Software Architect specializing in service-oriented architecture and TypeScript interfaces | Task: Design service interface contract following requirement 3.1, extending base service patterns from src/services/IBaseService.ts for dependency injection | Restrictions: Must maintain interface segregation principle, do not expose internal implementation details, ensure contract compatibility with DI container | Success: Interface is well-defined with clear method signatures, extends base service appropriately, supports all required service operations_
 
-- [ ] 4. Integrate runtime flow, routing, or pipeline hooks when applicable
-  - Files: `src/http/router.rs`, `src/http/mod.rs`, or the relevant request/response pipeline module
-  - Add Axum routes, extractors, response mapping, or request/response processing hooks as required
-  - Keep status codes, headers, and error responses consistent with existing handlers
-  - Purpose: Connect the feature logic to the actual runtime entry points
-  - _Leverage: src/http/router.rs, src/admin.rs, src/upload.rs, src/request_encode.rs, src/upstream.rs_
-  - _Requirements: 3.1, 3.2_
-  - _Prompt: Role: Rust backend developer with expertise in Axum and HTTP proxy flows | Task: Integrate the feature into the runtime path required by requirements 3.1 and 3.2, using existing routing and pipeline patterns | Restrictions: Do not bypass current middleware or request processing conventions, maintain response compatibility, and keep handler responsibilities narrow | Success: The feature is reachable through the correct runtime path, behavior is consistent with existing endpoints, and the flow remains testable_
+- [ ] 6. Implement feature service in src/services/FeatureService.ts
+  - File: src/services/FeatureService.ts
+  - Create concrete service implementation using FeatureModel
+  - Add error handling with existing error utilities
+  - Purpose: Provide business logic layer for feature operations
+  - _Leverage: src/services/BaseService.ts, src/utils/errorHandler.ts, src/models/FeatureModel.ts_
+  - _Requirements: 3.2_
+  - _Prompt: Role: Backend Developer with expertise in service layer architecture and business logic | Task: Implement concrete FeatureService following requirement 3.2, using FeatureModel and extending BaseService patterns with proper error handling from src/utils/errorHandler.ts | Restrictions: Must implement interface contract exactly, do not bypass model validation, maintain separation of concerns from data layer | Success: Service implements all interface methods correctly, robust error handling implemented, business logic is well-encapsulated and testable_
 
-- [ ] 5. Update configuration and startup wiring when applicable
-  - Files: `src/config.rs`, `src/main.rs`, and any affected runtime module
-  - Add new environment variables, defaults, timeouts, size budgets, or feature flags when needed
-  - Validate config parsing, fallback behavior, and startup-time wiring
-  - Purpose: Ensure the feature can be configured and started safely
-  - _Leverage: src/config.rs, src/main.rs, src/blob_runtime.rs, src/upstream.rs_
+- [ ] 7. Add service dependency injection in src/utils/di.ts
+  - File: src/utils/di.ts (modify existing)
+  - Register FeatureService in dependency injection container
+  - Configure service lifetime and dependencies
+  - Purpose: Enable service injection throughout application
+  - _Leverage: existing DI configuration in src/utils/di.ts_
+  - _Requirements: 3.1_
+  - _Prompt: Role: DevOps Engineer with expertise in dependency injection and IoC containers | Task: Register FeatureService in DI container following requirement 3.1, configuring appropriate lifetime and dependencies using existing patterns from src/utils/di.ts | Restrictions: Must follow existing DI container patterns, do not create circular dependencies, maintain service resolution efficiency | Success: FeatureService is properly registered and resolvable, dependencies are correctly configured, service lifetime is appropriate for use case_
+
+- [ ] 8. Create service unit tests in tests/services/FeatureService.test.ts
+  - File: tests/services/FeatureService.test.ts
+  - Write tests for service methods with mocked dependencies
+  - Test error handling scenarios
+  - Purpose: Ensure service reliability and proper error handling
+  - _Leverage: tests/helpers/testUtils.ts, tests/mocks/modelMocks.ts_
+  - _Requirements: 3.2, 3.3_
+  - _Prompt: Role: QA Engineer with expertise in service testing and mocking frameworks | Task: Create comprehensive unit tests for FeatureService methods covering requirements 3.2 and 3.3, using mocked dependencies from tests/mocks/modelMocks.ts and test utilities | Restrictions: Must mock all external dependencies, test business logic in isolation, do not test framework code | Success: All service methods tested with proper mocking, error scenarios covered, tests verify business logic correctness and error handling_
+
+- [ ] 4. Create API endpoints
+  - Design API structure
+  - _Leverage: src/api/baseApi.ts, src/utils/apiUtils.ts_
+  - _Requirements: 4.0_
+  - _Prompt: Role: API Architect specializing in RESTful design and Express.js | Task: Design comprehensive API structure following requirement 4.0, leveraging existing patterns from src/api/baseApi.ts and utilities from src/utils/apiUtils.ts | Restrictions: Must follow REST conventions, maintain API versioning compatibility, do not expose internal data structures directly | Success: API structure is well-designed and documented, follows existing patterns, supports all required operations with proper HTTP methods and status codes_
+
+- [ ] 4.1 Set up routing and middleware
+  - Configure application routes
+  - Add authentication middleware
+  - Set up error handling middleware
+  - _Leverage: src/middleware/auth.ts, src/middleware/errorHandler.ts_
   - _Requirements: 4.1_
-  - _Prompt: Role: Rust infrastructure engineer specializing in configuration and service startup | Task: Extend configuration and runtime wiring for the feature following requirement 4.1, matching existing Config parsing and startup patterns | Restrictions: Keep environment parsing explicit, preserve existing defaults unless the spec changes them, and avoid hidden runtime side effects | Success: New configuration keys are parsed correctly, startup remains stable, and runtime wiring is consistent with the current service design_
+  - _Prompt: Role: Backend Developer with expertise in Express.js middleware and routing | Task: Configure application routes and middleware following requirement 4.1, integrating authentication from src/middleware/auth.ts and error handling from src/middleware/errorHandler.ts | Restrictions: Must maintain middleware order, do not bypass security middleware, ensure proper error propagation | Success: Routes are properly configured with correct middleware chain, authentication works correctly, errors are handled gracefully throughout the request lifecycle_
 
-- [ ] 6. Add focused unit tests in `tests/[feature]_test.rs`
-  - File: `tests/[feature]_test.rs`
-  - Cover success cases, failure cases, and important boundary conditions
-  - Reuse existing helpers such as `rust_sync_proxy::test_config()` and `rust_sync_proxy::test_blob_runtime()` when applicable
-  - Purpose: Verify the feature logic in isolation and prevent regressions
-  - _Leverage: tests/config_test.rs, tests/request_rewrite_test.rs, tests/response_materialize_test.rs, tests/blob_runtime_test.rs_
-  - _Requirements: 5.1, 5.2_
-  - _Prompt: Role: Rust QA engineer with expertise in unit and async testing | Task: Add focused tests for the new feature module covering requirements 5.1 and 5.2, following the repository's `*_test.rs` conventions | Restrictions: Keep tests deterministic, avoid real network calls unless intentionally covered by fixtures or local test servers, and assert both happy-path and edge behavior | Success: The module has reliable unit coverage, boundary cases are checked, and tests run consistently under cargo test_
+- [ ] 4.2 Implement CRUD endpoints
+  - Create API endpoints
+  - Add request validation
+  - Write API integration tests
+  - _Leverage: src/controllers/BaseController.ts, src/utils/validation.ts_
+  - _Requirements: 4.2, 4.3_
+  - _Prompt: Role: Full-stack Developer with expertise in API development and validation | Task: Implement CRUD endpoints following requirements 4.2 and 4.3, extending BaseController patterns and using validation utilities from src/utils/validation.ts | Restrictions: Must validate all inputs, follow existing controller patterns, ensure proper HTTP status codes and responses | Success: All CRUD operations work correctly, request validation prevents invalid data, integration tests pass and cover all endpoints_
 
-- [ ] 7. Add integration or regression coverage for cross-module flows
-  - Files: `tests/[feature]_integration_test.rs` or existing `*_test.rs` files that exercise the changed flow
-  - Verify routing, proxying, uploads, rewriting, caching, or materialization behavior end-to-end as needed
-  - Focus on user-visible behavior and interactions between modules
-  - Purpose: Catch regressions that unit tests alone would miss
-  - _Leverage: tests/http_forwarding_test.rs, tests/http_smoke.rs, tests/upload_mode_test.rs, tests/request_inline_data_flow_test.rs_
-  - _Requirements: 5.3_
-  - _Prompt: Role: Integration test engineer for Rust network services | Task: Add regression coverage for the affected end-to-end flow following requirement 5.3, using the existing test style in the repository | Restrictions: Keep the test scope tied to real integration risks, avoid duplicating unit-level assertions, and preserve reasonable execution time | Success: Cross-module behavior is verified, regressions are caught at the system boundary, and the tests reflect how the feature is actually exercised_
+- [ ] 5. Add frontend components
+  - Plan component architecture
+  - _Leverage: src/components/BaseComponent.tsx, src/styles/theme.ts_
+  - _Requirements: 5.0_
+  - _Prompt: Role: Frontend Architect with expertise in React component design and architecture | Task: Plan comprehensive component architecture following requirement 5.0, leveraging base patterns from src/components/BaseComponent.tsx and theme system from src/styles/theme.ts | Restrictions: Must follow existing component patterns, maintain design system consistency, ensure component reusability | Success: Architecture is well-planned and documented, components are properly organized, follows existing patterns and theme system_
 
-- [ ] 8. Run quality gates and update supporting documentation
-  - Files: `Cargo.toml`, `README.md`, `docs/`, or comments in touched modules
-  - Run `cargo fmt`, `cargo test`, and `cargo clippy` if the repository uses it
-  - Document any new config keys, runtime behavior, or operational caveats
-  - Purpose: Leave the change reviewable, testable, and maintainable
-  - _Leverage: Cargo.toml, README.md, existing module docs and comments_
+- [ ] 5.1 Create base UI components
+  - Set up component structure
+  - Implement reusable components
+  - Add styling and theming
+  - _Leverage: src/components/BaseComponent.tsx, src/styles/theme.ts_
+  - _Requirements: 5.1_
+  - _Prompt: Role: Frontend Developer specializing in React and component architecture | Task: Create reusable UI components following requirement 5.1, extending BaseComponent patterns and using existing theme system from src/styles/theme.ts | Restrictions: Must use existing theme variables, follow component composition patterns, ensure accessibility compliance | Success: Components are reusable and properly themed, follow existing architecture, accessible and responsive_
+
+- [ ] 5.2 Implement feature-specific components
+  - Create feature components
+  - Add state management
+  - Connect to API endpoints
+  - _Leverage: src/hooks/useApi.ts, src/components/BaseComponent.tsx_
+  - _Requirements: 5.2, 5.3_
+  - _Prompt: Role: React Developer with expertise in state management and API integration | Task: Implement feature-specific components following requirements 5.2 and 5.3, using API hooks from src/hooks/useApi.ts and extending BaseComponent patterns | Restrictions: Must use existing state management patterns, handle loading and error states properly, maintain component performance | Success: Components are fully functional with proper state management, API integration works smoothly, user experience is responsive and intuitive_
+
+- [ ] 6. Integration and testing
+  - Plan integration approach
+  - _Leverage: src/utils/integrationUtils.ts, tests/helpers/testUtils.ts_
+  - _Requirements: 6.0_
+  - _Prompt: Role: Integration Engineer with expertise in system integration and testing strategies | Task: Plan comprehensive integration approach following requirement 6.0, leveraging integration utilities from src/utils/integrationUtils.ts and test helpers | Restrictions: Must consider all system components, ensure proper test coverage, maintain integration test reliability | Success: Integration plan is comprehensive and feasible, all system components work together correctly, integration points are well-tested_
+
+- [ ] 6.1 Write end-to-end tests
+  - Set up E2E testing framework
+  - Write user journey tests
+  - Add test automation
+  - _Leverage: tests/helpers/testUtils.ts, tests/fixtures/data.ts_
   - _Requirements: All_
-  - _Prompt: Role: Rust maintainer responsible for release quality | Task: Finish the implementation by running the relevant quality gates and updating supporting documentation for all requirements | Restrictions: Do not claim success without running the checks that exist in the repository, keep documentation scoped to the shipped behavior, and avoid unrelated cleanup | Success: Formatting and tests pass, supporting documentation matches the implementation, and the change is ready for review_
+  - _Prompt: Role: QA Automation Engineer with expertise in E2E testing and test frameworks like Cypress or Playwright | Task: Implement comprehensive end-to-end tests covering all requirements, setting up testing framework and user journey tests using test utilities and fixtures | Restrictions: Must test real user workflows, ensure tests are maintainable and reliable, do not test implementation details | Success: E2E tests cover all critical user journeys, tests run reliably in CI/CD pipeline, user experience is validated from end-to-end_
+
+- [ ] 6.2 Final integration and cleanup
+  - Integrate all components
+  - Fix any integration issues
+  - Clean up code and documentation
+  - _Leverage: src/utils/cleanup.ts, docs/templates/_
+  - _Requirements: All_
+  - _Prompt: Role: Senior Developer with expertise in code quality and system integration | Task: Complete final integration of all components and perform comprehensive cleanup covering all requirements, using cleanup utilities and documentation templates | Restrictions: Must not break existing functionality, ensure code quality standards are met, maintain documentation consistency | Success: All components are fully integrated and working together, code is clean and well-documented, system meets all requirements and quality standards_
