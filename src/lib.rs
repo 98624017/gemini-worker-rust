@@ -39,6 +39,7 @@ pub fn test_config() -> Config {
         proxy_standard_output_urls: true,
         proxy_special_upstream_urls: true,
         enable_image_compression: false,
+        image_compression_jpeg_quality: 97,
         admin_password: String::new(),
         image_fetch_timeout: Duration::from_millis(20_000),
         image_tls_handshake_timeout: Duration::from_millis(15_000),

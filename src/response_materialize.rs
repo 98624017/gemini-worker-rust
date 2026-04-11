@@ -22,10 +22,11 @@ struct InlineDataReplacement {
 }
 
 pub fn optimize_inline_data_images(body: &mut Value, config: &Config) -> Result<()> {
-    optimize_inline_data_images_with_threshold(
+    optimize_inline_data_images_with_options(
         body,
         config.enable_image_compression,
         crate::image_io::PNG_COMPRESSION_THRESHOLD_BYTES,
+        config.image_compression_jpeg_quality,
     )
 }
 
@@ -72,10 +73,25 @@ pub async fn finalize_output_urls(
     Ok(())
 }
 
+#[cfg(test)]
 fn optimize_inline_data_images_with_threshold(
     body: &mut Value,
     enabled: bool,
     threshold_bytes: usize,
+) -> Result<()> {
+    optimize_inline_data_images_with_options(
+        body,
+        enabled,
+        threshold_bytes,
+        crate::image_io::DEFAULT_JPEG_QUALITY,
+    )
+}
+
+fn optimize_inline_data_images_with_options(
+    body: &mut Value,
+    enabled: bool,
+    threshold_bytes: usize,
+    jpeg_quality: u8,
 ) -> Result<()> {
     if !enabled {
         return Ok(());
@@ -89,11 +105,12 @@ fn optimize_inline_data_images_with_threshold(
             continue;
         };
 
-        let optimized = crate::image_io::maybe_compress_png_bytes_with_threshold(
+        let optimized = crate::image_io::maybe_compress_png_bytes_with_options(
             &image_bytes,
             &entry.mime_type,
             enabled,
             threshold_bytes,
+            jpeg_quality,
         )?;
         if optimized.mime_type == entry.mime_type
             && optimized.bytes.as_ref() == image_bytes.as_slice()

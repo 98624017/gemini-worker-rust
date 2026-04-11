@@ -12,7 +12,7 @@ use crate::blob_runtime::{BlobHandle, BlobRuntime};
 pub const DEFAULT_MAX_IMAGE_BYTES: usize = 35 * 1024 * 1024;
 pub const REQUEST_MAX_IMAGE_BYTES: usize = 15 * 1024 * 1024;
 pub const PNG_COMPRESSION_THRESHOLD_BYTES: usize = 15 * 1024 * 1024;
-const JPEG_QUALITY: u8 = 97;
+pub const DEFAULT_JPEG_QUALITY: u8 = 97;
 
 #[derive(Clone, Debug)]
 pub struct FetchedInlineData {
@@ -181,11 +181,12 @@ pub fn maybe_compress_png_bytes(
     mime_type: &str,
     enabled: bool,
 ) -> Result<OptimizedImage> {
-    maybe_compress_png_bytes_with_threshold(
+    maybe_compress_png_bytes_with_options(
         bytes,
         mime_type,
         enabled,
         PNG_COMPRESSION_THRESHOLD_BYTES,
+        DEFAULT_JPEG_QUALITY,
     )
 }
 
@@ -194,6 +195,22 @@ pub fn maybe_compress_png_bytes_with_threshold(
     mime_type: &str,
     enabled: bool,
     threshold_bytes: usize,
+) -> Result<OptimizedImage> {
+    maybe_compress_png_bytes_with_options(
+        bytes,
+        mime_type,
+        enabled,
+        threshold_bytes,
+        DEFAULT_JPEG_QUALITY,
+    )
+}
+
+pub fn maybe_compress_png_bytes_with_options(
+    bytes: &[u8],
+    mime_type: &str,
+    enabled: bool,
+    threshold_bytes: usize,
+    jpeg_quality: u8,
 ) -> Result<OptimizedImage> {
     let normalized_mime = mime_type.trim().to_ascii_lowercase();
     if !enabled || normalized_mime != "image/png" || bytes.len() <= threshold_bytes {
@@ -209,7 +226,7 @@ pub fn maybe_compress_png_bytes_with_threshold(
     let height = u16::try_from(rgb.height()).map_err(|_| anyhow!("image height too large"))?;
 
     let mut encoded = Vec::new();
-    let mut encoder = JpegEncoder::new(&mut encoded, JPEG_QUALITY);
+    let mut encoder = JpegEncoder::new(&mut encoded, jpeg_quality);
     encoder.set_sampling_factor(SamplingFactor::R_4_4_4);
     encoder.encode(rgb.as_raw(), width, height, JpegColorType::Rgb)?;
 
@@ -251,7 +268,10 @@ fn enforce_max_size_u64(actual: u64, limit: usize) -> Result<()> {
 mod tests {
     use std::io::Cursor;
 
-    use super::maybe_compress_png_bytes_with_threshold;
+    use super::{
+        DEFAULT_JPEG_QUALITY, maybe_compress_png_bytes_with_options,
+        maybe_compress_png_bytes_with_threshold,
+    };
 
     #[test]
     fn large_png_can_be_reencoded_to_jpeg_when_compression_enabled() {
@@ -272,5 +292,30 @@ mod tests {
 
         assert_eq!(optimized.mime_type, "image/jpeg");
         assert!(optimized.bytes.starts_with(&[0xFF, 0xD8, 0xFF]));
+    }
+
+    #[test]
+    fn higher_jpeg_quality_produces_larger_reencoded_output() {
+        let image = image::RgbImage::from_fn(128, 128, |x, y| {
+            image::Rgb([
+                ((x * 31 + y * 17) % 255) as u8,
+                ((x * 13 + y * 29) % 255) as u8,
+                ((x * 7 + y * 47) % 255) as u8,
+            ])
+        });
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgb8(image)
+            .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+
+        let lower_quality =
+            maybe_compress_png_bytes_with_options(&png, "image/png", true, 1, 90).unwrap();
+        let default_quality =
+            maybe_compress_png_bytes_with_options(&png, "image/png", true, 1, DEFAULT_JPEG_QUALITY)
+                .unwrap();
+
+        assert_eq!(lower_quality.mime_type, "image/jpeg");
+        assert_eq!(default_quality.mime_type, "image/jpeg");
+        assert!(default_quality.bytes.len() > lower_quality.bytes.len());
     }
 }

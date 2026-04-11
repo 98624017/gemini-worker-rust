@@ -70,6 +70,16 @@ fn image_compression_flag_can_be_enabled_from_env() {
 }
 
 #[test]
+fn image_compression_jpeg_quality_can_be_overridden_from_env() {
+    let env = HashMap::from([(
+        "IMAGE_COMPRESSION_JPEG_QUALITY".to_string(),
+        "100".to_string(),
+    )]);
+    let cfg = rust_sync_proxy::config::Config::from_env_map(&env).unwrap();
+    assert_eq!(cfg.image_compression_jpeg_quality, 100);
+}
+
+#[test]
 fn invalid_port_falls_back_to_default_like_go() {
     let env = HashMap::from([("PORT".to_string(), "bad-port".to_string())]);
     let cfg = rust_sync_proxy::config::Config::from_env_map(&env).unwrap();

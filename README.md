@@ -128,6 +128,10 @@ export MALLOC_CONF="background_thread:true,dirty_decay_ms:100,muzzy_decay_ms:100
 - `ENABLE_IMAGE_COMPRESSION`
   默认关闭；开启后，响应侧 PNG 图片超过 `15MiB` 时会尝试转成
   `4:4:4 / quality=97` 的 JPEG，以降低上传图床 / R2 或返回 base64 的体积
+- `IMAGE_COMPRESSION_JPEG_QUALITY`
+  默认 `97`；仅在 `ENABLE_IMAGE_COMPRESSION=true` 时生效，范围 `1-100`。
+  数值越大，压缩越轻，生成的 JPEG 一般越大；想把 `4.xMB` 往 `7MB+`
+  调，建议先试 `100`
 - `ADMIN_PASSWORD`
   非空时启用 admin 路由并要求 Basic Auth
 - `IMAGE_FETCH_TIMEOUT_MS`

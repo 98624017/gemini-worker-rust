@@ -24,6 +24,7 @@ const DEFAULT_BLOB_GLOBAL_HOT_BUDGET_BYTES: u64 = 384 * 1024 * 1024;
 const DEFAULT_BLOB_SPILL_DIR: &str = "/tmp/rust-sync-proxy-blobs";
 const DEFAULT_LEGACY_UGUU_UPLOAD_URL: &str = "https://uguu.se/upload";
 const DEFAULT_LEGACY_KEFAN_UPLOAD_URL: &str = "https://ai.kefan.cn/api/upload/local";
+const DEFAULT_IMAGE_COMPRESSION_JPEG_QUALITY: u8 = 97;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BlobBudgetDefaults {
@@ -45,6 +46,7 @@ pub struct Config {
     pub proxy_standard_output_urls: bool,
     pub proxy_special_upstream_urls: bool,
     pub enable_image_compression: bool,
+    pub image_compression_jpeg_quality: u8,
     pub admin_password: String,
     pub image_fetch_timeout: Duration,
     pub image_tls_handshake_timeout: Duration,
@@ -143,6 +145,10 @@ impl Config {
                 true,
             ),
             enable_image_compression: parse_bool(env_map.get("ENABLE_IMAGE_COMPRESSION"), false),
+            image_compression_jpeg_quality: parse_jpeg_quality(
+                env_map.get("IMAGE_COMPRESSION_JPEG_QUALITY"),
+                DEFAULT_IMAGE_COMPRESSION_JPEG_QUALITY,
+            ),
             admin_password: env_map
                 .get("ADMIN_PASSWORD")
                 .map(String::as_str)
@@ -357,6 +363,13 @@ fn parse_non_negative_usize_with_default(value: Option<&String>, default_value: 
     match value.and_then(|raw| raw.trim().parse::<usize>().ok()) {
         Some(parsed) => parsed,
         None => default_value,
+    }
+}
+
+fn parse_jpeg_quality(value: Option<&String>, default_value: u8) -> u8 {
+    match value.and_then(|raw| raw.trim().parse::<u8>().ok()) {
+        Some(parsed) if (1..=100).contains(&parsed) => parsed,
+        _ => default_value,
     }
 }
 
