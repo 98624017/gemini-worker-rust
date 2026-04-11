@@ -223,6 +223,50 @@ async fn truncated_upstream_body_returns_structured_proxy_error() {
     assert_eq!(json_body["error"]["kind"], "body_truncated");
 }
 
+#[tokio::test]
+async fn upstream_json_error_preserves_message_and_adds_metadata() {
+    let server = Router::new().route(
+        "/v1beta/models/demo:generateContent",
+        post(mock_generate_content_rate_limited),
+    );
+    let server_addr = spawn_server(server).await;
+
+    let mut config = rust_sync_proxy::test_config();
+    config.upstream_base_url = format!("http://{server_addr}");
+    config.upstream_api_key = "env-key".to_string();
+    let app = rust_sync_proxy::build_router(config);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1beta/models/demo:generateContent")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "contents": [{
+                            "parts": [{
+                                "text": "hello"
+                            }]
+                        }]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let json_body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json_body["error"]["message"], "rate limited");
+    assert_eq!(json_body["error"]["code"], 429);
+    assert_eq!(json_body["error"]["source"], "upstream");
+    assert_eq!(json_body["error"]["stage"], "upstream_response");
+    assert_eq!(json_body["error"]["kind"], "upstream_error");
+}
+
 async fn mock_generate_content(
     State(state): State<TestState>,
     headers: HeaderMap,
@@ -263,6 +307,17 @@ async fn mock_generate_content(
             }
         }]
     }))
+}
+
+async fn mock_generate_content_rate_limited() -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        Json(json!({
+            "error": {
+                "message": "rate limited"
+            }
+        })),
+    )
 }
 
 async fn mock_legacy_upload(

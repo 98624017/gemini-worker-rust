@@ -98,6 +98,18 @@ fn classify_standard_proxy_error(err: &anyhow::Error) -> Option<Value> {
     None
 }
 
+fn annotate_upstream_error_json(status: StatusCode, body_bytes: &[u8]) -> Option<Vec<u8>> {
+    let mut body: Value = serde_json::from_slice(body_bytes).ok()?;
+    let error = body.get_mut("error")?.as_object_mut()?;
+    error
+        .entry("code".to_string())
+        .or_insert_with(|| json!(status.as_u16()));
+    error.insert("source".to_string(), json!("upstream"));
+    error.insert("stage".to_string(), json!("upstream_response"));
+    error.insert("kind".to_string(), json!("upstream_error"));
+    serde_json::to_vec(&body).ok()
+}
+
 #[derive(Clone)]
 struct AppState {
     config: Arc<Config>,
@@ -495,7 +507,10 @@ async fn handle_non_stream_response(
     })?;
 
     if !status.is_success() {
-        let mut response = Response::new(Body::from(body_bytes));
+        let response_body = annotate_upstream_error_json(status, &body_bytes)
+            .map(Body::from)
+            .unwrap_or_else(|| Body::from(body_bytes));
+        let mut response = Response::new(response_body);
         *response.status_mut() = StatusCode::from_u16(status.as_u16())?;
         response.headers_mut().insert(CONTENT_TYPE, content_type);
         return Ok(response);
