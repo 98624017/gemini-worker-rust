@@ -274,6 +274,53 @@ curl -sS \
   - `totalTokenCount = 2048`
 - 这组值**不是上游真实计费数据**，只用于兼容下游按次计费触发逻辑，不能拿来做 token 对账。
 
+## 错误返回与排障
+
+- **上游显式错误优先透传**
+  - 如果上游返回非 `2xx` 且响应体是 JSON，并且包含 `error` 对象，代理会尽量保留上游
+    `error.message` 等原始语义。
+  - 同时会补齐稳定元信息：
+    - `error.code`
+    - `error.source = upstream`
+    - `error.stage = upstream_response`
+    - `error.kind = upstream_error`
+  - 如果上游返回的不是 JSON，当前仍按原始响应体透传，不强行改写。
+
+- **代理本层错误统一结构化**
+  - 代理自己生成的错误，当前统一返回：
+
+```json
+{
+  "error": {
+    "code": 502,
+    "message": "failed to read upstream response body",
+    "source": "proxy",
+    "stage": "read_upstream_body",
+    "kind": "body_truncated"
+  }
+}
+```
+
+  - 当前已覆盖的典型本层错误包括：
+    - 请求 JSON 非法
+    - 标准链路读取上游响应体失败
+    - `aiapidev` create / poll 响应 JSON 解析失败
+    - `aiapidev` 轮询总超时
+
+- **admin 日志会补充诊断字段**
+  - `/admin/api/logs` 中每条日志现在会额外记录：
+    - `errorSource`
+    - `errorStage`
+    - `errorKind`
+    - `errorMessage`
+    - `errorDetail`
+    - `upstreamStatusCode`
+    - `upstreamErrorBody`
+  - 其中：
+    - `errorDetail` 主要用于记录代理内部原始错误细节，便于排障，不承诺对下游稳定。
+    - `upstreamStatusCode` 和 `upstreamErrorBody` 只会在 `source=upstream` 时填充。
+  - `/admin/logs` 详情页也会显示这些字段，便于区分到底是上游业务错误，还是代理链路自己的错误。
+
 ## 验证
 
 跑 Rust 测试：
