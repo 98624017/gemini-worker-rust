@@ -14,6 +14,9 @@ SPEC.loader.exec_module(MODULE)
 
 
 class DockerAiapidevRegressionTest(unittest.TestCase):
+    def test_default_request_timeout_seconds_is_450(self) -> None:
+        self.assertEqual(MODULE.DEFAULT_REQUEST_TIMEOUT_SECONDS, 450.0)
+
     def test_build_aiapidev_request_body_url_mode(self) -> None:
         body = MODULE.build_aiapidev_request_body(
             image_urls=[

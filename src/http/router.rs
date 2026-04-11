@@ -35,7 +35,7 @@ use crate::upstream::{
 
 const MAX_REQUEST_BODY_BYTES: usize = 20 * 1024 * 1024;
 const AIAPIDEV_POLL_INTERVAL: Duration = Duration::from_secs(1);
-const AIAPIDEV_MAX_POLL_TIME: Duration = Duration::from_secs(300);
+const AIAPIDEV_MAX_POLL_TIME: Duration = Duration::from_secs(450);
 const AIAPIDEV_MAX_CONSECUTIVE_POLL_FAILURES: usize = 5;
 
 #[derive(Clone)]
@@ -951,6 +951,11 @@ mod tests {
                 }
             }))
         }
+    }
+
+    #[test]
+    fn aiapidev_poll_timeout_is_450_seconds() {
+        assert_eq!(AIAPIDEV_MAX_POLL_TIME, Duration::from_secs(450));
     }
 
     #[tokio::test]
