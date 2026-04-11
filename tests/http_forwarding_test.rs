@@ -7,6 +7,7 @@ use axum::http::{HeaderMap, Request, StatusCode, Uri};
 use axum::routing::post;
 use axum::{Json, Router};
 use serde_json::{Value, json};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use tower::ServiceExt;
@@ -153,6 +154,75 @@ async fn generate_content_forwards_expected_upstream_request_and_output_url_resu
     );
 }
 
+#[tokio::test]
+async fn invalid_request_json_returns_structured_proxy_error() {
+    let app = rust_sync_proxy::build_router(rust_sync_proxy::test_config());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1beta/models/demo:generateContent")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"contents":[{"parts":[{"text":"hello"}]}]"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let json_body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json_body["error"]["code"], 502);
+    assert_eq!(json_body["error"]["message"], "invalid request json body");
+    assert_eq!(json_body["error"]["source"], "proxy");
+    assert_eq!(json_body["error"]["stage"], "parse_request_json");
+    assert_eq!(json_body["error"]["kind"], "invalid_json");
+}
+
+#[tokio::test]
+async fn truncated_upstream_body_returns_structured_proxy_error() {
+    let server_addr = spawn_truncated_body_server().await;
+
+    let mut config = rust_sync_proxy::test_config();
+    config.upstream_base_url = format!("http://{server_addr}");
+    config.upstream_api_key = "env-key".to_string();
+    let app = rust_sync_proxy::build_router(config);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1beta/models/demo:generateContent")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "contents": [{
+                            "parts": [{
+                                "text": "hello"
+                            }]
+                        }]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let json_body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json_body["error"]["code"], 502);
+    assert_eq!(
+        json_body["error"]["message"],
+        "failed to decode upstream response body"
+    );
+    assert_eq!(json_body["error"]["source"], "proxy");
+    assert_eq!(json_body["error"]["stage"], "decode_upstream_body");
+    assert_eq!(json_body["error"]["kind"], "body_decode_failed");
+}
+
 async fn mock_generate_content(
     State(state): State<TestState>,
     headers: HeaderMap,
@@ -229,6 +299,26 @@ async fn spawn_server(app: Router) -> std::net::SocketAddr {
     let address = listener.local_addr().unwrap();
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
+    });
+    address
+}
+
+async fn spawn_truncated_body_server() -> std::net::SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request_buf = vec![0u8; 4096];
+        let _ = socket.read(&mut request_buf).await;
+        let response = concat!(
+            "HTTP/1.1 200 OK\r\n",
+            "Content-Type: application/json\r\n",
+            "Content-Length: 80\r\n",
+            "Connection: close\r\n",
+            "\r\n",
+            "{\"candidates\":[{\"content\":{\"parts\":[]}}]}"
+        );
+        let _ = socket.write_all(response.as_bytes()).await;
     });
     address
 }

@@ -51,6 +51,46 @@ fn proxy_error_json(code: u16, message: &str, source: &str, stage: &str, kind: &
     })
 }
 
+fn classify_standard_proxy_error(err: &anyhow::Error) -> Option<Value> {
+    let message = err.to_string();
+    if message.starts_with("invalid request json body:") {
+        return Some(proxy_error_json(
+            502,
+            "invalid request json body",
+            "proxy",
+            "parse_request_json",
+            "invalid_json",
+        ));
+    }
+
+    if is_upstream_body_decode_error(err) {
+        return Some(proxy_error_json(
+            502,
+            "failed to decode upstream response body",
+            "proxy",
+            "decode_upstream_body",
+            "body_decode_failed",
+        ));
+    }
+
+    None
+}
+
+fn is_upstream_body_decode_error(err: &anyhow::Error) -> bool {
+    if let Some(reqwest_error) = err.downcast_ref::<reqwest::Error>()
+        && (reqwest_error.is_body() || reqwest_error.is_decode())
+    {
+        return true;
+    }
+
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(|reqwest_error| reqwest_error.is_body() || reqwest_error.is_decode())
+            || cause.to_string().contains("error decoding response body")
+    })
+}
+
 #[derive(Clone)]
 struct AppState {
     config: Arc<Config>,
@@ -190,6 +230,7 @@ async fn model_action(
         .await;
     }
     let target_path = format!("/v1beta/models/{rest}");
+    let is_aiapidev_upstream = is_aiapidev_base_url(&resolved.base_url);
 
     match forward_gemini_request(state.clone(), resolved, target_path, request).await {
         Ok((response, mut admin_entry)) => {
@@ -203,11 +244,23 @@ async fn model_action(
             finalize_admin_response(&state, response, admin_entry).await
         }
         Err(err) => {
-            let response = (
-                StatusCode::BAD_GATEWAY,
-                Json(json!({"error": {"code": 502, "message": err.to_string()}})),
-            )
-                .into_response();
+            let response = if !is_aiapidev_upstream {
+                if let Some(structured_error) = classify_standard_proxy_error(&err) {
+                    (StatusCode::BAD_GATEWAY, Json(structured_error)).into_response()
+                } else {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        Json(json!({"error": {"code": 502, "message": err.to_string()}})),
+                    )
+                        .into_response()
+                }
+            } else {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({"error": {"code": 502, "message": err.to_string()}})),
+                )
+                    .into_response()
+            };
             finalize_admin_response(
                 &state,
                 response,
@@ -243,8 +296,8 @@ async fn forward_gemini_request(
         .map_err(|err| anyhow!("failed to read request body: {err}"))?;
     let request_raw = admin::maybe_sanitize_json_for_log(&request_body, admin_enabled);
 
-    let body: Value =
-        serde_json::from_slice(&request_body).map_err(|err| anyhow!("invalid json body: {err}"))?;
+    let body: Value = serde_json::from_slice(&request_body)
+        .map_err(|err| anyhow!("invalid request json body: {err}"))?;
     let output_mode = get_output_mode(request_query.as_deref(), &body);
     let is_aiapidev = is_aiapidev_base_url(&resolved.base_url);
 
