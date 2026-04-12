@@ -7,6 +7,10 @@ use url::Url;
 
 const DEFAULT_UPSTREAM_BASE_URL: &str = "https://magic666.top";
 const DEFAULT_PORT: u16 = 8787;
+const DEFAULT_UPSTREAM_TIMEOUT_MS: u64 = 600_000;
+const DEFAULT_UPSTREAM_CONNECT_TIMEOUT_MS: u64 = 10_000;
+const DEFAULT_UPSTREAM_TCP_KEEPALIVE_MS: u64 = 30_000;
+const DEFAULT_UPSTREAM_POOL_IDLE_TIMEOUT_MS: u64 = 15_000;
 const DEFAULT_SLOW_LOG_THRESHOLD_MS: u64 = 100_000;
 const DEFAULT_IMAGE_FETCH_TIMEOUT_MS: u64 = 20_000;
 const DEFAULT_UPLOAD_TIMEOUT_MS: u64 = 20_000;
@@ -38,6 +42,10 @@ pub struct Config {
     pub port: u16,
     pub upstream_base_url: String,
     pub upstream_api_key: String,
+    pub upstream_timeout: Duration,
+    pub upstream_connect_timeout: Duration,
+    pub upstream_tcp_keepalive: Duration,
+    pub upstream_pool_idle_timeout: Duration,
     pub image_host_mode: String,
     pub allowed_proxy_domains: Vec<String>,
     pub public_base_url: String,
@@ -100,6 +108,10 @@ impl Config {
             .filter(|v| !v.is_empty())
             .unwrap_or(DEFAULT_UPSTREAM_BASE_URL)
             .to_string();
+        let upstream_timeout_ms_raw = parse_positive_u64_with_default(
+            env_map.get("UPSTREAM_TIMEOUT_MS"),
+            DEFAULT_UPSTREAM_TIMEOUT_MS,
+        );
 
         let image_host_mode = env_map
             .get("IMAGE_HOST_MODE")
@@ -123,6 +135,21 @@ impl Config {
             port,
             upstream_base_url,
             upstream_api_key: env_map.get("UPSTREAM_API_KEY").cloned().unwrap_or_default(),
+            upstream_timeout: Duration::from_millis(upstream_timeout_ms_raw),
+            upstream_connect_timeout: Duration::from_millis(parse_positive_u64_with_default(
+                env_map.get("UPSTREAM_CONNECT_TIMEOUT_MS"),
+                DEFAULT_UPSTREAM_CONNECT_TIMEOUT_MS,
+            )),
+            upstream_tcp_keepalive: Duration::from_millis(parse_positive_u64_with_default(
+                env_map.get("UPSTREAM_TCP_KEEPALIVE_MS"),
+                DEFAULT_UPSTREAM_TCP_KEEPALIVE_MS,
+            )),
+            upstream_pool_idle_timeout: Duration::from_millis(
+                parse_positive_u64_with_default(
+                    env_map.get("UPSTREAM_POOL_IDLE_TIMEOUT_MS"),
+                    DEFAULT_UPSTREAM_POOL_IDLE_TIMEOUT_MS,
+                ),
+            ),
             image_host_mode,
             allowed_proxy_domains,
             public_base_url: env_map

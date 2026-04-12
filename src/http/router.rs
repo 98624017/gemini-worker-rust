@@ -98,18 +98,77 @@ impl fmt::Display for StructuredProxyError {
 
 impl StdError for StructuredProxyError {}
 
-fn classify_standard_proxy_error(err: &anyhow::Error) -> Option<Value> {
+fn classify_standard_proxy_error_detail(err: &anyhow::Error) -> Option<StructuredProxyError> {
     if let Some(structured) = err.downcast_ref::<StructuredProxyError>() {
-        return Some(proxy_error_json(
+        return Some(StructuredProxyError::new(
+            structured.message,
+            structured.stage,
+            structured.kind,
+            structured.detail.clone(),
+        ));
+    }
+
+    let reqwest_error = err.downcast_ref::<reqwest::Error>()?;
+    let (message, kind) = if reqwest_error.is_timeout() {
+        ("upstream request timed out", "upstream_timeout")
+    } else if reqwest_error.is_connect() {
+        ("failed to connect to upstream", "upstream_connect_failed")
+    } else if reqwest_error.is_body() {
+        (
+            "failed while sending upstream request body",
+            "upstream_request_body_failed",
+        )
+    } else if reqwest_error.is_request() {
+        ("failed to send upstream request", "upstream_request_failed")
+    } else {
+        ("upstream transport error", "upstream_transport_error")
+    };
+
+    Some(StructuredProxyError::new(
+        message,
+        "send_upstream_request",
+        kind,
+        reqwest_error.to_string(),
+    ))
+}
+
+fn classify_standard_proxy_error(err: &anyhow::Error) -> Option<Value> {
+    classify_standard_proxy_error_detail(err).map(|structured| {
+        proxy_error_json(
             502,
             structured.message,
             "proxy",
             structured.stage,
             structured.kind,
-        ));
-    }
+        )
+    })
+}
 
-    None
+fn apply_structured_proxy_error(entry: &mut AdminLogEntry, structured: &StructuredProxyError) {
+    entry.error_source = "proxy".to_string();
+    entry.error_stage = structured.stage.to_string();
+    entry.error_kind = structured.kind.to_string();
+    entry.error_message = structured.message.to_string();
+    entry.error_detail = structured.detail.clone();
+}
+
+fn build_structured_proxy_error_response(structured: &StructuredProxyError) -> Response {
+    proxy_error_response(
+        StatusCode::BAD_GATEWAY,
+        structured.message,
+        structured.stage,
+        structured.kind,
+    )
+}
+
+fn build_upstream_client(config: &Config) -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(config.upstream_timeout)
+        .connect_timeout(config.upstream_connect_timeout)
+        .tcp_keepalive(config.upstream_tcp_keepalive)
+        .pool_idle_timeout(config.upstream_pool_idle_timeout)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
 }
 
 fn apply_admin_error_fields(
@@ -209,6 +268,7 @@ pub fn build_router(config: Config) -> Router {
         crate::image_io::DEFAULT_MAX_IMAGE_BYTES,
         false,
     );
+    let upstream_client = build_upstream_client(&config);
     let blob_runtime = Arc::new(BlobRuntime::new(BlobRuntimeConfig {
         inline_max_bytes: config.blob_inline_max_bytes,
         request_hot_budget_bytes: config.blob_request_hot_budget_bytes,
@@ -218,7 +278,7 @@ pub fn build_router(config: Config) -> Router {
     let state = AppState {
         uploader: Arc::new(Uploader::new(upload_client, config.clone())),
         config: Arc::new(config),
-        upstream_client: reqwest::Client::new(),
+        upstream_client,
         image_client,
         admin,
         request_inline_data_fetch_service,
@@ -334,18 +394,9 @@ async fn model_action(
                 ..Default::default()
             };
             let response = if !is_aiapidev_upstream {
-                if let Some(structured) = err.downcast_ref::<StructuredProxyError>() {
-                    admin_entry.error_source = "proxy".to_string();
-                    admin_entry.error_stage = structured.stage.to_string();
-                    admin_entry.error_kind = structured.kind.to_string();
-                    admin_entry.error_message = structured.message.to_string();
-                    admin_entry.error_detail = structured.detail.clone();
-                    proxy_error_response(
-                        StatusCode::BAD_GATEWAY,
-                        structured.message,
-                        structured.stage,
-                        structured.kind,
-                    )
+                if let Some(structured) = classify_standard_proxy_error_detail(&err) {
+                    apply_structured_proxy_error(&mut admin_entry, &structured);
+                    build_structured_proxy_error_response(&structured)
                 } else if let Some(structured_error) = classify_standard_proxy_error(&err) {
                     (StatusCode::BAD_GATEWAY, Json(structured_error)).into_response()
                 } else {

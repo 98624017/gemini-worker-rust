@@ -6,6 +6,10 @@ fn defaults_match_runtime_expectations() {
     let cfg = rust_sync_proxy::config::Config::from_env_map(&HashMap::new()).unwrap();
     assert_eq!(cfg.port, 8787);
     assert_eq!(cfg.upstream_base_url, "https://magic666.top");
+    assert_eq!(cfg.upstream_timeout, Duration::from_millis(600_000));
+    assert_eq!(cfg.upstream_connect_timeout, Duration::from_millis(10_000));
+    assert_eq!(cfg.upstream_tcp_keepalive, Duration::from_millis(30_000));
+    assert_eq!(cfg.upstream_pool_idle_timeout, Duration::from_millis(15_000));
     assert_eq!(cfg.image_host_mode.as_str(), "legacy");
     assert_eq!(cfg.slow_log_threshold, Duration::from_millis(100_000));
     assert_eq!(cfg.image_fetch_timeout, Duration::from_millis(20_000));
@@ -84,6 +88,31 @@ fn invalid_port_falls_back_to_default_like_go() {
     let env = HashMap::from([("PORT".to_string(), "bad-port".to_string())]);
     let cfg = rust_sync_proxy::config::Config::from_env_map(&env).unwrap();
     assert_eq!(cfg.port, 8787);
+}
+
+#[test]
+fn upstream_http_timeouts_can_be_overridden_from_env() {
+    let env = HashMap::from([
+        ("UPSTREAM_TIMEOUT_MS".to_string(), "65432".to_string()),
+        (
+            "UPSTREAM_CONNECT_TIMEOUT_MS".to_string(),
+            "4321".to_string(),
+        ),
+        (
+            "UPSTREAM_TCP_KEEPALIVE_MS".to_string(),
+            "21000".to_string(),
+        ),
+        (
+            "UPSTREAM_POOL_IDLE_TIMEOUT_MS".to_string(),
+            "9000".to_string(),
+        ),
+    ]);
+
+    let cfg = rust_sync_proxy::config::Config::from_env_map(&env).unwrap();
+    assert_eq!(cfg.upstream_timeout, Duration::from_millis(65_432));
+    assert_eq!(cfg.upstream_connect_timeout, Duration::from_millis(4_321));
+    assert_eq!(cfg.upstream_tcp_keepalive, Duration::from_millis(21_000));
+    assert_eq!(cfg.upstream_pool_idle_timeout, Duration::from_millis(9_000));
 }
 
 #[test]

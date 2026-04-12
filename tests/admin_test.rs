@@ -238,6 +238,72 @@ async fn admin_logs_capture_upstream_error_fields() {
 }
 
 #[tokio::test]
+async fn admin_logs_capture_structured_upstream_connect_failures() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+
+    let mut config = rust_sync_proxy::test_config();
+    config.admin_password = "pw".to_string();
+    config.upstream_base_url = format!("http://{addr}");
+
+    let app = rust_sync_proxy::build_router(config);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1beta/models/demo:generateContent")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "contents": [{
+                            "parts": [{
+                                "text": "hello"
+                            }]
+                        }]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"]["source"], "proxy");
+    assert_eq!(json["error"]["stage"], "send_upstream_request");
+    assert_eq!(json["error"]["kind"], "upstream_connect_failed");
+
+    let auth = format!("Basic {}", STANDARD.encode("user:pw"));
+    let logs_response = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/api/logs")
+                .header("authorization", auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(logs_response.status(), StatusCode::OK);
+    let body = to_bytes(logs_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let item = &json["items"][0];
+    assert_eq!(item["errorSource"], "proxy");
+    assert_eq!(item["errorStage"], "send_upstream_request");
+    assert_eq!(item["errorKind"], "upstream_connect_failed");
+    assert_eq!(item["errorMessage"], "failed to connect to upstream");
+    let error_detail = item["errorDetail"].as_str().unwrap_or_default();
+    assert!(!error_detail.is_empty());
+    assert!(error_detail.contains(&addr.to_string()));
+}
+
+#[tokio::test]
 async fn admin_logs_page_contains_chartjs_and_theme_toggle() {
     let html = fetch_admin_logs_page_html().await;
 

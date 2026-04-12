@@ -26,6 +26,10 @@ pub fn test_config() -> Config {
         port: 8787,
         upstream_base_url: "https://magic666.top".to_string(),
         upstream_api_key: "test-upstream-key".to_string(),
+        upstream_timeout: Duration::from_millis(600_000),
+        upstream_connect_timeout: Duration::from_millis(10_000),
+        upstream_tcp_keepalive: Duration::from_millis(30_000),
+        upstream_pool_idle_timeout: Duration::from_millis(15_000),
         image_host_mode: "legacy".to_string(),
         allowed_proxy_domains: vec![
             "ai.kefan.cn".to_string(),
