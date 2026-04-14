@@ -129,6 +129,80 @@ async fn admin_stats_include_spill_metrics() {
 }
 
 #[tokio::test]
+async fn admin_logs_and_stats_include_stage_duration_fields() {
+    let mut config = rust_sync_proxy::test_config();
+    config.admin_password = "pw".to_string();
+
+    let app = rust_sync_proxy::build_router(config);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1beta/models/demo:generateContent")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"contents":[{"parts":[{"text":"hello"}]}]"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+
+    let auth = format!("Basic {}", STANDARD.encode("user:pw"));
+    let logs_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/admin/api/logs")
+                .header("authorization", auth.clone())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(logs_response.status(), StatusCode::OK);
+    let logs_body = to_bytes(logs_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let logs_json: serde_json::Value = serde_json::from_slice(&logs_body).unwrap();
+    let first = &logs_json["items"][0];
+    assert!(first["requestParseMs"].is_number());
+    assert!(first["requestImagePrepareMs"].is_number());
+    assert!(first["requestImageMaterializeMs"].is_number());
+    assert!(first["requestImageFetchWorkMs"].is_number());
+    assert!(first["requestImageStoreWorkMs"].is_number());
+    assert!(first["requestEncodeMs"].is_number());
+    assert!(first["upstreamBuildMs"].is_number());
+    assert!(first["responseProcessMs"].is_number());
+    assert!(first["uploadMs"].is_number());
+
+    let stats_response = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/api/stats")
+                .header("authorization", auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stats_response.status(), StatusCode::OK);
+    let stats_body = to_bytes(stats_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let stats_json: serde_json::Value = serde_json::from_slice(&stats_body).unwrap();
+    assert!(stats_json["requestParseMs"].is_number());
+    assert!(stats_json["requestImagePrepareMs"].is_number());
+    assert!(stats_json["requestImageMaterializeMs"].is_number());
+    assert!(stats_json["requestImageFetchWorkMs"].is_number());
+    assert!(stats_json["requestImageStoreWorkMs"].is_number());
+    assert!(stats_json["requestEncodeMs"].is_number());
+    assert!(stats_json["upstreamBuildMs"].is_number());
+    assert!(stats_json["responseProcessMs"].is_number());
+    assert!(stats_json["uploadMs"].is_number());
+}
+
+#[tokio::test]
 async fn admin_logs_capture_structured_proxy_error_fields() {
     let mut config = rust_sync_proxy::test_config();
     config.admin_password = "pw".to_string();

@@ -240,6 +240,12 @@ struct AppState {
     blob_runtime: Arc<BlobRuntime>,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct ResponseStageDurations {
+    response_process_ms: i64,
+    upload_ms: i64,
+}
+
 pub fn build_router(config: Config) -> Router {
     let admin = if config.admin_password.trim().is_empty() {
         None
@@ -337,6 +343,7 @@ async fn model_action(
         .await;
     }
 
+    let request_parse_started = Instant::now();
     let (parts, body) = request.into_parts();
     let request_body = match to_bytes(body, MAX_REQUEST_BODY_BYTES).await {
         Ok(body) => body,
@@ -364,6 +371,7 @@ async fn model_action(
                     is_stream: false,
                     status_code: StatusCode::BAD_GATEWAY.as_u16(),
                     duration_ms: started_at.elapsed().as_millis() as i64,
+                    request_parse_ms: request_parse_started.elapsed().as_millis() as i64,
                     error_source: "proxy".to_string(),
                     error_stage: "read_request_body".to_string(),
                     error_kind: "request_body_read_failed".to_string(),
@@ -402,6 +410,7 @@ async fn model_action(
                     is_stream: false,
                     status_code: StatusCode::BAD_GATEWAY.as_u16(),
                     duration_ms: started_at.elapsed().as_millis() as i64,
+                    request_parse_ms: request_parse_started.elapsed().as_millis() as i64,
                     error_source: "proxy".to_string(),
                     error_stage: "parse_request_json".to_string(),
                     error_kind: "invalid_json".to_string(),
@@ -423,9 +432,11 @@ async fn model_action(
         Ok(resolved) => resolved,
         Err(err) => {
             let status = err.status_code();
-            let response =
-                (status, Json(json!({"error": {"code": status.as_u16(), "message": err.to_string()}})))
-                    .into_response();
+            let response = (
+                status,
+                Json(json!({"error": {"code": status.as_u16(), "message": err.to_string()}})),
+            )
+                .into_response();
             return finalize_admin_response(
                 &state,
                 response,
@@ -438,12 +449,14 @@ async fn model_action(
                     is_stream: false,
                     status_code: status.as_u16(),
                     duration_ms: started_at.elapsed().as_millis() as i64,
+                    request_parse_ms: request_parse_started.elapsed().as_millis() as i64,
                     ..Default::default()
                 },
             )
             .await;
         }
     };
+    let request_parse_ms = request_parse_started.elapsed().as_millis() as i64;
 
     let target_path = format!("/v1beta/models/{rest}");
     let is_aiapidev_upstream = is_aiapidev_base_url(&resolved.base_url);
@@ -457,6 +470,7 @@ async fn model_action(
             admin_entry.query = request_query;
             admin_entry.remote_addr = remote_addr;
             admin_entry.is_stream = false;
+            admin_entry.request_parse_ms += request_parse_ms;
             admin_entry.duration_ms = started_at.elapsed().as_millis() as i64;
             finalize_admin_response(&state, response, admin_entry).await
         }
@@ -469,6 +483,7 @@ async fn model_action(
                 remote_addr,
                 is_stream: false,
                 status_code: StatusCode::BAD_GATEWAY.as_u16(),
+                request_parse_ms,
                 duration_ms: started_at.elapsed().as_millis() as i64,
                 ..Default::default()
             };
@@ -503,6 +518,7 @@ async fn forward_gemini_request(
     target_path: String,
     request: Request,
 ) -> Result<(Response, AdminLogEntry)> {
+    let request_parse_started = Instant::now();
     let content_type_header = request.headers().get(CONTENT_TYPE).cloned();
     let accept_header = request.headers().get(ACCEPT).cloned();
     let request_query = request.uri().query().map(ToOwned::to_owned);
@@ -522,6 +538,7 @@ async fn forward_gemini_request(
     })?;
     let output_mode = get_output_mode(request_query.as_deref(), &body);
     let is_aiapidev = is_aiapidev_base_url(&resolved.base_url);
+    let request_parse_ms = request_parse_started.elapsed().as_millis() as i64;
 
     let admin_stats = state.admin.as_ref().map(|admin| admin.stats());
     let cache_observer = admin_stats.map(|stats| {
@@ -543,6 +560,7 @@ async fn forward_gemini_request(
         } else {
             None
         };
+        let upstream_build_started = Instant::now();
         let response = handle_aiapidev_response(
             &resolved,
             &target_path,
@@ -555,12 +573,22 @@ async fn forward_gemini_request(
             state.config.as_ref(),
         )
         .await;
+        let upstream_build_ms = upstream_build_started.elapsed().as_millis() as i64;
 
         let admin_entry = AdminLogEntry {
             output_mode: match output_mode {
                 OutputMode::Base64 => "base64".to_string(),
                 OutputMode::Url => "url".to_string(),
             },
+            request_parse_ms,
+            request_image_prepare_ms: 0,
+            request_image_materialize_ms: 0,
+            request_image_fetch_work_ms: 0,
+            request_image_store_work_ms: 0,
+            request_encode_ms: 0,
+            upstream_build_ms,
+            response_process_ms: 0,
+            upload_ms: 0,
             request_raw: request_raw
                 .as_ref()
                 .map(|value| value.pretty.clone())
@@ -583,6 +611,8 @@ async fn forward_gemini_request(
         return Ok((response, admin_entry));
     }
 
+    let request_image_prepare_started = Instant::now();
+    let request_image_materialize_started = Instant::now();
     let materialized = materialize_request_images_with_services(
         body,
         state.blob_runtime.as_ref(),
@@ -595,13 +625,19 @@ async fn forward_gemini_request(
         },
     )
     .await?;
+    let request_image_materialize_ms =
+        request_image_materialize_started.elapsed().as_millis() as i64;
+    let request_encode_started = Instant::now();
     let encoded = encode_request_body(
         materialized.request,
         materialized.replacements.clone(),
         state.blob_runtime.as_ref(),
     )
     .await?;
+    let request_encode_ms = request_encode_started.elapsed().as_millis() as i64;
+    let request_image_prepare_ms = request_image_prepare_started.elapsed().as_millis() as i64;
 
+    let upstream_build_started = Instant::now();
     for replacement in &materialized.replacements {
         state.blob_runtime.remove(&replacement.blob).await?;
     }
@@ -640,12 +676,20 @@ async fn forward_gemini_request(
         }
     };
     state.blob_runtime.remove(&encoded.body_blob).await?;
+    let upstream_build_ms = upstream_build_started.elapsed().as_millis() as i64;
 
     let mut admin_entry = AdminLogEntry {
         output_mode: match output_mode {
             OutputMode::Base64 => "base64".to_string(),
             OutputMode::Url => "url".to_string(),
         },
+        request_parse_ms,
+        request_image_prepare_ms,
+        request_image_materialize_ms,
+        request_image_fetch_work_ms: materialized.fetch_work_ms,
+        request_image_store_work_ms: materialized.store_work_ms,
+        request_encode_ms,
+        upstream_build_ms,
         request_raw: request_raw
             .as_ref()
             .map(|value| value.pretty.clone())
@@ -665,7 +709,7 @@ async fn forward_gemini_request(
         ..Default::default()
     };
 
-    let response = handle_non_stream_response(
+    let (response, response_durations) = handle_non_stream_response(
         upstream_response,
         output_mode,
         &state.image_client,
@@ -676,6 +720,8 @@ async fn forward_gemini_request(
     )
     .await?;
     admin_entry.status_code = response.status().as_u16();
+    admin_entry.response_process_ms = response_durations.response_process_ms;
+    admin_entry.upload_ms = response_durations.upload_ms;
     Ok((response, admin_entry))
 }
 
@@ -687,7 +733,8 @@ async fn handle_non_stream_response(
     uploader: &Uploader,
     blob_runtime: &BlobRuntime,
     config: &Config,
-) -> Result<Response> {
+) -> Result<(Response, ResponseStageDurations)> {
+    let response_started = Instant::now();
     let status = upstream_response.status();
     let content_type = upstream_response
         .headers()
@@ -710,7 +757,13 @@ async fn handle_non_stream_response(
         let mut response = Response::new(response_body);
         *response.status_mut() = StatusCode::from_u16(status.as_u16())?;
         response.headers_mut().insert(CONTENT_TYPE, content_type);
-        return Ok(response);
+        return Ok((
+            response,
+            ResponseStageDurations {
+                response_process_ms: response_started.elapsed().as_millis() as i64,
+                upload_ms: 0,
+            },
+        ));
     }
 
     let json_body: Value = match serde_json::from_slice(&body_bytes) {
@@ -719,7 +772,13 @@ async fn handle_non_stream_response(
             let mut response = Response::new(Body::from(body_bytes));
             *response.status_mut() = StatusCode::from_u16(status.as_u16())?;
             response.headers_mut().insert(CONTENT_TYPE, content_type);
-            return Ok(response);
+            return Ok((
+                response,
+                ResponseStageDurations {
+                    response_process_ms: response_started.elapsed().as_millis() as i64,
+                    upload_ms: 0,
+                },
+            ));
         }
     };
 
@@ -734,14 +793,24 @@ async fn handle_non_stream_response(
     remove_thought_signatures(&mut final_json);
     final_json = keep_largest_inline_image(final_json);
     optimize_inline_data_images(&mut final_json, config)?;
+    let mut upload_ms = 0_i64;
     if output_mode == OutputMode::Url {
+        let upload_started = Instant::now();
         finalize_output_urls(&mut final_json, blob_runtime, uploader, config).await?;
+        upload_ms = upload_started.elapsed().as_millis() as i64;
     }
     let final_body = serde_json::to_vec(&final_json)?;
     let mut response = Response::new(Body::from(final_body));
     *response.status_mut() = StatusCode::from_u16(status.as_u16())?;
     response.headers_mut().insert(CONTENT_TYPE, content_type);
-    Ok(response)
+    let total_process_ms = response_started.elapsed().as_millis() as i64;
+    Ok((
+        response,
+        ResponseStageDurations {
+            response_process_ms: total_process_ms.saturating_sub(upload_ms),
+            upload_ms,
+        },
+    ))
 }
 
 async fn handle_aiapidev_response(

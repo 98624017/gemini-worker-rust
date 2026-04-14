@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use bytes::Bytes;
 use rust_sync_proxy::blob_runtime::{BlobRuntime, BlobRuntimeConfig};
 
 fn unique_spill_dir(name: &str) -> PathBuf {
@@ -97,4 +98,33 @@ async fn blob_runtime_does_not_record_spill_when_spill_write_fails() {
             || err.to_string().contains("not a directory")
             || err.to_string().contains("os error")
     );
+}
+
+#[tokio::test]
+async fn blob_runtime_can_store_shared_bytes_without_vec_copy() {
+    let runtime = test_blob_runtime(8 * 1024 * 1024);
+    let data = Bytes::from_static(b"shared-bytes");
+
+    let handle = runtime
+        .store_shared_bytes(data.clone(), "image/png".into())
+        .await
+        .unwrap();
+
+    assert!(runtime.is_inline(&handle).await);
+    assert_eq!(runtime.read_bytes(&handle).await.unwrap(), data);
+}
+
+#[tokio::test]
+async fn blob_runtime_can_store_external_shared_bytes_without_spill() {
+    let runtime = test_blob_runtime(1024);
+    let data = Bytes::from(vec![9_u8; 4096]);
+
+    let handle = runtime
+        .store_external_shared_bytes(data.clone(), "image/png".into())
+        .await
+        .unwrap();
+
+    assert!(runtime.is_inline(&handle).await);
+    assert_eq!(runtime.read_bytes(&handle).await.unwrap(), data);
+    assert_eq!(runtime.stats_snapshot().spill_count, 0);
 }

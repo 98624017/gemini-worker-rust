@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use anyhow::Result;
 use base64::Engine;
@@ -12,7 +13,7 @@ use crate::upload::{Uploader, wrap_external_proxy_url};
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct InlineDataEntry {
     mime_type: String,
-    data: String,
+    data: Arc<str>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -32,7 +33,7 @@ pub fn optimize_inline_data_images(body: &mut Value, config: &Config) -> Result<
 
 pub async fn finalize_output_urls(
     body: &mut Value,
-    runtime: &BlobRuntime,
+    _runtime: &BlobRuntime,
     uploader: &Uploader,
     config: &Config,
 ) -> Result<()> {
@@ -41,20 +42,9 @@ pub async fn finalize_output_urls(
     let external_proxy_prefix = config.resolved_external_image_proxy_prefix();
 
     for entry in entries {
-        let Ok(image_bytes) = STANDARD.decode(entry.data.as_bytes()) else {
-            continue;
-        };
-
-        let Ok(blob) = runtime
-            .store_bytes(image_bytes, entry.mime_type.clone())
-            .await
-        else {
-            continue;
-        };
-
-        let upload_result = uploader.upload_blob(runtime, &blob, &entry.mime_type).await;
-        runtime.remove(&blob).await?;
-
+        let upload_result = uploader
+            .upload_inline_data_base64(Arc::clone(&entry.data), &entry.mime_type)
+            .await;
         let Ok(upload_result) = upload_result else {
             continue;
         };
@@ -144,7 +134,7 @@ fn scan_inline_data_base64_entries(node: &Value) -> Vec<InlineDataEntry> {
                         if !is_url_like(data) {
                             let entry = InlineDataEntry {
                                 mime_type: mime_type.clone(),
-                                data: data.clone(),
+                                data: Arc::from(data.as_str()),
                             };
                             if !entries.contains(&entry) {
                                 entries.push(entry);
@@ -179,7 +169,7 @@ fn patch_inline_data_urls(node: &mut Value, replacements: &HashMap<InlineDataEnt
                 {
                     let entry = InlineDataEntry {
                         mime_type: mime_type.clone(),
-                        data: data.clone(),
+                        data: Arc::from(data.as_str()),
                     };
                     if let Some(url) = replacements.get(&entry) {
                         inline_data.insert("data".to_string(), Value::String(url.clone()));
@@ -212,7 +202,7 @@ fn patch_inline_data_base64(
                 {
                     let entry = InlineDataEntry {
                         mime_type: mime_type.clone(),
-                        data: data.clone(),
+                        data: Arc::from(data.as_str()),
                     };
                     if let Some(replacement) = replacements.get(&entry) {
                         inline_data.insert(

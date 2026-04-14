@@ -190,18 +190,18 @@ impl InlineDataUrlFetchService {
         };
 
         Some(Arc::new(Self {
-                client,
-                max_image_bytes,
-                allow_private_networks,
-                optimize_large_png_as_webp,
-                external_proxy_domains: config.image_fetch_external_proxy_domains.clone(),
-                memory_cache,
-                disk_cache,
-                inflight: Arc::new(Mutex::new(HashMap::new())),
-                wait_timeout: config.inline_data_url_background_fetch_wait_timeout,
-                total_timeout: config.inline_data_url_background_fetch_total_timeout,
-                max_inflight,
-            }))
+            client,
+            max_image_bytes,
+            allow_private_networks,
+            optimize_large_png_as_webp,
+            external_proxy_domains: config.image_fetch_external_proxy_domains.clone(),
+            memory_cache,
+            disk_cache,
+            inflight: Arc::new(Mutex::new(HashMap::new())),
+            wait_timeout: config.inline_data_url_background_fetch_wait_timeout,
+            total_timeout: config.inline_data_url_background_fetch_total_timeout,
+            max_inflight,
+        }))
     }
 
     pub async fn fetch(self: &Arc<Self>, raw_url: &str) -> Result<FetchResult> {

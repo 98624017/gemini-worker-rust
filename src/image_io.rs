@@ -117,14 +117,10 @@ pub async fn fetch_image_into_blob(
     )
     .await?;
     let fetched = maybe_convert_large_png_to_lossless_webp(fetched).await?;
-    let blob = runtime
-        .store_bytes(fetched.bytes.to_vec(), fetched.mime_type.clone())
-        .await?;
+    let FetchedInlineData { mime_type, bytes } = fetched;
+    let blob = runtime.store_shared_bytes(bytes, mime_type.clone()).await?;
 
-    Ok(FetchedBlob {
-        mime_type: fetched.mime_type,
-        blob,
-    })
+    Ok(FetchedBlob { mime_type, blob })
 }
 
 pub async fn maybe_convert_large_png_to_lossless_webp(

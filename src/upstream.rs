@@ -258,8 +258,8 @@ fn request_targets_4k(request_body: &Value) -> bool {
 }
 
 fn validate_http_base_url(raw: &str) -> Result<(), ResolveUpstreamError> {
-    let parsed = Url::parse(raw)
-        .map_err(|err| ResolveUpstreamError::invalid_override(err.to_string()))?;
+    let parsed =
+        Url::parse(raw).map_err(|err| ResolveUpstreamError::invalid_override(err.to_string()))?;
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err(ResolveUpstreamError::invalid_override(
             "custom baseUrl must use http or https",

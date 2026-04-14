@@ -26,6 +26,7 @@ pub struct BlobMeta {
 #[derive(Clone, Debug)]
 pub enum BlobStorage {
     Inline(Bytes),
+    Shared(Bytes),
     Spilled(PathBuf),
 }
 
@@ -103,6 +104,30 @@ impl BlobRuntime {
         Ok(self.build_handle(id, mime_type, size_bytes, storage))
     }
 
+    pub async fn store_shared_bytes(&self, bytes: Bytes, mime_type: String) -> Result<BlobHandle> {
+        let size_bytes = bytes.len() as u64;
+        let id = self.next_id();
+        let storage = if self.try_inline_reserve(size_bytes) {
+            BlobStorage::Inline(bytes)
+        } else {
+            let spilled_path = self.write_spilled_bytes(id, bytes.as_ref()).await?;
+            self.record_spill(size_bytes);
+            BlobStorage::Spilled(spilled_path)
+        };
+
+        Ok(self.build_handle(id, mime_type, size_bytes, storage))
+    }
+
+    pub async fn store_external_shared_bytes(
+        &self,
+        bytes: Bytes,
+        mime_type: String,
+    ) -> Result<BlobHandle> {
+        let size_bytes = bytes.len() as u64;
+        let id = self.next_id();
+        Ok(self.build_handle(id, mime_type, size_bytes, BlobStorage::Shared(bytes)))
+    }
+
     pub async fn store_stream<R>(&self, mut reader: R, mime_type: String) -> Result<BlobHandle>
     where
         R: AsyncRead + Unpin + Send,
@@ -178,14 +203,16 @@ impl BlobRuntime {
         handle: &BlobHandle,
     ) -> Result<Pin<Box<dyn AsyncRead + Send + 'static>>> {
         match handle.storage() {
-            BlobStorage::Inline(bytes) => Ok(Box::pin(Cursor::new(bytes.clone()))),
+            BlobStorage::Inline(bytes) | BlobStorage::Shared(bytes) => {
+                Ok(Box::pin(Cursor::new(bytes.clone())))
+            }
             BlobStorage::Spilled(path) => Ok(Box::pin(File::open(path).await?)),
         }
     }
 
     pub async fn read_bytes(&self, handle: &BlobHandle) -> Result<Bytes> {
         match handle.storage() {
-            BlobStorage::Inline(bytes) => Ok(bytes.clone()),
+            BlobStorage::Inline(bytes) | BlobStorage::Shared(bytes) => Ok(bytes.clone()),
             BlobStorage::Spilled(path) => Ok(fs::read(path).await?.into()),
         }
     }
@@ -200,6 +227,7 @@ impl BlobRuntime {
                 self.release_inline_bytes(bytes.len() as u64);
                 Ok(())
             }
+            BlobStorage::Shared(_) => Ok(()),
             BlobStorage::Spilled(path) => match fs::remove_file(path).await {
                 Ok(()) => Ok(()),
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -209,7 +237,10 @@ impl BlobRuntime {
     }
 
     pub async fn is_inline(&self, handle: &BlobHandle) -> bool {
-        matches!(handle.storage(), BlobStorage::Inline(_))
+        matches!(
+            handle.storage(),
+            BlobStorage::Inline(_) | BlobStorage::Shared(_)
+        )
     }
 
     pub async fn is_spilled(&self, handle: &BlobHandle) -> bool {

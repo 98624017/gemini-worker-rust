@@ -8,7 +8,7 @@ use base64::engine::general_purpose::STANDARD;
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::blob_runtime::{BlobHandle, BlobRuntime};
+use crate::blob_runtime::{BlobHandle, BlobRuntime, BlobStorage};
 use crate::request_materialize::RequestReplacement;
 
 pub struct EncodedRequestBody {
@@ -162,34 +162,61 @@ async fn write_blob_as_base64<W: AsyncWrite + Unpin>(
     blob: &BlobHandle,
     content_length: &mut u64,
 ) -> Result<()> {
+    if let BlobStorage::Inline(bytes) = blob.storage() {
+        write_base64_bytes(writer, bytes.as_ref(), content_length).await?;
+        return Ok(());
+    }
+
     let mut reader = runtime.open_reader(blob).await?;
-    let mut pending = Vec::new();
-    let mut chunk = [0_u8; 16 * 1024];
+    const CHUNK_BYTES: usize = 48 * 1024;
+    let mut input = vec![0_u8; CHUNK_BYTES + 2];
+    let mut output = vec![0_u8; (CHUNK_BYTES + 2).div_ceil(3) * 4];
+    let mut carry_len = 0_usize;
 
     loop {
-        let read = reader.read(&mut chunk).await?;
+        let read = reader
+            .read(&mut input[carry_len..carry_len + CHUNK_BYTES])
+            .await?;
         if read == 0 {
             break;
         }
 
-        pending.extend_from_slice(&chunk[..read]);
-        let complete_len = pending.len() / 3 * 3;
+        let total_len = carry_len + read;
+        let complete_len = total_len / 3 * 3;
         if complete_len == 0 {
+            carry_len = total_len;
             continue;
         }
 
-        let mut out = vec![0_u8; complete_len / 3 * 4];
-        let written = STANDARD.encode_slice(&pending[..complete_len], &mut out)?;
-        write_counted(writer, &out[..written], content_length).await?;
-        pending.drain(..complete_len);
+        let written = STANDARD.encode_slice(&input[..complete_len], &mut output)?;
+        write_counted(writer, &output[..written], content_length).await?;
+
+        carry_len = total_len - complete_len;
+        if carry_len > 0 {
+            input.copy_within(complete_len..total_len, 0);
+        }
     }
 
-    if !pending.is_empty() {
-        let mut out = vec![0_u8; pending.len().div_ceil(3) * 4];
-        let written = STANDARD.encode_slice(&pending, &mut out)?;
-        write_counted(writer, &out[..written], content_length).await?;
+    if carry_len > 0 {
+        let written = STANDARD.encode_slice(&input[..carry_len], &mut output)?;
+        write_counted(writer, &output[..written], content_length).await?;
     }
 
+    Ok(())
+}
+
+async fn write_base64_bytes<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    bytes: &[u8],
+    content_length: &mut u64,
+) -> Result<()> {
+    if bytes.is_empty() {
+        return Ok(());
+    }
+
+    let mut out = vec![0_u8; bytes.len().div_ceil(3) * 4];
+    let written = STANDARD.encode_slice(bytes, &mut out)?;
+    write_counted(writer, &out[..written], content_length).await?;
     Ok(())
 }
 

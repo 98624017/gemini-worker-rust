@@ -362,6 +362,7 @@ sed -n '1,240p' docs/plans/2026-04-09-generate-content-memory-redesign-benchmark
 ```bash
 python3 scripts/benchmark_docker_mock_upstream.py \
   --image rust-sync-proxy:jemalloc-test \
+  --output-mode url \
   --image-url "https://example.com/7mb-a.png" \
   --image-url "https://example.com/7mb-b.png" \
   --image-url "https://example.com/7mb-c.png" \
@@ -369,6 +370,17 @@ python3 scripts/benchmark_docker_mock_upstream.py \
   --total-requests 4 \
   --cooldown-seconds 30
 ```
+
+四组图片重路径样本可以直接用这两个开关组合：
+
+- `--output-mode base64` + 不带 `--warm-cache`
+  - `miss/base64`
+- `--output-mode base64 --warm-cache`
+  - `hit/base64`
+- `--output-mode url` + 不带 `--warm-cache`
+  - `miss/url`
+- `--output-mode url --warm-cache`
+  - `hit/url`
 
 这条脚本的边界是：
 
@@ -384,6 +396,37 @@ python3 scripts/benchmark_docker_mock_upstream.py \
 - `rss-samples.csv`
 - `stats-samples.csv`
 - `requests.csv`
+
+其中 benchmark 现在会顺序跑两轮同样的请求：
+
+- `direct`：直打本地 mock upstream
+- `proxy`：经过 `rust-sync-proxy`
+
+`summary.json` 会额外给出这三个对照字段：
+
+- `direct_total_ms`
+  - 直连上游成功请求的平均总耗时
+- `proxy_total_ms`
+  - 经过代理成功请求的平均总耗时
+- `proxy_overhead_ms`
+  - `proxy_total_ms - direct_total_ms`
+
+正式跑基线时，还可以直接看这些分位统计：
+
+- `direct_p50_ms`
+- `proxy_p50_ms`
+- `proxy_overhead_p50_ms`
+- `direct_p95_ms`
+- `proxy_p95_ms`
+- `proxy_overhead_p95_ms`
+
+同时也会标明当前这次 run 属于哪个样本：
+
+- `scenario`
+- `cacheState`
+- `outputMode`
+
+`requests.csv` 现在会多一个 `target` 列，用来区分这条记录属于 `direct` 还是 `proxy`。
 
 跑 Go/Rust 对照：
 

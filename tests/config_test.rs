@@ -9,7 +9,10 @@ fn defaults_match_runtime_expectations() {
     assert_eq!(cfg.upstream_timeout, Duration::from_millis(600_000));
     assert_eq!(cfg.upstream_connect_timeout, Duration::from_millis(10_000));
     assert_eq!(cfg.upstream_tcp_keepalive, Duration::from_millis(30_000));
-    assert_eq!(cfg.upstream_pool_idle_timeout, Duration::from_millis(15_000));
+    assert_eq!(
+        cfg.upstream_pool_idle_timeout,
+        Duration::from_millis(15_000)
+    );
     assert_eq!(cfg.image_host_mode.as_str(), "legacy");
     assert_eq!(cfg.slow_log_threshold, Duration::from_millis(100_000));
     assert_eq!(cfg.image_fetch_timeout, Duration::from_millis(20_000));
@@ -98,10 +101,7 @@ fn upstream_http_timeouts_can_be_overridden_from_env() {
             "UPSTREAM_CONNECT_TIMEOUT_MS".to_string(),
             "4321".to_string(),
         ),
-        (
-            "UPSTREAM_TCP_KEEPALIVE_MS".to_string(),
-            "21000".to_string(),
-        ),
+        ("UPSTREAM_TCP_KEEPALIVE_MS".to_string(), "21000".to_string()),
         (
             "UPSTREAM_POOL_IDLE_TIMEOUT_MS".to_string(),
             "9000".to_string(),

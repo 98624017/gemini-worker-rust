@@ -300,9 +300,7 @@ async fn dual_upstream_header_routes_4k_requests_to_second_standard_upstream() {
                 .header(CONTENT_TYPE, "application/json")
                 .header(
                     "x-goog-api-key",
-                    format!(
-                        "http://{first_addr}|first-key,http://{second_addr}|second-key"
-                    ),
+                    format!("http://{first_addr}|first-key,http://{second_addr}|second-key"),
                 )
                 .body(Body::from(
                     json!({

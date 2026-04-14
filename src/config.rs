@@ -144,12 +144,10 @@ impl Config {
                 env_map.get("UPSTREAM_TCP_KEEPALIVE_MS"),
                 DEFAULT_UPSTREAM_TCP_KEEPALIVE_MS,
             )),
-            upstream_pool_idle_timeout: Duration::from_millis(
-                parse_positive_u64_with_default(
-                    env_map.get("UPSTREAM_POOL_IDLE_TIMEOUT_MS"),
-                    DEFAULT_UPSTREAM_POOL_IDLE_TIMEOUT_MS,
-                ),
-            ),
+            upstream_pool_idle_timeout: Duration::from_millis(parse_positive_u64_with_default(
+                env_map.get("UPSTREAM_POOL_IDLE_TIMEOUT_MS"),
+                DEFAULT_UPSTREAM_POOL_IDLE_TIMEOUT_MS,
+            )),
             image_host_mode,
             allowed_proxy_domains,
             public_base_url: env_map

@@ -159,6 +159,80 @@ async fn request_materialize_reuses_fetch_service_cache_between_calls() {
 }
 
 #[tokio::test]
+async fn request_materialize_keeps_large_cached_bytes_in_memory_without_spill() {
+    let large_image = vec![5_u8; 4096];
+    let (address, _request_count) = spawn_custom_image_server(large_image, "image/jpeg", 0).await;
+    let mut config = rust_sync_proxy::test_config();
+    config.inline_data_url_memory_cache_max_bytes = 16 * 1024;
+    config.inline_data_url_background_fetch_wait_timeout = Duration::from_millis(100);
+    config.inline_data_url_background_fetch_total_timeout = Duration::from_millis(500);
+    let service = rust_sync_proxy::cache::InlineDataUrlFetchService::from_config(
+        &config,
+        reqwest::Client::new(),
+        rust_sync_proxy::image_io::DEFAULT_MAX_IMAGE_BYTES,
+        true,
+    )
+    .unwrap();
+
+    let runtime = rust_sync_proxy::BlobRuntime::new(rust_sync_proxy::BlobRuntimeConfig {
+        inline_max_bytes: 1024,
+        request_hot_budget_bytes: 1024,
+        global_hot_budget_bytes: 8 * 1024,
+        spill_dir: std::env::temp_dir()
+            .join(format!("rust-sync-proxy-request-cache-{}", now_unix_ms())),
+    });
+    let request = json!({
+        "contents": [{
+            "parts": [{
+                "inlineData": {
+                    "data": format!("http://{address}/image.png")
+                }
+            }]
+        }]
+    });
+
+    rust_sync_proxy::request_materialize::materialize_request_images_with_services(
+        request.clone(),
+        &runtime,
+        &rust_sync_proxy::request_materialize::RequestMaterializeServices {
+            image_client: reqwest::Client::new(),
+            max_image_bytes: rust_sync_proxy::image_io::DEFAULT_MAX_IMAGE_BYTES,
+            allow_private_networks: true,
+            fetch_service: Some(service.clone()),
+            cache_observer: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let cache_hit = Arc::new(AtomicUsize::new(0));
+    let second = rust_sync_proxy::request_materialize::materialize_request_images_with_services(
+        request,
+        &runtime,
+        &rust_sync_proxy::request_materialize::RequestMaterializeServices {
+            image_client: reqwest::Client::new(),
+            max_image_bytes: rust_sync_proxy::image_io::DEFAULT_MAX_IMAGE_BYTES,
+            allow_private_networks: true,
+            fetch_service: Some(service),
+            cache_observer: Some({
+                let cache_hit = Arc::clone(&cache_hit);
+                Arc::new(move |_url, from_cache| {
+                    if from_cache {
+                        cache_hit.fetch_add(1, Ordering::Relaxed);
+                    }
+                })
+            }),
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(cache_hit.load(Ordering::Relaxed), 1);
+    assert!(runtime.is_inline(&second.replacements[0].blob).await);
+    assert_eq!(runtime.stats_snapshot().spill_count, 1);
+}
+
+#[tokio::test]
 async fn request_cache_retries_once_after_connection_drops_before_headers() {
     let (address, request_count) = spawn_flaky_connection_server().await;
     let mut config = rust_sync_proxy::test_config();
@@ -241,6 +315,13 @@ async fn request_cache_does_not_retry_non_retryable_status() {
 
 async fn spawn_image_server(delay_ms: u64) -> (std::net::SocketAddr, Arc<AtomicUsize>) {
     spawn_custom_image_server(vec![137, 80, 78, 71, 13, 10, 26, 10], "image/png", delay_ms).await
+}
+
+fn now_unix_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
 }
 
 async fn spawn_custom_image_server(

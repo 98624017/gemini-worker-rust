@@ -39,6 +39,15 @@ pub struct AdminLogEntry {
     pub output_mode: String,
     pub status_code: u16,
     pub duration_ms: i64,
+    pub request_parse_ms: i64,
+    pub request_image_prepare_ms: i64,
+    pub request_image_materialize_ms: i64,
+    pub request_image_fetch_work_ms: i64,
+    pub request_image_store_work_ms: i64,
+    pub request_encode_ms: i64,
+    pub upstream_build_ms: i64,
+    pub response_process_ms: i64,
+    pub upload_ms: i64,
     pub finish_reason: String,
     pub request_raw: String,
     pub request_raw_images: Vec<String>,
@@ -61,6 +70,15 @@ pub struct AdminStats {
     pub total_requests: AtomicI64,
     pub error_requests: AtomicI64,
     pub total_duration_ms: AtomicI64,
+    pub request_parse_ms: AtomicI64,
+    pub request_image_prepare_ms: AtomicI64,
+    pub request_image_materialize_ms: AtomicI64,
+    pub request_image_fetch_work_ms: AtomicI64,
+    pub request_image_store_work_ms: AtomicI64,
+    pub request_encode_ms: AtomicI64,
+    pub upstream_build_ms: AtomicI64,
+    pub response_process_ms: AtomicI64,
+    pub upload_ms: AtomicI64,
     pub cache_hits: AtomicI64,
 }
 
@@ -83,6 +101,15 @@ struct AdminStatsPayload {
     total_requests: i64,
     error_requests: i64,
     total_duration_ms: i64,
+    request_parse_ms: i64,
+    request_image_prepare_ms: i64,
+    request_image_materialize_ms: i64,
+    request_image_fetch_work_ms: i64,
+    request_image_store_work_ms: i64,
+    request_encode_ms: i64,
+    upstream_build_ms: i64,
+    response_process_ms: i64,
+    upload_ms: i64,
     cache_hits: i64,
     spill_count: u64,
     spill_bytes_total: u64,
@@ -1045,6 +1072,15 @@ pub fn admin_stats_response(
         total_requests: stats.total_requests.load(Ordering::Relaxed),
         error_requests: stats.error_requests.load(Ordering::Relaxed),
         total_duration_ms: stats.total_duration_ms.load(Ordering::Relaxed),
+        request_parse_ms: stats.request_parse_ms.load(Ordering::Relaxed),
+        request_image_prepare_ms: stats.request_image_prepare_ms.load(Ordering::Relaxed),
+        request_image_materialize_ms: stats.request_image_materialize_ms.load(Ordering::Relaxed),
+        request_image_fetch_work_ms: stats.request_image_fetch_work_ms.load(Ordering::Relaxed),
+        request_image_store_work_ms: stats.request_image_store_work_ms.load(Ordering::Relaxed),
+        request_encode_ms: stats.request_encode_ms.load(Ordering::Relaxed),
+        upstream_build_ms: stats.upstream_build_ms.load(Ordering::Relaxed),
+        response_process_ms: stats.response_process_ms.load(Ordering::Relaxed),
+        upload_ms: stats.upload_ms.load(Ordering::Relaxed),
         cache_hits: stats.cache_hits.load(Ordering::Relaxed),
         spill_count: runtime_stats.spill_count,
         spill_bytes_total: runtime_stats.spill_bytes_total,
@@ -1102,6 +1138,33 @@ pub fn apply_admin_stats(stats: &AdminStats, entry: &AdminLogEntry) {
     stats
         .total_duration_ms
         .fetch_add(entry.duration_ms, Ordering::Relaxed);
+    stats
+        .request_parse_ms
+        .fetch_add(entry.request_parse_ms, Ordering::Relaxed);
+    stats
+        .request_image_prepare_ms
+        .fetch_add(entry.request_image_prepare_ms, Ordering::Relaxed);
+    stats
+        .request_image_materialize_ms
+        .fetch_add(entry.request_image_materialize_ms, Ordering::Relaxed);
+    stats
+        .request_image_fetch_work_ms
+        .fetch_add(entry.request_image_fetch_work_ms, Ordering::Relaxed);
+    stats
+        .request_image_store_work_ms
+        .fetch_add(entry.request_image_store_work_ms, Ordering::Relaxed);
+    stats
+        .request_encode_ms
+        .fetch_add(entry.request_encode_ms, Ordering::Relaxed);
+    stats
+        .upstream_build_ms
+        .fetch_add(entry.upstream_build_ms, Ordering::Relaxed);
+    stats
+        .response_process_ms
+        .fetch_add(entry.response_process_ms, Ordering::Relaxed);
+    stats
+        .upload_ms
+        .fetch_add(entry.upload_ms, Ordering::Relaxed);
 }
 
 pub fn extract_finish_reason(body: &Value) -> Option<String> {
