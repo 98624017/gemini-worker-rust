@@ -2,7 +2,10 @@ use std::net::IpAddr;
 
 use anyhow::{Result, anyhow};
 use bytes::{Bytes, BytesMut};
+use image::ExtendedColorType;
+use image::ImageEncoder;
 use image::ImageFormat;
+use image::codecs::webp::WebPEncoder;
 use jpeg_encoder::{ColorType as JpegColorType, Encoder as JpegEncoder, SamplingFactor};
 use reqwest::header::CONTENT_TYPE;
 use url::Url;
@@ -11,7 +14,8 @@ use crate::blob_runtime::{BlobHandle, BlobRuntime};
 use crate::cache::ImageFetchStatusError;
 
 pub const DEFAULT_MAX_IMAGE_BYTES: usize = 35 * 1024 * 1024;
-pub const REQUEST_MAX_IMAGE_BYTES: usize = 15 * 1024 * 1024;
+pub const REQUEST_MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
+pub const REQUEST_PNG_WEBP_THRESHOLD_BYTES: usize = 10 * 1024 * 1024;
 pub const PNG_COMPRESSION_THRESHOLD_BYTES: usize = 15 * 1024 * 1024;
 pub const DEFAULT_JPEG_QUALITY: u8 = 97;
 
@@ -112,6 +116,7 @@ pub async fn fetch_image_into_blob(
         allow_private_networks,
     )
     .await?;
+    let fetched = maybe_convert_large_png_to_lossless_webp(fetched).await?;
     let blob = runtime
         .store_bytes(fetched.bytes.to_vec(), fetched.mime_type.clone())
         .await?;
@@ -119,6 +124,31 @@ pub async fn fetch_image_into_blob(
     Ok(FetchedBlob {
         mime_type: fetched.mime_type,
         blob,
+    })
+}
+
+pub async fn maybe_convert_large_png_to_lossless_webp(
+    fetched: FetchedInlineData,
+) -> Result<FetchedInlineData> {
+    let fallback = fetched.clone();
+    tokio::task::spawn_blocking(move || maybe_convert_large_png_to_lossless_webp_sync(fetched))
+        .await
+        .map_err(|err| anyhow!("request image optimization task failed: {err}"))
+        .map(|optimized| optimized.unwrap_or(fallback))
+}
+
+fn maybe_convert_large_png_to_lossless_webp_sync(
+    fetched: FetchedInlineData,
+) -> Result<FetchedInlineData> {
+    let optimized = maybe_convert_png_bytes_to_lossless_webp_with_threshold(
+        &fetched.bytes,
+        &fetched.mime_type,
+        REQUEST_PNG_WEBP_THRESHOLD_BYTES,
+    )?;
+
+    Ok(FetchedInlineData {
+        mime_type: optimized.mime_type,
+        bytes: optimized.bytes,
     })
 }
 
@@ -240,6 +270,42 @@ pub fn maybe_compress_png_bytes_with_options(
 
     Ok(OptimizedImage {
         mime_type: "image/jpeg".to_string(),
+        bytes: Bytes::from(encoded),
+    })
+}
+
+pub fn maybe_convert_png_bytes_to_lossless_webp_with_threshold(
+    bytes: &[u8],
+    mime_type: &str,
+    threshold_bytes: usize,
+) -> Result<OptimizedImage> {
+    let normalized_mime = mime_type.trim().to_ascii_lowercase();
+    if normalized_mime != "image/png" || bytes.len() <= threshold_bytes {
+        return Ok(OptimizedImage {
+            mime_type: normalized_mime,
+            bytes: Bytes::copy_from_slice(bytes),
+        });
+    }
+
+    let dynamic = image::load_from_memory_with_format(bytes, ImageFormat::Png)?;
+    let rgba = dynamic.to_rgba8();
+    let mut encoded = Vec::new();
+    WebPEncoder::new_lossless(&mut encoded).write_image(
+        rgba.as_raw(),
+        rgba.width(),
+        rgba.height(),
+        ExtendedColorType::Rgba8,
+    )?;
+
+    if encoded.len() >= bytes.len() {
+        return Ok(OptimizedImage {
+            mime_type: normalized_mime,
+            bytes: Bytes::copy_from_slice(bytes),
+        });
+    }
+
+    Ok(OptimizedImage {
+        mime_type: "image/webp".to_string(),
         bytes: Bytes::from(encoded),
     })
 }

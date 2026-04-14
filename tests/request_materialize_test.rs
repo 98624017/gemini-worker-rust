@@ -37,6 +37,14 @@ async fn request_materialize_fetches_image_url_into_blob_handle() {
     assert_eq!(materialized.replacements[0].mime_type, "image/png");
 }
 
+#[test]
+fn request_materialize_uses_20mib_request_limit() {
+    assert_eq!(
+        rust_sync_proxy::image_io::REQUEST_MAX_IMAGE_BYTES,
+        20 * 1024 * 1024
+    );
+}
+
 #[tokio::test]
 async fn request_materialize_fetches_unique_urls_concurrently() {
     let (base_url, peak_in_flight, _server) =

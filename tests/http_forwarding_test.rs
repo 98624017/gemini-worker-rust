@@ -267,6 +267,118 @@ async fn upstream_json_error_preserves_message_and_adds_proxy_metadata() {
     assert_eq!(json_body["error"]["kind"], "upstream_error");
 }
 
+#[tokio::test]
+async fn dual_upstream_header_routes_4k_requests_to_second_standard_upstream() {
+    let first_state = TestState::default();
+    let first_server = Router::new()
+        .route(
+            "/v1beta/models/demo:generateContent",
+            post(mock_generate_content),
+        )
+        .with_state(first_state.clone());
+    let first_addr = spawn_server(first_server).await;
+
+    let second_state = TestState::default();
+    let second_server = Router::new()
+        .route(
+            "/v1beta/models/demo:generateContent",
+            post(mock_generate_content),
+        )
+        .with_state(second_state.clone());
+    let second_addr = spawn_server(second_server).await;
+
+    let mut config = rust_sync_proxy::test_config();
+    config.upstream_base_url = format!("http://{first_addr}");
+    config.upstream_api_key = "env-key".to_string();
+    let app = rust_sync_proxy::build_router(config);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1beta/models/demo:generateContent")
+                .header(CONTENT_TYPE, "application/json")
+                .header(
+                    "x-goog-api-key",
+                    format!(
+                        "http://{first_addr}|first-key,http://{second_addr}|second-key"
+                    ),
+                )
+                .body(Body::from(
+                    json!({
+                        "generationConfig": {
+                            "imageConfig": {
+                                "imageSize": "4k"
+                            }
+                        },
+                        "contents": [{
+                            "parts": [{
+                                "text": "hello"
+                            }]
+                        }]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let first_requests = first_state.upstream_requests.lock().await.clone();
+    let second_requests = second_state.upstream_requests.lock().await.clone();
+    assert!(first_requests.is_empty());
+    assert_eq!(second_requests.len(), 1);
+    assert_eq!(second_requests[0].api_key, "second-key");
+    assert_eq!(second_requests[0].authorization, "Bearer second-key");
+}
+
+#[tokio::test]
+async fn malformed_dual_upstream_header_returns_bad_request() {
+    let app = rust_sync_proxy::build_router(rust_sync_proxy::test_config());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1beta/models/demo:generateContent")
+                .header(CONTENT_TYPE, "application/json")
+                .header(
+                    "x-goog-api-key",
+                    "https://first.example|first-key,second-key-only",
+                )
+                .body(Body::from(
+                    json!({
+                        "generationConfig": {
+                            "imageConfig": {
+                                "imageSize": "4k"
+                            }
+                        },
+                        "contents": [{
+                            "parts": [{
+                                "text": "hello"
+                            }]
+                        }]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let json_body: Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        json_body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("dual upstream")
+    );
+}
+
 async fn mock_generate_content(
     State(state): State<TestState>,
     headers: HeaderMap,

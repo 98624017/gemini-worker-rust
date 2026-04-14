@@ -105,8 +105,16 @@ export MALLOC_CONF="background_thread:true,dirty_decay_ms:100,muzzy_decay_ms:100
 - `x-goog-api-key: <baseUrl>|<apiKey>`
 - `Authorization: Bearer <apiKey>`
 - `Authorization: Bearer <baseUrl>|<apiKey>`
+- `x-goog-api-key: <baseUrl1>|<apiKey1>,<baseUrl2>|<apiKey2>`
+- `Authorization: Bearer <baseUrl1>|<apiKey1>,<baseUrl2>|<apiKey2>`
 
-当前 Rust 版支持单上游覆盖，不支持 Go 版的双上游 `baseUrl1|key1,baseUrl2|key2` 路由格式。
+双上游仅支持**请求头覆盖**，不支持通过环境变量配置双 key。
+
+行为规则：
+
+- 默认使用第 1 组 `baseUrl1/apiKey1`
+- 仅当请求体 `generationConfig.imageConfig.imageSize` 为 `4k` 或 `4K` 时，切到第 2 组 `baseUrl2/apiKey2`
+- token 含逗号但不能解析成两组合法 `<baseUrl>|<apiKey>` 时，请求返回 `400`
 
 ### 图片代理
 
@@ -143,6 +151,9 @@ export MALLOC_CONF="background_thread:true,dirty_decay_ms:100,muzzy_decay_ms:100
 - `IMAGE_FETCH_EXTERNAL_PROXY_DOMAINS`
   命中时改走外部代理抓图
   响应侧按 URL 拉图转 base64 时，单张图片默认最大 `35MiB`
+  标准链路请求侧按 URL 拉图时，单张图片默认最大 `20MiB`；若抓到的 PNG
+  大于 `10MiB`，会先尝试无损转成 `image/webp` 再发往真实上游，并把这版字节
+  写入请求侧缓存
 - `INLINE_DATA_URL_CACHE_DIR`
   非空时启用请求侧磁盘缓存
 - `INLINE_DATA_URL_CACHE_TTL_MS`

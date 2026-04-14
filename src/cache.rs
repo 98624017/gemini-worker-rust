@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -16,6 +17,7 @@ use url::form_urlencoded;
 
 use crate::image_io::{
     FetchedInlineData, fetch_image_as_inline_data_with_options, hostname_matches_domain_patterns,
+    maybe_convert_large_png_to_lossless_webp,
 };
 
 const EXTERNAL_IMAGE_FETCH_PROXY_PREFIX: &str = "https://gemini.xinbaoai.com/proxy/image?url=";
@@ -70,6 +72,7 @@ pub struct InlineDataUrlFetchService {
     client: reqwest::Client,
     max_image_bytes: usize,
     allow_private_networks: bool,
+    optimize_large_png_as_webp: bool,
     external_proxy_domains: Vec<String>,
     memory_cache: Option<Arc<MemoryCache>>,
     disk_cache: Option<Arc<DiskCache>>,
@@ -123,6 +126,40 @@ impl InlineDataUrlFetchService {
         max_image_bytes: usize,
         allow_private_networks: bool,
     ) -> Option<Arc<Self>> {
+        Self::from_config_with_png_optimization(
+            config,
+            client,
+            max_image_bytes,
+            allow_private_networks,
+            true,
+            config.inline_data_url_background_fetch_max_inflight,
+        )
+    }
+
+    pub fn from_response_config(
+        config: &crate::config::Config,
+        client: reqwest::Client,
+        max_image_bytes: usize,
+        allow_private_networks: bool,
+    ) -> Option<Arc<Self>> {
+        Self::from_config_with_png_optimization(
+            config,
+            client,
+            max_image_bytes,
+            allow_private_networks,
+            false,
+            0,
+        )
+    }
+
+    fn from_config_with_png_optimization(
+        config: &crate::config::Config,
+        client: reqwest::Client,
+        max_image_bytes: usize,
+        allow_private_networks: bool,
+        optimize_large_png_as_webp: bool,
+        max_inflight: usize,
+    ) -> Option<Arc<Self>> {
         if config.inline_data_url_cache_dir.trim().is_empty()
             && config
                 .inline_data_url_background_fetch_total_timeout
@@ -153,17 +190,18 @@ impl InlineDataUrlFetchService {
         };
 
         Some(Arc::new(Self {
-            client,
-            max_image_bytes,
-            allow_private_networks,
-            external_proxy_domains: config.image_fetch_external_proxy_domains.clone(),
-            memory_cache,
-            disk_cache,
-            inflight: Arc::new(Mutex::new(HashMap::new())),
-            wait_timeout: config.inline_data_url_background_fetch_wait_timeout,
-            total_timeout: config.inline_data_url_background_fetch_total_timeout,
-            max_inflight: config.inline_data_url_background_fetch_max_inflight,
-        }))
+                client,
+                max_image_bytes,
+                allow_private_networks,
+                optimize_large_png_as_webp,
+                external_proxy_domains: config.image_fetch_external_proxy_domains.clone(),
+                memory_cache,
+                disk_cache,
+                inflight: Arc::new(Mutex::new(HashMap::new())),
+                wait_timeout: config.inline_data_url_background_fetch_wait_timeout,
+                total_timeout: config.inline_data_url_background_fetch_total_timeout,
+                max_inflight,
+            }))
     }
 
     pub async fn fetch(self: &Arc<Self>, raw_url: &str) -> Result<FetchResult> {
@@ -272,21 +310,23 @@ impl InlineDataUrlFetchService {
     }
 
     async fn fetch_once(&self, fetch_url: &str) -> Result<FetchedInlineData> {
-        let future = fetch_image_as_inline_data_with_options(
-            &self.client,
-            fetch_url,
-            self.max_image_bytes,
-            self.allow_private_networks,
-        );
-        let fetched = if self.total_timeout.is_zero() {
-            future.await?
-        } else {
-            tokio::time::timeout(self.total_timeout, future)
-                .await
-                .map_err(|_| anyhow!("inlineData 图片抓取超时"))??
-        };
+        let fetched = fetch_and_optimize_with_total_timeout(
+            self.total_timeout,
+            fetch_image_as_inline_data_with_options(
+                &self.client,
+                fetch_url,
+                self.max_image_bytes,
+                self.allow_private_networks,
+            ),
+            |fetched| async move { Ok(fetched) },
+        )
+        .await?;
 
-        Ok(fetched)
+        if self.optimize_large_png_as_webp {
+            maybe_convert_large_png_to_lossless_webp(fetched).await
+        } else {
+            Ok(fetched)
+        }
     }
 
     async fn store_in_caches(&self, raw_url: &str, hit: &CachedInlineData) {
@@ -338,6 +378,30 @@ impl InlineDataUrlFetchService {
             Some(Err(message)) => Err(anyhow!(message.clone())),
             None => Ok(None),
         }
+    }
+}
+
+async fn fetch_and_optimize_with_total_timeout<Fut, Opt, OptFut>(
+    total_timeout: Duration,
+    fetch_future: Fut,
+    optimize: Opt,
+) -> Result<FetchedInlineData>
+where
+    Fut: Future<Output = Result<FetchedInlineData>>,
+    Opt: FnOnce(FetchedInlineData) -> OptFut,
+    OptFut: Future<Output = Result<FetchedInlineData>>,
+{
+    let pipeline = async move {
+        let fetched = fetch_future.await?;
+        optimize(fetched).await
+    };
+
+    if total_timeout.is_zero() {
+        pipeline.await
+    } else {
+        tokio::time::timeout(total_timeout, pipeline)
+            .await
+            .map_err(|_| anyhow!("inlineData 图片抓取超时"))?
     }
 }
 
@@ -550,6 +614,8 @@ fn _is_subpath(path: &Path, dir: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use tokio::time::{Duration, sleep};
+
     use super::*;
 
     #[tokio::test]
@@ -571,6 +637,7 @@ mod tests {
             client: reqwest::Client::new(),
             max_image_bytes: crate::image_io::DEFAULT_MAX_IMAGE_BYTES,
             allow_private_networks: true,
+            optimize_large_png_as_webp: true,
             external_proxy_domains: Vec::new(),
             memory_cache: None,
             disk_cache: None,
@@ -585,5 +652,29 @@ mod tests {
         assert_eq!(fetched.mime_type, "image/png");
         assert_eq!(fetched.bytes, Bytes::from_static(&[1, 2, 3]));
         assert!(!fetched.from_cache);
+    }
+
+    #[tokio::test]
+    async fn total_timeout_covers_optimization_stage() {
+        let result = fetch_and_optimize_with_total_timeout(
+            Duration::from_millis(5),
+            async {
+                Ok(FetchedInlineData {
+                    mime_type: "image/png".to_string(),
+                    bytes: Bytes::from(vec![
+                        1_u8;
+                        crate::image_io::REQUEST_PNG_WEBP_THRESHOLD_BYTES + 1
+                    ]),
+                })
+            },
+            |fetched| async move {
+                sleep(Duration::from_millis(50)).await;
+                Ok(fetched)
+            },
+        )
+        .await;
+
+        let err = result.unwrap_err();
+        assert_eq!(err.to_string(), "inlineData 图片抓取超时");
     }
 }

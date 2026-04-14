@@ -6,6 +6,9 @@ use axum::Router;
 use axum::extract::State;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header::CONTENT_TYPE};
 use axum::routing::get;
+use image::ColorType;
+use image::ImageEncoder;
+use image::codecs::png::{CompressionType, FilterType, PngEncoder};
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -15,6 +18,7 @@ struct ImageState {
     png: Vec<u8>,
     delay_ms: u64,
     request_count: Arc<AtomicUsize>,
+    content_type: &'static str,
 }
 
 #[tokio::test]
@@ -180,6 +184,37 @@ async fn request_cache_retries_once_after_connection_drops_before_headers() {
 }
 
 #[tokio::test]
+async fn request_cache_stores_large_png_as_lossless_webp() {
+    let png = noisy_png_bytes(2048, 1536);
+    assert!(png.len() > 10 * 1024 * 1024, "png too small: {}", png.len());
+
+    let (address, request_count) = spawn_custom_image_server(png, "image/png", 0).await;
+    let mut config = rust_sync_proxy::test_config();
+    config.inline_data_url_memory_cache_max_bytes = 64 * 1024 * 1024;
+    config.inline_data_url_background_fetch_wait_timeout = Duration::from_secs(2);
+    config.inline_data_url_background_fetch_total_timeout = Duration::from_secs(5);
+    let service = rust_sync_proxy::cache::InlineDataUrlFetchService::from_config(
+        &config,
+        reqwest::Client::new(),
+        rust_sync_proxy::image_io::REQUEST_MAX_IMAGE_BYTES,
+        true,
+    )
+    .unwrap();
+
+    let url = format!("http://{address}/image.png");
+    let first = service.fetch(&url).await.unwrap();
+    assert_eq!(first.mime_type, "image/webp");
+    assert!(!first.from_cache);
+    assert!(first.bytes.starts_with(b"RIFF"), "unexpected header");
+
+    let second = service.fetch(&url).await.unwrap();
+    assert_eq!(second.mime_type, "image/webp");
+    assert!(second.from_cache);
+    assert_eq!(second.bytes, first.bytes);
+    assert_eq!(request_count.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
 async fn request_cache_does_not_retry_non_retryable_status() {
     let (address, request_count) = spawn_status_server(StatusCode::NOT_FOUND).await;
     let mut config = rust_sync_proxy::test_config();
@@ -205,13 +240,22 @@ async fn request_cache_does_not_retry_non_retryable_status() {
 }
 
 async fn spawn_image_server(delay_ms: u64) -> (std::net::SocketAddr, Arc<AtomicUsize>) {
+    spawn_custom_image_server(vec![137, 80, 78, 71, 13, 10, 26, 10], "image/png", delay_ms).await
+}
+
+async fn spawn_custom_image_server(
+    png: Vec<u8>,
+    content_type: &'static str,
+    delay_ms: u64,
+) -> (std::net::SocketAddr, Arc<AtomicUsize>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let request_count = Arc::new(AtomicUsize::new(0));
     let state = ImageState {
-        png: vec![137, 80, 78, 71, 13, 10, 26, 10],
+        png,
         delay_ms,
         request_count: Arc::clone(&request_count),
+        content_type,
     };
 
     tokio::spawn(async move {
@@ -278,8 +322,21 @@ async fn serve_png(State(state): State<ImageState>) -> (StatusCode, HeaderMap, V
         tokio::time::sleep(std::time::Duration::from_millis(state.delay_ms)).await;
     }
     let mut headers = HeaderMap::new();
-    headers.insert(CONTENT_TYPE, HeaderValue::from_static("image/png"));
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static(state.content_type));
     (StatusCode::OK, headers, state.png)
+}
+
+fn noisy_png_bytes(width: u32, height: u32) -> Vec<u8> {
+    let mut rgba = vec![0_u8; (width as usize) * (height as usize) * 4];
+    for (index, byte) in rgba.iter_mut().enumerate() {
+        *byte = ((index * 31 + 17) % 251) as u8;
+    }
+
+    let mut encoded = Vec::new();
+    PngEncoder::new_with_quality(&mut encoded, CompressionType::Fast, FilterType::NoFilter)
+        .write_image(&rgba, width, height, ColorType::Rgba8.into())
+        .unwrap();
+    encoded
 }
 
 #[allow(dead_code)]

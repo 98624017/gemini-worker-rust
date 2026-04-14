@@ -30,7 +30,7 @@ use crate::response_rewrite::{
 };
 use crate::upload::Uploader;
 use crate::upstream::{
-    ResolvedUpstream, is_aiapidev_base_url, resolve_upstream_from_header_map,
+    ResolvedUpstream, is_aiapidev_base_url, resolve_upstream_for_request_from_header_map,
     rewrite_aiapidev_model_path,
 };
 
@@ -262,7 +262,7 @@ pub fn build_router(config: Config) -> Router {
         crate::image_io::REQUEST_MAX_IMAGE_BYTES,
         false,
     );
-    let response_inline_data_fetch_service = InlineDataUrlFetchService::from_config(
+    let response_inline_data_fetch_service = InlineDataUrlFetchService::from_response_config(
         &config,
         image_client.clone(),
         crate::image_io::DEFAULT_MAX_IMAGE_BYTES,
@@ -313,37 +313,6 @@ async fn model_action(
         .unwrap_or_default()
         .to_string();
 
-    let resolved = match resolve_upstream_from_header_map(
-        request.headers(),
-        &state.config.upstream_base_url,
-        &state.config.upstream_api_key,
-    ) {
-        Ok(resolved) => resolved,
-        Err(err) => {
-            let response = (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": {"code": 401, "message": err.to_string()}})),
-            )
-                .into_response();
-            return finalize_admin_response(
-                &state,
-                response,
-                AdminLogEntry {
-                    created_at,
-                    method: request_method,
-                    path: request_path,
-                    query: request_query,
-                    remote_addr,
-                    is_stream: false,
-                    status_code: StatusCode::UNAUTHORIZED.as_u16(),
-                    duration_ms: started_at.elapsed().as_millis() as i64,
-                    ..Default::default()
-                },
-            )
-            .await;
-        }
-    };
-
     if !rest.ends_with(":generateContent") {
         let response = (
             StatusCode::NOT_FOUND,
@@ -367,8 +336,118 @@ async fn model_action(
         )
         .await;
     }
+
+    let (parts, body) = request.into_parts();
+    let request_body = match to_bytes(body, MAX_REQUEST_BODY_BYTES).await {
+        Ok(body) => body,
+        Err(err) => {
+            let response = (
+                StatusCode::BAD_GATEWAY,
+                Json(proxy_error_json(
+                    502,
+                    "failed to read request body",
+                    "proxy",
+                    "read_request_body",
+                    "request_body_read_failed",
+                )),
+            )
+                .into_response();
+            return finalize_admin_response(
+                &state,
+                response,
+                AdminLogEntry {
+                    created_at,
+                    method: request_method,
+                    path: request_path,
+                    query: request_query,
+                    remote_addr,
+                    is_stream: false,
+                    status_code: StatusCode::BAD_GATEWAY.as_u16(),
+                    duration_ms: started_at.elapsed().as_millis() as i64,
+                    error_source: "proxy".to_string(),
+                    error_stage: "read_request_body".to_string(),
+                    error_kind: "request_body_read_failed".to_string(),
+                    error_message: "failed to read request body".to_string(),
+                    error_detail: err.to_string(),
+                    ..Default::default()
+                },
+            )
+            .await;
+        }
+    };
+
+    let parsed_body: Value = match serde_json::from_slice(&request_body) {
+        Ok(body) => body,
+        Err(err) => {
+            let response = (
+                StatusCode::BAD_GATEWAY,
+                Json(proxy_error_json(
+                    502,
+                    "invalid request json body",
+                    "proxy",
+                    "parse_request_json",
+                    "invalid_json",
+                )),
+            )
+                .into_response();
+            return finalize_admin_response(
+                &state,
+                response,
+                AdminLogEntry {
+                    created_at,
+                    method: request_method,
+                    path: request_path,
+                    query: request_query,
+                    remote_addr,
+                    is_stream: false,
+                    status_code: StatusCode::BAD_GATEWAY.as_u16(),
+                    duration_ms: started_at.elapsed().as_millis() as i64,
+                    error_source: "proxy".to_string(),
+                    error_stage: "parse_request_json".to_string(),
+                    error_kind: "invalid_json".to_string(),
+                    error_message: "invalid request json body".to_string(),
+                    error_detail: format!("invalid request json body: {err}"),
+                    ..Default::default()
+                },
+            )
+            .await;
+        }
+    };
+
+    let resolved = match resolve_upstream_for_request_from_header_map(
+        &parts.headers,
+        &parsed_body,
+        &state.config.upstream_base_url,
+        &state.config.upstream_api_key,
+    ) {
+        Ok(resolved) => resolved,
+        Err(err) => {
+            let status = err.status_code();
+            let response =
+                (status, Json(json!({"error": {"code": status.as_u16(), "message": err.to_string()}})))
+                    .into_response();
+            return finalize_admin_response(
+                &state,
+                response,
+                AdminLogEntry {
+                    created_at,
+                    method: request_method,
+                    path: request_path,
+                    query: request_query,
+                    remote_addr,
+                    is_stream: false,
+                    status_code: status.as_u16(),
+                    duration_ms: started_at.elapsed().as_millis() as i64,
+                    ..Default::default()
+                },
+            )
+            .await;
+        }
+    };
+
     let target_path = format!("/v1beta/models/{rest}");
     let is_aiapidev_upstream = is_aiapidev_base_url(&resolved.base_url);
+    let request = Request::from_parts(parts, Body::from(request_body));
 
     match forward_gemini_request(state.clone(), resolved, target_path, request).await {
         Ok((response, mut admin_entry)) => {

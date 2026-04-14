@@ -54,7 +54,7 @@ async fn markdown_base64_normalization_uses_fetch_service_cache() {
     config.inline_data_url_memory_cache_max_bytes = 1024;
     config.inline_data_url_background_fetch_wait_timeout = Duration::from_millis(100);
     config.inline_data_url_background_fetch_total_timeout = Duration::from_millis(500);
-    let fetch_service = rust_sync_proxy::cache::InlineDataUrlFetchService::from_config(
+    let fetch_service = rust_sync_proxy::cache::InlineDataUrlFetchService::from_response_config(
         &config,
         reqwest::Client::new(),
         rust_sync_proxy::image_io::DEFAULT_MAX_IMAGE_BYTES,
@@ -233,7 +233,7 @@ async fn aiapidev_task_response_base64_mode_downloads_image() {
     config.inline_data_url_memory_cache_max_bytes = 1024;
     config.inline_data_url_background_fetch_wait_timeout = Duration::from_millis(100);
     config.inline_data_url_background_fetch_total_timeout = Duration::from_millis(500);
-    let fetch_service = rust_sync_proxy::cache::InlineDataUrlFetchService::from_config(
+    let fetch_service = rust_sync_proxy::cache::InlineDataUrlFetchService::from_response_config(
         &config,
         reqwest::Client::new(),
         rust_sync_proxy::image_io::DEFAULT_MAX_IMAGE_BYTES,
@@ -288,7 +288,7 @@ async fn aiapidev_task_response_base64_mode_allows_images_over_request_limit() {
     config.inline_data_url_memory_cache_max_bytes = 1024;
     config.inline_data_url_background_fetch_wait_timeout = Duration::from_millis(100);
     config.inline_data_url_background_fetch_total_timeout = Duration::from_millis(500);
-    let fetch_service = rust_sync_proxy::cache::InlineDataUrlFetchService::from_config(
+    let fetch_service = rust_sync_proxy::cache::InlineDataUrlFetchService::from_response_config(
         &config,
         reqwest::Client::new(),
         rust_sync_proxy::image_io::DEFAULT_MAX_IMAGE_BYTES,
@@ -320,6 +320,10 @@ async fn aiapidev_task_response_base64_mode_allows_images_over_request_limit() {
         .as_str()
         .unwrap();
     assert!(!encoded.is_empty());
+    assert_eq!(
+        output["candidates"][0]["content"]["parts"][0]["inlineData"]["mimeType"],
+        "image/png"
+    );
     assert_eq!(request_count.load(Ordering::Relaxed), 1);
 }
 

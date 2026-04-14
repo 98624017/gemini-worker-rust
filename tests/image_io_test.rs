@@ -7,6 +7,7 @@ use axum::body::{Body, Bytes};
 use axum::extract::State;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header::CONTENT_TYPE};
 use axum::routing::get;
+use bytes::Bytes as RawBytes;
 use futures_util::stream;
 use tokio::net::TcpListener;
 
@@ -57,6 +58,22 @@ async fn fetch_image_rejects_stream_when_size_exceeds_limit_without_content_leng
     assert!(err_text.contains("image too large:"), "{err_text}");
     assert!(err_text.contains("> 5"), "{err_text}");
     assert_eq!(request_count.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn png_to_webp_failure_falls_back_to_original_bytes() {
+    let original = vec![7_u8; rust_sync_proxy::image_io::REQUEST_PNG_WEBP_THRESHOLD_BYTES + 1];
+    let fetched = rust_sync_proxy::image_io::FetchedInlineData {
+        mime_type: "image/png".to_string(),
+        bytes: RawBytes::from(original.clone()),
+    };
+
+    let optimized = rust_sync_proxy::image_io::maybe_convert_large_png_to_lossless_webp(fetched)
+        .await
+        .unwrap();
+
+    assert_eq!(optimized.mime_type, "image/png");
+    assert_eq!(optimized.bytes, RawBytes::from(original));
 }
 
 async fn serve_small_png() -> (StatusCode, HeaderMap, Vec<u8>) {
