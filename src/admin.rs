@@ -572,6 +572,9 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
     applyTheme(current === 'dark' ? 'light' : 'dark', true);
   });
 
+  // ── API base URL (strip embedded credentials to avoid fetch() TypeError) ──
+  var apiBase = location.protocol + '//' + location.host;
+
   // ── State ──────────────────────────────────────────
   var allItems = [];
   var filterMode = 'all';
@@ -642,7 +645,7 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
 
   // ── Stats ──────────────────────────────────────────
   function loadStats() {
-    return fetch('/admin/api/stats', { cache: 'no-store' })
+    return fetch(apiBase + '/admin/api/stats', { cache: 'no-store' })
       .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
       .then(function (d) {
         var total = d.totalRequests || 0;
@@ -935,7 +938,7 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
 
   function loadLogs() {
     elStatus.textContent = 'loading...';
-    return fetch('/admin/api/logs', { cache: 'no-store' })
+    return fetch(apiBase + '/admin/api/logs', { cache: 'no-store' })
       .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
       .then(function (d) {
         allItems = (d && d.items) || [];
