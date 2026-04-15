@@ -3,3 +3,4 @@
 .codex
 benchmark-output/
 __pycache__/
+.gstack/

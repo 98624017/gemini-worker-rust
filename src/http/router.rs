@@ -552,7 +552,12 @@ async fn forward_gemini_request(
     });
 
     if is_aiapidev {
-        let rewritten_body = rewrite_aiapidev_request_body(body);
+        let external_proxy_prefix = state.config.resolved_external_image_proxy_prefix();
+        let rewritten_body = rewrite_aiapidev_request_body(
+            body,
+            &external_proxy_prefix,
+            &state.config.image_fetch_external_proxy_domains,
+        );
         let target_path = rewrite_aiapidev_model_path(&target_path);
         let request_upstream = if admin_enabled {
             let request_upstream_bytes = serde_json::to_vec(&rewritten_body)?;

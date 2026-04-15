@@ -5,10 +5,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, anyhow};
 use serde_json::{Map, Value};
+use url::Url;
 
 use crate::blob_runtime::{BlobRuntime, BlobRuntimeConfig};
 use crate::cache::InlineDataUrlFetchService;
-use crate::image_io::REQUEST_MAX_IMAGE_BYTES;
+use crate::image_io::{REQUEST_MAX_IMAGE_BYTES, hostname_matches_domain_patterns};
 use crate::request_encode::encode_request_body;
 use crate::request_materialize::{
     RequestMaterializeServices, materialize_request_images_with_services,
@@ -96,27 +97,52 @@ pub async fn rewrite_request_inline_data(body: Value, services: &RewriteServices
     Ok(serde_json::from_slice(&bytes)?)
 }
 
-pub fn rewrite_aiapidev_request_body(mut body: Value) -> Value {
+pub fn rewrite_aiapidev_request_body(
+    mut body: Value,
+    external_proxy_prefix: &str,
+    external_proxy_domains: &[String],
+) -> Value {
     strip_output_fields(&mut body);
-    rewrite_aiapidev_value(body, "")
+    rewrite_aiapidev_value(body, "", external_proxy_prefix, external_proxy_domains)
 }
 
-fn rewrite_aiapidev_value(value: Value, path: &str) -> Value {
+fn rewrite_aiapidev_value(
+    value: Value,
+    path: &str,
+    external_proxy_prefix: &str,
+    external_proxy_domains: &[String],
+) -> Value {
     match value {
-        Value::Object(map) => rewrite_aiapidev_object(map, path),
+        Value::Object(map) => {
+            rewrite_aiapidev_object(map, path, external_proxy_prefix, external_proxy_domains)
+        }
         Value::Array(items) => Value::Array(
             items
                 .into_iter()
                 .enumerate()
-                .map(|(index, item)| rewrite_aiapidev_value(item, &format!("{path}/{index}")))
+                .map(|(index, item)| {
+                    rewrite_aiapidev_value(
+                        item,
+                        &format!("{path}/{index}"),
+                        external_proxy_prefix,
+                        external_proxy_domains,
+                    )
+                })
                 .collect(),
         ),
         primitive => primitive,
     }
 }
 
-fn rewrite_aiapidev_object(map: Map<String, Value>, path: &str) -> Value {
-    if let Some((key, payload)) = rewrite_inline_data_payload(&map) {
+fn rewrite_aiapidev_object(
+    map: Map<String, Value>,
+    path: &str,
+    external_proxy_prefix: &str,
+    external_proxy_domains: &[String],
+) -> Value {
+    if let Some((key, payload)) =
+        rewrite_inline_data_payload(&map, external_proxy_prefix, external_proxy_domains)
+    {
         let mut out = Map::new();
         out.insert(key.to_string(), payload);
         return Value::Object(out);
@@ -128,13 +154,23 @@ fn rewrite_aiapidev_object(map: Map<String, Value>, path: &str) -> Value {
         if let Some(role) = map.get("role").cloned() {
             out.insert(
                 "role".to_string(),
-                rewrite_aiapidev_value(role, &format!("{path}/role")),
+                rewrite_aiapidev_value(
+                    role,
+                    &format!("{path}/role"),
+                    external_proxy_prefix,
+                    external_proxy_domains,
+                ),
             );
         }
         if let Some(parts) = map.get("parts").cloned() {
             out.insert(
                 "parts".to_string(),
-                rewrite_aiapidev_value(parts, &format!("{path}/parts")),
+                rewrite_aiapidev_value(
+                    parts,
+                    &format!("{path}/parts"),
+                    external_proxy_prefix,
+                    external_proxy_domains,
+                ),
             );
         }
     }
@@ -145,13 +181,25 @@ fn rewrite_aiapidev_object(map: Map<String, Value>, path: &str) -> Value {
         }
         let rewritten_key = rewrite_aiapidev_key(&key);
         let child_path = format!("{path}/{}", escape_json_pointer_token(&rewritten_key));
-        out.insert(rewritten_key, rewrite_aiapidev_value(child, &child_path));
+        out.insert(
+            rewritten_key,
+            rewrite_aiapidev_value(
+                child,
+                &child_path,
+                external_proxy_prefix,
+                external_proxy_domains,
+            ),
+        );
     }
 
     Value::Object(out)
 }
 
-fn rewrite_inline_data_payload(map: &Map<String, Value>) -> Option<(&'static str, Value)> {
+fn rewrite_inline_data_payload(
+    map: &Map<String, Value>,
+    external_proxy_prefix: &str,
+    external_proxy_domains: &[String],
+) -> Option<(&'static str, Value)> {
     let inline_data = map
         .get("inlineData")
         .or_else(|| map.get("inline_data"))?
@@ -164,10 +212,12 @@ fn rewrite_inline_data_payload(map: &Map<String, Value>) -> Option<(&'static str
         .unwrap_or("image/png");
 
     if is_http_url(data) {
+        let file_uri =
+            maybe_wrap_aiapidev_file_uri(data, external_proxy_prefix, external_proxy_domains);
         return Some((
             "file_data",
             serde_json::json!({
-                "file_uri": data,
+                "file_uri": file_uri,
                 "mime_type": mime_type,
             }),
         ));
@@ -216,6 +266,39 @@ fn escape_json_pointer_token(token: &str) -> String {
 
 fn is_http_url(value: &str) -> bool {
     value.starts_with("http://") || value.starts_with("https://")
+}
+
+fn maybe_wrap_aiapidev_file_uri(
+    raw_url: &str,
+    external_proxy_prefix: &str,
+    external_proxy_domains: &[String],
+) -> String {
+    if external_proxy_prefix.is_empty()
+        || external_proxy_domains.is_empty()
+        || is_already_wrapped_external_proxy_url(raw_url, external_proxy_prefix)
+    {
+        return raw_url.to_string();
+    }
+
+    let Ok(mut parsed) = Url::parse(raw_url) else {
+        return raw_url.to_string();
+    };
+    let hostname = parsed.host_str().unwrap_or_default();
+    if !hostname_matches_domain_patterns(hostname, external_proxy_domains) {
+        return raw_url.to_string();
+    }
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    let stripped_url = parsed.to_string();
+
+    format!(
+        "{external_proxy_prefix}{}",
+        url::form_urlencoded::byte_serialize(stripped_url.as_bytes()).collect::<String>()
+    )
+}
+
+fn is_already_wrapped_external_proxy_url(raw_url: &str, external_proxy_prefix: &str) -> bool {
+    raw_url.starts_with(external_proxy_prefix)
 }
 
 fn compat_blob_runtime() -> BlobRuntime {
