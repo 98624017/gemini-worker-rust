@@ -512,6 +512,14 @@ async fn admin_logs_page_persists_view_mode_and_chart_collapse_state() {
         html.contains("function setViewMode("),
         "HTML should expose view mode state setter"
     );
+    assert!(
+        html.contains("function isInteractiveControlTarget("),
+        "HTML should guard global shortcuts for focused interactive controls"
+    );
+    assert!(
+        html.contains("button, a, input, select, textarea"),
+        "HTML should include interactive selector list for keyboard shortcut guard"
+    );
 }
 
 async fn fetch_admin_logs_page_html() -> String {

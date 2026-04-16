@@ -1095,6 +1095,11 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
     visible[focusIndex].scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   }
 
+  function isInteractiveControlTarget(el) {
+    if (!el || typeof el.closest !== 'function') return false;
+    return !!el.closest('button, a, input, select, textarea');
+  }
+
   document.addEventListener('keydown', function (e) {
     if (document.activeElement === elSearch) {
       if (e.key === 'Escape') { elSearch.blur(); e.preventDefault(); }
@@ -1105,6 +1110,7 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
       case 'j': case 'ArrowDown': e.preventDefault(); setFocus(focusIndex + 1); break;
       case 'k': case 'ArrowUp':   e.preventDefault(); setFocus(focusIndex - 1); break;
       case 'Enter': case ' ':
+        if (isInteractiveControlTarget(document.activeElement)) return;
         e.preventDefault();
         if (focusIndex >= 0 && focusIndex < visible.length) {
           visible[focusIndex].querySelector('.log-row').click();
