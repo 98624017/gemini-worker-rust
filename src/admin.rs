@@ -392,14 +392,15 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
     .c-purple{ --accent: var(--accent-purple); }
 
     /* ── Charts ── */
-    .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 20px; }
+    .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 0; }
     @media (max-width: 900px) { .charts { grid-template-columns: 1fr; } }
     .charts-section { margin-bottom: 20px; }
     .charts-toggle { width: 100%; min-height: 52px; display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; border: 1px solid var(--border); border-radius: 14px; background: var(--bg-card); color: var(--text-primary); cursor: pointer; }
     .charts-toggle-copy { display: inline-flex; flex-direction: column; align-items: flex-start; gap: 2px; }
     .charts-toggle-icon { width: 10px; height: 10px; border-right: 2px solid var(--text-secondary); border-bottom: 2px solid var(--text-secondary); transform: rotate(45deg); transition: transform 0.18s ease; }
-    .charts-panel { max-height: 960px; opacity: 1; overflow: hidden; transition: max-height 0.18s ease, opacity 0.18s ease, margin-top 0.18s ease; margin-top: 12px; }
-    .charts-section.collapsed .charts-panel { max-height: 0; opacity: 0; margin-top: 0; }
+    .charts-panel { display: grid; grid-template-rows: 1fr; opacity: 1; overflow: hidden; transition: grid-template-rows 0.18s ease, opacity 0.18s ease, margin-top 0.18s ease; margin-top: 12px; }
+    .charts-panel > .charts { min-height: 0; overflow: hidden; }
+    .charts-section.collapsed .charts-panel { grid-template-rows: 0fr; opacity: 0; margin-top: 0; }
     .charts-section:not(.collapsed) .charts-toggle-icon { transform: rotate(-135deg); }
     .chart-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 14px; padding: 16px; backdrop-filter: var(--card-blur); box-shadow: var(--card-shadow); position: relative; overflow: hidden; transition: background-color 0.3s, border-color 0.3s, box-shadow 0.3s; }
     .chart-card::before { content: ""; position: absolute; inset: 0; background: var(--card-gradient); pointer-events: none; }
@@ -500,7 +501,7 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
       </span>
       <span class="charts-toggle-icon" id="chartsToggleIcon"></span>
     </button>
-    <div class="charts-panel" id="chartsPanel">
+    <div class="charts-panel" id="chartsPanel" aria-hidden="true">
       <div class="charts" id="chartsRow">
         <div class="chart-card">
           <div class="chart-title">request latency distribution</div>
@@ -529,7 +530,7 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
       <button class="filter-tab" data-filter="ok">2xx</button>
       <button class="filter-tab" data-filter="bad">4xx+</button>
     </div>
-    <div class="view-mode-tabs" id="viewModeTabs" role="tablist" aria-label="content view mode">
+    <div class="view-mode-tabs" id="viewModeTabs" role="group" aria-label="content view mode">
       <button class="view-mode-tab active" data-view="list" aria-pressed="true">列表视图</button>
       <button class="view-mode-tab" data-view="album" aria-pressed="false">相册视图</button>
     </div>
