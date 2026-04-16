@@ -1127,6 +1127,7 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
   var focusIndex = -1;
 
   function getVisibleItems() {
+    if (viewMode !== 'list') return [];
     return Array.from(elList.querySelectorAll('.log-item')).filter(function (el) { return el.style.display !== 'none'; });
   }
 
@@ -1162,6 +1163,7 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
         }
         break;
       case 'Escape':
+        if (viewMode !== 'list') return;
         e.preventDefault();
         elList.querySelectorAll('.log-detail.open').forEach(function (d) { d.classList.remove('open'); d.closest('.log-item').classList.remove('expanded'); });
         break;

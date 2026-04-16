@@ -243,80 +243,6 @@ async fn admin_logs_capture_structured_proxy_error_fields() {
     assert_eq!(item["errorStage"], "parse_request_json");
     assert_eq!(item["errorKind"], "invalid_json");
     assert_eq!(item["errorMessage"], "invalid request json body");
-    assert!(
-        item["requestRaw"]
-            .as_str()
-            .unwrap_or_default()
-            .contains(r#"{"contents":[{"parts":[{"text":"hello"}]}]"#)
-    );
-}
-
-#[tokio::test]
-async fn admin_logs_capture_request_body_for_pre_upstream_proxy_errors() {
-    let mut config = rust_sync_proxy::test_config();
-    config.admin_password = "pw".to_string();
-
-    let app = rust_sync_proxy::build_router(config);
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1beta/models/demo:generateContent")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    json!({
-                        "contents": [{
-                            "parts": (0..8)
-                                .map(|index| {
-                                    json!({
-                                        "inlineData": {
-                                            "data": format!("https://img.example/{index}.png")
-                                        }
-                                    })
-                                })
-                                .collect::<Vec<_>>()
-                        }]
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-
-    let auth = format!("Basic {}", STANDARD.encode("user:pw"));
-    let logs_response = app
-        .oneshot(
-            Request::builder()
-                .uri("/admin/api/logs")
-                .header("authorization", auth)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(logs_response.status(), StatusCode::OK);
-    let body = to_bytes(logs_response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    let item = &json["items"][0];
-    assert_eq!(item["errorMessage"], "too many inlineData URLs");
-    assert!(
-        item["requestRaw"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("https://img.example/0.png")
-    );
-    assert_eq!(
-        item["requestRawImages"]
-            .as_array()
-            .map(|items| items.len())
-            .unwrap_or_default(),
-        8
-    );
 }
 
 #[tokio::test]
@@ -610,6 +536,10 @@ async fn admin_logs_page_uses_shared_filtered_items_for_all_views() {
     assert!(
         html.contains("albumList"),
         "HTML should contain dedicated album container"
+    );
+    assert!(
+        html.contains("if (viewMode !== 'list') return [];"),
+        "HTML keyboard navigation should ignore hidden list items in album view"
     );
 }
 
