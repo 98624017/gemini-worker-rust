@@ -1167,6 +1167,7 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
       if (row.classList.contains('expanded')) snapshot.expandedIds.push(id);
       if (row.classList.contains('focused')) snapshot.focusedId = id;
     });
+    if (!snapshot.expandedIds.length && !snapshot.renderedIds.length && !snapshot.focusedId) return null;
     return snapshot;
   }
 
