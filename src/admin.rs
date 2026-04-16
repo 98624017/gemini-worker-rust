@@ -1121,31 +1121,6 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
     updateCount(filtered.length, allItems.length);
   }
 
-  function jumpToLogFromAlbum(logId) {
-    var targetId = String(logId || '');
-    if (!targetId) return;
-    setViewMode('list', true);
-    syncViewModeTabs();
-    rerenderContent();
-    var target = null;
-    Array.from(elList.querySelectorAll('.log-item')).some(function (node) {
-      if (node.dataset.itemId === targetId) {
-        target = node;
-        return true;
-      }
-      return false;
-    });
-    if (!target) return;
-    var detail = target.querySelector('.log-detail');
-    if (detail && !detail.classList.contains('open')) {
-      var row = target.querySelector('.log-row');
-      if (row) row.click();
-    }
-    setTimeout(function () {
-      target.scrollIntoView({ block: 'center', behavior: 'smooth' });
-    }, 40);
-  }
-
   // ── FinishReason Bar ───────────────────────────────
   function rebuildFrBar() {
     var frBar = document.getElementById('frBar');
@@ -1218,16 +1193,6 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
       rerenderContent();
     });
   });
-
-  if (elAlbum) {
-    elAlbum.addEventListener('click', function (e) {
-      var btn = e.target && typeof e.target.closest === 'function'
-        ? e.target.closest('.jump-to-log-btn')
-        : null;
-      if (!btn) return;
-      jumpToLogFromAlbum(btn.dataset.logId);
-    });
-  }
 
   if (chartsToggle) {
     chartsToggle.addEventListener('click', function () {
