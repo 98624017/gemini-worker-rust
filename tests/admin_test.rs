@@ -553,6 +553,10 @@ async fn admin_logs_page_uses_shared_filtered_items_for_all_views() {
         html.contains("allItems.length === 0"),
         "HTML should distinguish true empty dataset from filtered-empty results"
     );
+    assert!(
+        html.contains("var albumEmptyCopy = allItems.length === 0 ? 'no requests yet' : 'no matching requests';"),
+        "HTML should keep album empty copy consistent with list empty-state distinction"
+    );
 }
 
 async fn fetch_admin_logs_page_html() -> String {

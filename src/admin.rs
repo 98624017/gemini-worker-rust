@@ -1002,7 +1002,8 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
 
   function renderAlbum(items) {
     if (!items.length) {
-      elAlbum.innerHTML = '<div class="empty"><p>no matching requests</p></div>';
+      var albumEmptyCopy = allItems.length === 0 ? 'no requests yet' : 'no matching requests';
+      elAlbum.innerHTML = '<div class="empty"><p>' + albumEmptyCopy + '</p></div>';
       return;
     }
     elAlbum.innerHTML = items.map(function (item) {
