@@ -724,8 +724,9 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
         });
       });
       if (lines.length) return lines.join('\n');
-    } catch (_) {}
-    return truncateText(raw, 280);
+      if (parsed && typeof parsed === 'object') return '';
+      return '';
+    } catch (_) { return truncateText(raw, 280); }
   }
 
   function relTime(iso) {
@@ -1057,6 +1058,9 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
   function renderAlbumThumb(url, cacheHit, alt) {
     var safe = safeUrl(url);
     if (!safe) return '';
+    if (!isProxyImageUrl(safe)) {
+      return '<a class="img-link" href="' + esc(safe) + '" target="_blank" rel="noreferrer">external image</a>';
+    }
     var badge = cacheHit ? '<span class="cache-badge">CACHE</span>' : '';
     return '<a class="album-thumb" href="' + esc(safe) + '" target="_blank" rel="noreferrer">'
       + badge
@@ -1076,8 +1080,11 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
       return renderAlbumThumb(url, !!hitSet[url], '请求图片 ' + (idx + 1));
     }).join('');
     var safeResultUrl = safeUrl((item.responseImages || [])[0] || '');
-    var resultHtml = safeResultUrl
+    var canPreviewResult = safeResultUrl && isProxyImageUrl(safeResultUrl);
+    var resultHtml = canPreviewResult
       ? '<a class="album-result" href="' + esc(safeResultUrl) + '" target="_blank" rel="noreferrer"><img src="' + esc(safeResultUrl) + '" alt="生成结果图" loading="lazy"></a>'
+      : safeResultUrl
+      ? '<a class="album-result empty-result" href="' + esc(safeResultUrl) + '" target="_blank" rel="noreferrer"><div class="detail-col-label">result</div><p>external image</p></a>'
       : '<div class="album-result empty-result"><div class="detail-col-label">result</div><p>暂无结果图</p></div>';
     var inputHtml = requestThumbs || '<p class="album-input-empty">暂无请求图</p>';
 

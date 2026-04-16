@@ -417,6 +417,18 @@ async fn admin_logs_page_only_previews_proxy_images() {
         html.contains("external image"),
         "HTML should keep external image URLs inert until explicit open"
     );
+    assert!(
+        html.contains("function renderAlbumThumb(url, cacheHit, alt)"),
+        "HTML should expose album thumb renderer"
+    );
+    assert!(
+        html.contains("if (!isProxyImageUrl(safe))"),
+        "HTML should keep album request-image preview behind proxy-image guard"
+    );
+    assert!(
+        html.contains("var canPreviewResult = safeResultUrl && isProxyImageUrl(safeResultUrl);"),
+        "HTML should keep album result-image preview behind proxy-image guard"
+    );
 }
 
 #[tokio::test]
@@ -613,6 +625,18 @@ async fn admin_logs_page_contains_album_rendering_helpers() {
     assert!(
         html.contains("查看对应记录"),
         "HTML should expose jump back action from album"
+    );
+    assert!(
+        html.contains("catch (_) { return truncateText(raw, 280); }"),
+        "HTML should only fallback to raw truncation when prompt JSON parse fails"
+    );
+    assert!(
+        html.contains("if (lines.length) return lines.join('\\n');"),
+        "HTML should return extracted prompt text when text parts exist"
+    );
+    assert!(
+        html.contains("if (parsed && typeof parsed === 'object') return '';"),
+        "HTML should return empty prompt when request JSON parses but has no text parts"
     );
 }
 
