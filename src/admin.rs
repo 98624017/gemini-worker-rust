@@ -567,7 +567,6 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
   'use strict';
 
   var STORAGE_KEYS = {
-    theme: 'theme',
     viewMode: 'admin:viewMode',
     chartsCollapsed: 'admin:chartsCollapsed'
   };
@@ -577,7 +576,7 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
   var MOON_SVG = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>';
 
   function readThemeOverride() {
-    var stored = localStorage.getItem(STORAGE_KEYS.theme);
+    var stored = localStorage.getItem('theme');
     return stored === 'dark' || stored === 'light' ? stored : '';
   }
   function getPreferredTheme() {
@@ -588,7 +587,7 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
   }
   function applyTheme(theme, persist) {
     document.documentElement.setAttribute('data-theme', theme);
-    if (persist) localStorage.setItem(STORAGE_KEYS.theme, theme);
+    if (persist) localStorage.setItem('theme', theme);
     var btn = document.getElementById('themeToggle');
     if (btn) btn.innerHTML = theme === 'dark' ? SUN_SVG : MOON_SVG;
     // refresh charts with new colors
