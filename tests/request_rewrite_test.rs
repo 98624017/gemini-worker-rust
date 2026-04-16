@@ -17,6 +17,49 @@ fn collects_unique_inline_data_urls_and_enforces_limit() {
 }
 
 #[test]
+fn scan_inline_data_urls_allows_seven_url_refs() {
+    let parts: Vec<_> = (0..7)
+        .map(|index| {
+            json!({
+                "inlineData": {
+                    "data": format!("https://img.example/{index}.png")
+                }
+            })
+        })
+        .collect();
+    let body = json!({
+        "contents": [{
+            "parts": parts
+        }]
+    });
+
+    let scan = rust_sync_proxy::request_rewrite::scan_inline_data_urls(&body).unwrap();
+    assert_eq!(scan.total_refs, 7);
+    assert_eq!(scan.unique_urls.len(), 7);
+}
+
+#[test]
+fn scan_inline_data_urls_rejects_eight_url_refs() {
+    let parts: Vec<_> = (0..8)
+        .map(|index| {
+            json!({
+                "inlineData": {
+                    "data": format!("https://img.example/{index}.png")
+                }
+            })
+        })
+        .collect();
+    let body = json!({
+        "contents": [{
+            "parts": parts
+        }]
+    });
+
+    let err = rust_sync_proxy::request_rewrite::scan_inline_data_urls(&body).unwrap_err();
+    assert_eq!(err.to_string(), "too many inlineData URLs");
+}
+
+#[test]
 fn rewrites_aiapidev_request_body_to_file_data_and_snake_case() {
     let body = json!({
         "contents": [{

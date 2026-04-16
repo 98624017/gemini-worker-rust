@@ -14,9 +14,7 @@ use crate::request_encode::encode_request_body;
 use crate::request_materialize::{
     RequestMaterializeServices, materialize_request_images_with_services,
 };
-use crate::request_scan::scan_request_image_urls;
-
-const MAX_INLINE_DATA_URLS: usize = 5;
+use crate::request_scan::{MAX_INLINE_DATA_URLS, scan_request_image_urls};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InlineDataScan {

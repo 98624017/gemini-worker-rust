@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow};
 use serde_json::Value;
 
-const MAX_INLINE_DATA_URLS: usize = 5;
+pub const MAX_INLINE_DATA_URLS: usize = 7;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RequestImageRef {
