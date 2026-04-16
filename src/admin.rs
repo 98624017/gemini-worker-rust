@@ -456,6 +456,26 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
     .img-link:hover { border-color: var(--border-hover); color: var(--text-primary); }
     .cache-badge { position: absolute; top: 4px; left: 4px; padding: 1px 6px; border-radius: 999px; font-size: 10px; font-weight: 700; background: rgba(34,197,94,0.85); color: #052e16; }
 
+    /* ── Album View ── */
+    .album-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+    @media (max-width: 980px) { .album-list { grid-template-columns: 1fr; } }
+    .album-card { position: relative; overflow: hidden; border-radius: 22px; border: 1px solid var(--border); background: linear-gradient(180deg, rgba(12,18,31,0.98), rgba(8,14,31,0.92)); box-shadow: 0 18px 40px rgba(0,0,0,0.18); transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease; }
+    .album-card:hover { transform: translateY(-2px); border-color: var(--border-hover); box-shadow: 0 24px 50px rgba(0,0,0,0.22); }
+    .album-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; padding: 16px 18px 0; }
+    .album-prompt { margin: 14px 18px 0; padding: 14px 16px; border-radius: 18px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); }
+    .album-prompt pre { background: transparent; border: 0; padding: 0; max-height: 180px; }
+    .album-grid { display: grid; grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.25fr); gap: 14px; padding: 14px 18px 18px; }
+    .album-inputs { display: grid; gap: 10px; }
+    .album-input-thumbs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .album-thumb, .album-result { position: relative; border-radius: 20px; overflow: hidden; border: 1px solid rgba(255,255,255,0.08); background: rgba(255,255,255,0.03); text-decoration: none; }
+    .album-thumb img, .album-result img { width: 100%; display: block; object-fit: cover; }
+    .album-thumb img { min-height: 120px; max-height: 160px; }
+    .album-result { min-height: 280px; }
+    .album-result img { min-height: 280px; }
+    .empty-result { display: grid; place-items: center; color: var(--text-muted); padding: 16px; text-align: center; }
+    .album-actions { padding: 0 18px 18px; display: flex; justify-content: flex-end; }
+    .album-input-empty { color: var(--text-muted); font-size: 12px; margin: 0; padding: 8px 0; }
+
     /* ── FinishReason Bar ── */
     .fr-bar { display: flex; align-items: center; gap: 6px; margin-bottom: 14px; flex-wrap: wrap; min-height: 0; }
     .fr-label { font-size: 11px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: var(--text-muted); margin-right: 2px; }
@@ -683,10 +703,29 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
     return Number(n).toLocaleString('zh-CN');
   }
 
-  function truncateText(text, limit) {
-    var raw = String(text == null ? '' : text);
-    if (raw.length <= limit) return raw;
-    return raw.slice(0, Math.max(0, limit)) + '...';
+  function truncateText(text, max) {
+    if (!text) return '';
+    var raw = String(text);
+    if (raw.length <= max) return raw;
+    return raw.slice(0, Math.max(0, max)) + '…';
+  }
+
+  function extractPromptText(item) {
+    var raw = item && item.requestRaw ? item.requestRaw : '';
+    if (!raw) return '';
+    try {
+      var parsed = JSON.parse(raw);
+      var lines = [];
+      (parsed.contents || []).forEach(function (content) {
+        (content.parts || []).forEach(function (part) {
+          if (part && typeof part.text === 'string' && part.text.trim()) {
+            lines.push(part.text.trim());
+          }
+        });
+      });
+      if (lines.length) return lines.join('\n');
+    } catch (_) {}
+    return truncateText(raw, 280);
   }
 
   function relTime(iso) {
@@ -1002,18 +1041,64 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
     elList.appendChild(frag);
   }
 
+  function buildAlbumTags(item) {
+    var isOk = item.statusCode >= 200 && item.statusCode < 400;
+    var parts = [
+      isOk
+        ? '<span class="tag tag-ok">' + esc(item.statusCode) + '</span>'
+        : '<span class="tag tag-bad">' + esc(item.statusCode) + '</span>'
+    ];
+    if (item.isStream) parts.push('<span class="tag tag-stream">stream</span>');
+    if (item.finishReason) parts.push('<span class="tag tag-fr">' + esc(String(item.finishReason).toUpperCase()) + '</span>');
+    if ((item.durationMs || 0) > 5000) parts.push('<span class="tag tag-slow">slow</span>');
+    return parts.join('');
+  }
+
+  function renderAlbumThumb(url, cacheHit, alt) {
+    var safe = safeUrl(url);
+    if (!safe) return '';
+    var badge = cacheHit ? '<span class="cache-badge">CACHE</span>' : '';
+    return '<a class="album-thumb" href="' + esc(safe) + '" target="_blank" rel="noreferrer">'
+      + badge
+      + '<img src="' + esc(safe) + '" alt="' + esc(alt) + '" loading="lazy">'
+      + '</a>';
+  }
+
+  function renderAlbumCard(item) {
+    var prompt = extractPromptText(item);
+    var promptPreview = truncateText(prompt, 220);
+    var promptHtml = prompt
+      ? '<div class="album-prompt"><div class="detail-col-label">prompt</div><pre>' + esc(promptPreview) + '</pre></div>'
+      : '';
+    var hitSet = {};
+    (item.requestRawImageCacheHits || []).forEach(function (hit) { hitSet[hit] = true; });
+    var requestThumbs = (item.requestRawImages || []).map(function (url, idx) {
+      return renderAlbumThumb(url, !!hitSet[url], '请求图片 ' + (idx + 1));
+    }).join('');
+    var safeResultUrl = safeUrl((item.responseImages || [])[0] || '');
+    var resultHtml = safeResultUrl
+      ? '<a class="album-result" href="' + esc(safeResultUrl) + '" target="_blank" rel="noreferrer"><img src="' + esc(safeResultUrl) + '" alt="生成结果图" loading="lazy"></a>'
+      : '<div class="album-result empty-result"><div class="detail-col-label">result</div><p>暂无结果图</p></div>';
+    var inputHtml = requestThumbs || '<p class="album-input-empty">暂无请求图</p>';
+
+    return '<article class="album-card" data-item-id="' + esc(item.id) + '">'
+      + '<div class="album-head"><div><strong>#' + esc(item.id) + '</strong><div class="stat-sub">' + esc(new Date(item.createdAt).toLocaleString('zh-CN')) + '</div></div>'
+      + '<div class="log-meta">' + buildAlbumTags(item) + '<span class="log-dur">' + fmtDur(item.durationMs) + '</span></div></div>'
+      + promptHtml
+      + '<div class="album-grid"><div class="album-inputs"><div class="detail-col-label">request images</div><div class="album-input-thumbs">' + inputHtml + '</div></div>'
+      + '<div><div class="detail-col-label">result</div>' + resultHtml + '</div></div>'
+      + '<div class="album-actions"><button class="btn jump-to-log-btn" data-log-id="' + esc(item.id) + '">查看对应记录</button></div>'
+      + '</article>';
+  }
+
   function renderAlbum(items) {
+    elAlbum.innerHTML = '';
     if (!items.length) {
       var albumEmptyCopy = allItems.length === 0 ? 'no requests yet' : 'no matching requests';
       elAlbum.innerHTML = '<div class="empty"><p>' + albumEmptyCopy + '</p></div>';
       return;
     }
-    elAlbum.innerHTML = items.map(function (item) {
-      return '<article class="album-card" data-item-id="' + esc(item.id) + '">'
-        + '<div class="album-head"><strong>#' + esc(item.id) + '</strong><span class="log-dur">' + fmtDur(item.durationMs) + '</span></div>'
-        + '<div class="album-prompt"><pre>' + esc(truncateText(item.requestRaw || '', 160)) + '</pre></div>'
-        + '</article>';
-    }).join('');
+    elAlbum.innerHTML = items.map(renderAlbumCard).join('');
   }
 
   function renderMainContent(items) {
@@ -1034,6 +1119,31 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
       restoreListContext(listContext, filtered);
     }
     updateCount(filtered.length, allItems.length);
+  }
+
+  function jumpToLogFromAlbum(logId) {
+    var targetId = String(logId || '');
+    if (!targetId) return;
+    setViewMode('list', true);
+    syncViewModeTabs();
+    rerenderContent();
+    var target = null;
+    Array.from(elList.querySelectorAll('.log-item')).some(function (node) {
+      if (node.dataset.itemId === targetId) {
+        target = node;
+        return true;
+      }
+      return false;
+    });
+    if (!target) return;
+    var detail = target.querySelector('.log-detail');
+    if (detail && !detail.classList.contains('open')) {
+      var row = target.querySelector('.log-row');
+      if (row) row.click();
+    }
+    setTimeout(function () {
+      target.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    }, 40);
   }
 
   // ── FinishReason Bar ───────────────────────────────
@@ -1108,6 +1218,16 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
       rerenderContent();
     });
   });
+
+  if (elAlbum) {
+    elAlbum.addEventListener('click', function (e) {
+      var btn = e.target && typeof e.target.closest === 'function'
+        ? e.target.closest('.jump-to-log-btn')
+        : null;
+      if (!btn) return;
+      jumpToLogFromAlbum(btn.dataset.logId);
+    });
+  }
 
   if (chartsToggle) {
     chartsToggle.addEventListener('click', function () {

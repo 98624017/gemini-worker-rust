@@ -595,6 +595,27 @@ async fn admin_logs_page_uses_shared_filtered_items_for_all_views() {
     );
 }
 
+#[tokio::test]
+async fn admin_logs_page_contains_album_rendering_helpers() {
+    let html = fetch_admin_logs_page_html().await;
+    assert!(
+        html.contains("function extractPromptText(item)"),
+        "HTML should extract prompt text for album cards"
+    );
+    assert!(
+        html.contains("function renderAlbum(items)"),
+        "HTML should render album cards"
+    );
+    assert!(
+        html.contains("album-card"),
+        "HTML should style album cards"
+    );
+    assert!(
+        html.contains("查看对应记录"),
+        "HTML should expose jump back action from album"
+    );
+}
+
 async fn fetch_admin_logs_page_html() -> String {
     let mut config = rust_sync_proxy::test_config();
     config.admin_password = "pw".to_string();
