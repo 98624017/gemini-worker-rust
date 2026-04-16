@@ -541,6 +541,18 @@ async fn admin_logs_page_uses_shared_filtered_items_for_all_views() {
         html.contains("if (viewMode !== 'list') return [];"),
         "HTML keyboard navigation should ignore hidden list items in album view"
     );
+    assert!(
+        html.contains("no requests yet"),
+        "HTML should keep first-load empty copy for zero total requests"
+    );
+    assert!(
+        html.contains("no matching requests"),
+        "HTML should keep filtered-empty copy for non-empty datasets"
+    );
+    assert!(
+        html.contains("allItems.length === 0"),
+        "HTML should distinguish true empty dataset from filtered-empty results"
+    );
 }
 
 async fn fetch_admin_logs_page_html() -> String {

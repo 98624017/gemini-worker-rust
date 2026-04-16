@@ -991,7 +991,8 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
   function renderList(items) {
     elList.innerHTML = '';
     if (!items.length) {
-      elList.innerHTML = '<div class="empty"><svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" opacity="0.3"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg><p>no matching requests</p></div>';
+      var emptyCopy = allItems.length === 0 ? 'no requests yet' : 'no matching requests';
+      elList.innerHTML = '<div class="empty"><svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" opacity="0.3"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg><p>' + emptyCopy + '</p></div>';
       return;
     }
     var frag = document.createDocumentFragment();
