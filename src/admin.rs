@@ -612,7 +612,6 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
   var searchText = '';
   var viewMode = readViewMode();
   var chartsCollapsed = readChartsCollapsed();
-  var pendingScrollTargetId = null;
   var autoTimer = null;
 
   // ── DOM refs ───────────────────────────────────────
