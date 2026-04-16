@@ -466,20 +466,30 @@ async fn admin_logs_page_contains_error_detail_section() {
 async fn admin_logs_page_contains_chart_collapse_and_view_switch() {
     let html = fetch_admin_logs_page_html().await;
     assert!(
-        html.contains("chartsSection"),
-        "HTML should contain charts section wrapper"
+        html.contains("<section class=\"charts-section collapsed\" id=\"chartsSection\">"),
+        "HTML should default charts section to collapsed"
     );
     assert!(
-        html.contains("chartsToggle"),
-        "HTML should contain charts collapse toggle"
+        html.contains("id=\"chartsToggle\" type=\"button\" aria-expanded=\"false\""),
+        "HTML should default charts toggle aria-expanded to false"
     );
     assert!(
-        html.contains("viewModeTabs"),
-        "HTML should contain view mode switch tabs"
+        html.contains("id=\"chartsPanel\" aria-hidden=\"true\""),
+        "HTML should mark charts panel hidden by default"
     );
     assert!(
-        html.contains("data-view=\"album\""),
-        "HTML should contain album view switch"
+        html.contains("id=\"viewModeTabs\" role=\"group\" aria-label=\"content view mode\""),
+        "HTML should expose view mode as button group semantics"
+    );
+    assert!(
+        html.contains(
+            "class=\"view-mode-tab active\" data-view=\"list\" aria-pressed=\"true\">列表视图</button>"
+        ),
+        "HTML should default list view as active"
+    );
+    assert!(
+        html.contains("class=\"view-mode-tab\" data-view=\"album\" aria-pressed=\"false\">相册视图</button>"),
+        "HTML should contain album view switch button"
     );
 }
 
