@@ -462,6 +462,48 @@ async fn admin_logs_page_contains_error_detail_section() {
     );
 }
 
+#[tokio::test]
+async fn admin_logs_page_contains_chart_collapse_and_view_switch() {
+    let html = fetch_admin_logs_page_html().await;
+    assert!(
+        html.contains("chartsSection"),
+        "HTML should contain charts section wrapper"
+    );
+    assert!(
+        html.contains("chartsToggle"),
+        "HTML should contain charts collapse toggle"
+    );
+    assert!(
+        html.contains("viewModeTabs"),
+        "HTML should contain view mode switch tabs"
+    );
+    assert!(
+        html.contains("data-view=\"album\""),
+        "HTML should contain album view switch"
+    );
+}
+
+#[tokio::test]
+async fn admin_logs_page_persists_view_mode_and_chart_collapse_state() {
+    let html = fetch_admin_logs_page_html().await;
+    assert!(
+        html.contains("admin:viewMode"),
+        "HTML should persist selected admin view mode"
+    );
+    assert!(
+        html.contains("admin:chartsCollapsed"),
+        "HTML should persist chart collapse state"
+    );
+    assert!(
+        html.contains("function setChartsCollapsed("),
+        "HTML should expose chart collapse state setter"
+    );
+    assert!(
+        html.contains("function setViewMode("),
+        "HTML should expose view mode state setter"
+    );
+}
+
 async fn fetch_admin_logs_page_html() -> String {
     let mut config = rust_sync_proxy::test_config();
     config.admin_password = "pw".to_string();

@@ -394,6 +394,13 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
     /* ── Charts ── */
     .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 20px; }
     @media (max-width: 900px) { .charts { grid-template-columns: 1fr; } }
+    .charts-section { margin-bottom: 20px; }
+    .charts-toggle { width: 100%; min-height: 52px; display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; border: 1px solid var(--border); border-radius: 14px; background: var(--bg-card); color: var(--text-primary); cursor: pointer; }
+    .charts-toggle-copy { display: inline-flex; flex-direction: column; align-items: flex-start; gap: 2px; }
+    .charts-toggle-icon { width: 10px; height: 10px; border-right: 2px solid var(--text-secondary); border-bottom: 2px solid var(--text-secondary); transform: rotate(45deg); transition: transform 0.18s ease; }
+    .charts-panel { max-height: 960px; opacity: 1; overflow: hidden; transition: max-height 0.18s ease, opacity 0.18s ease, margin-top 0.18s ease; margin-top: 12px; }
+    .charts-section.collapsed .charts-panel { max-height: 0; opacity: 0; margin-top: 0; }
+    .charts-section:not(.collapsed) .charts-toggle-icon { transform: rotate(-135deg); }
     .chart-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 14px; padding: 16px; backdrop-filter: var(--card-blur); box-shadow: var(--card-shadow); position: relative; overflow: hidden; transition: background-color 0.3s, border-color 0.3s, box-shadow 0.3s; }
     .chart-card::before { content: ""; position: absolute; inset: 0; background: var(--card-gradient); pointer-events: none; }
     .chart-title { font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-secondary); margin-bottom: 12px; position: relative; z-index: 1; }
@@ -404,6 +411,9 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
     .filter-tabs { display: flex; background: var(--bg-input); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
     .filter-tab { padding: 5px 14px; font-size: 12px; cursor: pointer; color: var(--text-secondary); border: none; background: none; transition: background 0.15s, color 0.15s; }
     .filter-tab.active { background: var(--bg-card-hover); color: var(--text-primary); font-weight: 600; }
+    .view-mode-tabs { display: flex; background: var(--bg-input); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+    .view-mode-tab { min-height: 34px; padding: 6px 14px; border: 0; background: transparent; color: var(--text-secondary); cursor: pointer; }
+    .view-mode-tab.active { background: var(--bg-card-hover); color: var(--text-primary); font-weight: 600; }
     .search { flex: 1; min-width: 160px; max-width: 280px; background: var(--bg-input); border: 1px solid var(--border); border-radius: 8px; padding: 5px 12px; color: var(--text-primary); font-size: 13px; outline: none; transition: border-color 0.15s; }
     .search:focus { border-color: var(--border-focus); }
     .search::placeholder { color: var(--text-muted); }
@@ -482,24 +492,35 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
   </div>
 
   <!-- Charts -->
-  <div class="charts" id="chartsRow">
-    <div class="chart-card">
-      <div class="chart-title">request latency distribution</div>
-      <canvas id="chartDuration"></canvas>
+  <section class="charts-section collapsed" id="chartsSection">
+    <button class="charts-toggle" id="chartsToggle" type="button" aria-expanded="false">
+      <span class="charts-toggle-copy">
+        <strong>趋势图表</strong>
+        <span>4 个趋势图，按需展开</span>
+      </span>
+      <span class="charts-toggle-icon" id="chartsToggleIcon"></span>
+    </button>
+    <div class="charts-panel" id="chartsPanel">
+      <div class="charts" id="chartsRow">
+        <div class="chart-card">
+          <div class="chart-title">request latency distribution</div>
+          <canvas id="chartDuration"></canvas>
+        </div>
+        <div class="chart-card">
+          <div class="chart-title">model usage</div>
+          <canvas id="chartModels"></canvas>
+        </div>
+        <div class="chart-card">
+          <div class="chart-title">status code distribution</div>
+          <canvas id="chartStatus"></canvas>
+        </div>
+        <div class="chart-card">
+          <div class="chart-title">request timeline</div>
+          <canvas id="chartTimeline"></canvas>
+        </div>
+      </div>
     </div>
-    <div class="chart-card">
-      <div class="chart-title">model usage</div>
-      <canvas id="chartModels"></canvas>
-    </div>
-    <div class="chart-card">
-      <div class="chart-title">status code distribution</div>
-      <canvas id="chartStatus"></canvas>
-    </div>
-    <div class="chart-card">
-      <div class="chart-title">request timeline</div>
-      <canvas id="chartTimeline"></canvas>
-    </div>
-  </div>
+  </section>
 
   <!-- Toolbar -->
   <div class="toolbar">
@@ -507,6 +528,10 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
       <button class="filter-tab active" data-filter="all">All</button>
       <button class="filter-tab" data-filter="ok">2xx</button>
       <button class="filter-tab" data-filter="bad">4xx+</button>
+    </div>
+    <div class="view-mode-tabs" id="viewModeTabs" role="tablist" aria-label="content view mode">
+      <button class="view-mode-tab active" data-view="list" aria-pressed="true">列表视图</button>
+      <button class="view-mode-tab" data-view="album" aria-pressed="false">相册视图</button>
     </div>
     <input class="search" id="searchBox" type="search" placeholder="search path / model..." />
     <span class="count-badge" id="countBadge"></span>
@@ -541,12 +566,18 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
 (function () {
   'use strict';
 
+  var STORAGE_KEYS = {
+    theme: 'theme',
+    viewMode: 'admin:viewMode',
+    chartsCollapsed: 'admin:chartsCollapsed'
+  };
+
   // ── Theme ──────────────────────────────────────────
   var SUN_SVG = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>';
   var MOON_SVG = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>';
 
   function readThemeOverride() {
-    var stored = localStorage.getItem('theme');
+    var stored = localStorage.getItem(STORAGE_KEYS.theme);
     return stored === 'dark' || stored === 'light' ? stored : '';
   }
   function getPreferredTheme() {
@@ -557,7 +588,7 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
   }
   function applyTheme(theme, persist) {
     document.documentElement.setAttribute('data-theme', theme);
-    if (persist) localStorage.setItem('theme', theme);
+    if (persist) localStorage.setItem(STORAGE_KEYS.theme, theme);
     var btn = document.getElementById('themeToggle');
     if (btn) btn.innerHTML = theme === 'dark' ? SUN_SVG : MOON_SVG;
     // refresh charts with new colors
@@ -580,9 +611,15 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
   var filterMode = 'all';
   var finishReasonFilter = 'all';
   var searchText = '';
+  var viewMode = readViewMode();
+  var chartsCollapsed = readChartsCollapsed();
+  var pendingScrollTargetId = null;
   var autoTimer = null;
 
   // ── DOM refs ───────────────────────────────────────
+  var chartsSection = document.getElementById('chartsSection');
+  var chartsToggle = document.getElementById('chartsToggle');
+  var chartsPanel = document.getElementById('chartsPanel');
   var elList    = document.getElementById('logList');
   var elStatus  = document.getElementById('statusLine');
   var elCount   = document.getElementById('countBadge');
@@ -590,6 +627,37 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
   var chkAuto   = document.getElementById('autoRefreshChk');
   var btnRef    = document.getElementById('btnRefresh');
   var pulseDot  = document.getElementById('pulseDot');
+
+  function readViewMode() {
+    var stored = localStorage.getItem(STORAGE_KEYS.viewMode);
+    return stored === 'album' ? 'album' : 'list';
+  }
+
+  function readChartsCollapsed() {
+    var stored = localStorage.getItem(STORAGE_KEYS.chartsCollapsed);
+    return stored === null ? true : stored === 'true';
+  }
+
+  function setViewMode(mode, persist) {
+    viewMode = mode === 'album' ? 'album' : 'list';
+    if (persist) localStorage.setItem(STORAGE_KEYS.viewMode, viewMode);
+  }
+
+  function setChartsCollapsed(collapsed, persist) {
+    chartsCollapsed = !!collapsed;
+    if (persist) localStorage.setItem(STORAGE_KEYS.chartsCollapsed, String(chartsCollapsed));
+    if (chartsSection) chartsSection.classList.toggle('collapsed', chartsCollapsed);
+    if (chartsToggle) chartsToggle.setAttribute('aria-expanded', String(!chartsCollapsed));
+    if (chartsPanel) chartsPanel.setAttribute('aria-hidden', String(chartsCollapsed));
+  }
+
+  function syncViewModeTabs() {
+    document.querySelectorAll('.view-mode-tab').forEach(function (node) {
+      var active = node.dataset.view === viewMode;
+      node.classList.toggle('active', active);
+      node.setAttribute('aria-pressed', String(active));
+    });
+  }
 
   // ── Helpers ────────────────────────────────────────
   function esc(s) {
@@ -980,6 +1048,22 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
   });
 
   // ── Filter tabs ────────────────────────────────────
+  document.querySelectorAll('.view-mode-tab').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      setViewMode(btn.dataset.view, true);
+      syncViewModeTabs();
+    });
+  });
+
+  if (chartsToggle) {
+    chartsToggle.addEventListener('click', function () {
+      setChartsCollapsed(!chartsCollapsed, true);
+    });
+  }
+
+  syncViewModeTabs();
+  setChartsCollapsed(chartsCollapsed, false);
+
   document.querySelectorAll('.filter-tab').forEach(function (btn) {
     btn.addEventListener('click', function () {
       document.querySelectorAll('.filter-tab').forEach(function (b) { b.classList.remove('active'); });
