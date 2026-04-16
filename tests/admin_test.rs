@@ -578,6 +578,10 @@ async fn admin_logs_page_uses_shared_filtered_items_for_all_views() {
         "HTML should capture list context before shared content rerender"
     );
     assert!(
+        html.contains("if (listContext && (listContext.expandedIds.length || listContext.renderedIds.length || listContext.focusedId)) preservedListContext = listContext;"),
+        "HTML should only overwrite preserved list context when snapshot has meaningful state"
+    );
+    assert!(
         html.contains("if (!snapshot.expandedIds.length && !snapshot.renderedIds.length && !snapshot.focusedId) return null;"),
         "HTML should return null for empty list snapshots to avoid wiping preserved context"
     );

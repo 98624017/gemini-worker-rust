@@ -1027,7 +1027,7 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
   function rerenderContent() {
     var filtered = getFilteredItems();
     var listContext = snapshotListContext();
-    if (listContext) preservedListContext = listContext;
+    if (listContext && (listContext.expandedIds.length || listContext.renderedIds.length || listContext.focusedId)) preservedListContext = listContext;
     else listContext = preservedListContext;
     renderMainContent(filtered);
     if (viewMode === 'list') {
