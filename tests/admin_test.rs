@@ -500,7 +500,9 @@ async fn admin_logs_page_contains_chart_collapse_and_view_switch() {
         "HTML should default list view as active"
     );
     assert!(
-        html.contains("class=\"view-mode-tab\" data-view=\"album\" aria-pressed=\"false\">相册视图</button>"),
+        html.contains(
+            "class=\"view-mode-tab\" data-view=\"album\" aria-pressed=\"false\">相册视图</button>"
+        ),
         "HTML should contain album view switch button"
     );
 }
@@ -618,10 +620,7 @@ async fn admin_logs_page_contains_album_rendering_helpers() {
         html.contains("function renderAlbum(items)"),
         "HTML should render album cards"
     );
-    assert!(
-        html.contains("album-card"),
-        "HTML should style album cards"
-    );
+    assert!(html.contains("album-card"), "HTML should style album cards");
     assert!(
         html.contains("查看对应记录"),
         "HTML should expose jump back action from album"
