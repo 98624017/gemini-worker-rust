@@ -615,6 +615,7 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
   var filterMode = 'all';
   var finishReasonFilter = 'all';
   var searchText = '';
+  var preservedListContext = null;
   var viewMode = readViewMode();
   var chartsCollapsed = readChartsCollapsed();
   var autoTimer = null;
@@ -946,6 +947,7 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
 
     var el = document.createElement('div');
     el.className = 'log-item';
+    el.dataset.itemId = String(item.id);
     el.dataset.status = isOk ? 'ok' : 'bad';
     el.dataset.fr = fr;
     el.dataset.search = (model + ' ' + item.path + ' ' + item.statusCode + ' ' + fr).toLowerCase();
@@ -1024,7 +1026,13 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
 
   function rerenderContent() {
     var filtered = getFilteredItems();
+    var listContext = snapshotListContext();
+    if (listContext) preservedListContext = listContext;
+    else listContext = preservedListContext;
     renderMainContent(filtered);
+    if (viewMode === 'list') {
+      restoreListContext(listContext, filtered);
+    }
     updateCount(filtered.length, allItems.length);
   }
 
@@ -1148,11 +1156,55 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
     return !!el.closest('button, a, input, select, textarea');
   }
 
+  function snapshotListContext() {
+    if (!elList) return null;
+    var snapshot = { expandedIds: [], renderedIds: [], focusedId: '' };
+    elList.querySelectorAll('.log-item').forEach(function (row) {
+      var id = row.dataset.itemId;
+      if (!id) return;
+      var detail = row.querySelector('.log-detail');
+      if (detail && detail.dataset.rendered) snapshot.renderedIds.push(id);
+      if (row.classList.contains('expanded')) snapshot.expandedIds.push(id);
+      if (row.classList.contains('focused')) snapshot.focusedId = id;
+    });
+    return snapshot;
+  }
+
+  function restoreListContext(snapshot, items) {
+    if (viewMode !== 'list' || !snapshot || !elList) return;
+    var byId = {};
+    items.forEach(function (item) { byId[String(item.id)] = item; });
+    var nextFocusIndex = -1;
+    var visible = getVisibleItems();
+    visible.forEach(function (row, idx) {
+      var id = row.dataset.itemId;
+      if (!id) return;
+      var detail = row.querySelector('.log-detail');
+      var shouldRender = snapshot.renderedIds.indexOf(id) !== -1 || snapshot.expandedIds.indexOf(id) !== -1;
+      var shouldExpand = snapshot.expandedIds.indexOf(id) !== -1;
+      if (detail && shouldRender && !detail.dataset.rendered && byId[id]) {
+        detail.innerHTML = buildDetailMarkup(byId[id]);
+        detail.dataset.rendered = '1';
+      }
+      if (detail && shouldExpand) {
+        detail.classList.add('open');
+        row.classList.add('expanded');
+      }
+      if (snapshot.focusedId === id) {
+        row.classList.add('focused');
+        nextFocusIndex = idx;
+      }
+    });
+    focusIndex = nextFocusIndex;
+  }
+
   document.addEventListener('keydown', function (e) {
     if (document.activeElement === elSearch) {
       if (e.key === 'Escape') { elSearch.blur(); e.preventDefault(); }
       return;
     }
+    var listOnlyKey = e.key === 'j' || e.key === 'k' || e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Enter' || e.key === ' ';
+    if (listOnlyKey && viewMode !== 'list') return;
     var visible = getVisibleItems();
     switch (e.key) {
       case 'j': case 'ArrowDown': e.preventDefault(); setFocus(focusIndex + 1); break;

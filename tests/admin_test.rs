@@ -557,6 +557,34 @@ async fn admin_logs_page_uses_shared_filtered_items_for_all_views() {
         html.contains("var albumEmptyCopy = allItems.length === 0 ? 'no requests yet' : 'no matching requests';"),
         "HTML should keep album empty copy consistent with list empty-state distinction"
     );
+    assert!(
+        html.contains("var listOnlyKey = e.key === 'j' || e.key === 'k' || e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Enter' || e.key === ' ';"),
+        "HTML should classify list-only shortcuts explicitly"
+    );
+    assert!(
+        html.contains("if (listOnlyKey && viewMode !== 'list') return;"),
+        "HTML should skip preventDefault for list-only shortcuts in album view"
+    );
+    assert!(
+        html.contains("function snapshotListContext()"),
+        "HTML should snapshot list context before list rerender"
+    );
+    assert!(
+        html.contains("function restoreListContext(snapshot, items)"),
+        "HTML should restore list context after list rerender"
+    );
+    assert!(
+        html.contains("var listContext = snapshotListContext();"),
+        "HTML should capture list context before shared content rerender"
+    );
+    assert!(
+        html.contains("restoreListContext(listContext, filtered);"),
+        "HTML should restore list context after shared content rerender"
+    );
+    assert!(
+        html.contains("el.dataset.itemId = String(item.id);"),
+        "HTML should mark list rows with stable item IDs for context restore"
+    );
 }
 
 async fn fetch_admin_logs_page_html() -> String {
