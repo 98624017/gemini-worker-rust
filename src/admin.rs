@@ -419,6 +419,8 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
     .search:focus { border-color: var(--border-focus); }
     .search::placeholder { color: var(--text-muted); }
     .count-badge { margin-left: auto; font-size: 12px; color: var(--text-muted); }
+    .hidden { display: none !important; }
+    .content-stack { min-height: 120px; }
 
     /* ── Log List ── */
     .log-item { border: 1px solid var(--border); border-radius: 10px; background: var(--bg-card); margin-bottom: 6px; overflow: hidden; transition: border-color 0.15s, transform 0.15s, box-shadow 0.15s, background-color 0.3s; }
@@ -542,8 +544,10 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
   <!-- FinishReason filter bar -->
   <div id="frBar" class="fr-bar"></div>
 
-  <!-- Log list -->
-  <div id="logList"></div>
+  <div class="content-stack" id="contentStack">
+    <div id="logList"></div>
+    <div id="albumList" class="album-list hidden" aria-live="polite"></div>
+  </div>
 </main>
 <script>
 /* Chart.js v4.5.1 - MIT License - https://www.chartjs.org/ */
@@ -620,6 +624,7 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
   var chartsToggle = document.getElementById('chartsToggle');
   var chartsPanel = document.getElementById('chartsPanel');
   var elList    = document.getElementById('logList');
+  var elAlbum   = document.getElementById('albumList');
   var elStatus  = document.getElementById('statusLine');
   var elCount   = document.getElementById('countBadge');
   var elSearch  = document.getElementById('searchBox');
@@ -675,6 +680,12 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
 
   function fmtNum(n) {
     return Number(n).toLocaleString('zh-CN');
+  }
+
+  function truncateText(text, limit) {
+    var raw = String(text == null ? '' : text);
+    if (raw.length <= limit) return raw;
+    return raw.slice(0, Math.max(0, limit)) + '...';
   }
 
   function relTime(iso) {
@@ -955,23 +966,64 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
     return el;
   }
 
-  function applyFilter() {
+  function matchesFilters(item) {
+    var model = extractModel(item.path);
+    var fr = (item.finishReason || '').toUpperCase();
     var q = searchText.toLowerCase();
-    var shown = 0;
-    var items = elList.querySelectorAll('.log-item');
-    items.forEach(function (el) {
-      var matchFilter = filterMode === 'all'
-        || (filterMode === 'ok'  && el.dataset.status === 'ok')
-        || (filterMode === 'bad' && el.dataset.status === 'bad');
-      var matchFr = finishReasonFilter === 'all' || el.dataset.fr === finishReasonFilter;
-      var matchSearch = !q || el.dataset.search.includes(q);
-      var visible = matchFilter && matchFr && matchSearch;
-      el.style.display = visible ? '' : 'none';
-      if (visible) shown++;
-    });
-    elCount.textContent = shown === allItems.length
-      ? shown + ' total'
-      : shown + ' / ' + allItems.length;
+    var isOk = item.statusCode >= 200 && item.statusCode < 400;
+    var matchFilter = filterMode === 'all'
+      || (filterMode === 'ok' && isOk)
+      || (filterMode === 'bad' && !isOk);
+    var matchFr = finishReasonFilter === 'all' || fr === finishReasonFilter;
+    var haystack = (model + ' ' + item.path + ' ' + item.statusCode + ' ' + fr).toLowerCase();
+    var matchSearch = !q || haystack.includes(q);
+    return matchFilter && matchFr && matchSearch;
+  }
+
+  function getFilteredItems() {
+    return allItems.filter(matchesFilters);
+  }
+
+  function updateCount(shown, total) {
+    elCount.textContent = shown === total ? shown + ' total' : shown + ' / ' + total;
+  }
+
+  function renderList(items) {
+    elList.innerHTML = '';
+    if (!items.length) {
+      elList.innerHTML = '<div class="empty"><svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" opacity="0.3"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg><p>no matching requests</p></div>';
+      return;
+    }
+    var frag = document.createDocumentFragment();
+    items.forEach(function (it) { frag.appendChild(buildRow(it)); });
+    elList.appendChild(frag);
+  }
+
+  function renderAlbum(items) {
+    if (!items.length) {
+      elAlbum.innerHTML = '<div class="empty"><p>no matching requests</p></div>';
+      return;
+    }
+    elAlbum.innerHTML = items.map(function (item) {
+      return '<article class="album-card" data-item-id="' + esc(item.id) + '">'
+        + '<div class="album-head"><strong>#' + esc(item.id) + '</strong><span class="log-dur">' + fmtDur(item.durationMs) + '</span></div>'
+        + '<div class="album-prompt"><pre>' + esc(truncateText(item.requestRaw || '', 160)) + '</pre></div>'
+        + '</article>';
+    }).join('');
+  }
+
+  function renderMainContent(items) {
+    var isAlbum = viewMode === 'album';
+    elList.classList.toggle('hidden', isAlbum);
+    elAlbum.classList.toggle('hidden', !isAlbum);
+    if (isAlbum) renderAlbum(items);
+    else renderList(items);
+  }
+
+  function rerenderContent() {
+    var filtered = getFilteredItems();
+    renderMainContent(filtered);
+    updateCount(filtered.length, allItems.length);
   }
 
   // ── FinishReason Bar ───────────────────────────────
@@ -998,7 +1050,7 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
         finishReasonFilter = btn.dataset.reason;
         frBar.querySelectorAll('.fr-btn').forEach(function (b) { b.classList.remove('active'); });
         btn.classList.add('active');
-        applyFilter();
+        rerenderContent();
       });
     });
   }
@@ -1009,17 +1061,9 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
       .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
       .then(function (d) {
         allItems = (d && d.items) || [];
-        elList.innerHTML = '';
-        if (!allItems.length) {
-          elList.innerHTML = '<div class="empty"><svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" opacity="0.3"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg><p>no requests yet</p></div>';
-        } else {
-          var frag = document.createDocumentFragment();
-          allItems.forEach(function (it) { frag.appendChild(buildRow(it)); });
-          elList.appendChild(frag);
-        }
         rebuildFrBar();
         renderCharts(allItems);
-        applyFilter();
+        rerenderContent();
         elStatus.textContent = 'updated ' + new Date().toLocaleTimeString('zh-CN');
       })
       .catch(function (e) {
@@ -1051,6 +1095,7 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
     btn.addEventListener('click', function () {
       setViewMode(btn.dataset.view, true);
       syncViewModeTabs();
+      rerenderContent();
     });
   });
 
@@ -1068,14 +1113,14 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
       document.querySelectorAll('.filter-tab').forEach(function (b) { b.classList.remove('active'); });
       btn.classList.add('active');
       filterMode = btn.dataset.filter;
-      applyFilter();
+      rerenderContent();
     });
   });
 
   // ── Search ─────────────────────────────────────────
   elSearch.addEventListener('input', function () {
     searchText = elSearch.value;
-    applyFilter();
+    rerenderContent();
   });
 
   // ── Keyboard Navigation ────────────────────────────
