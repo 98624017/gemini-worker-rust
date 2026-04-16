@@ -427,6 +427,7 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
     .log-item:hover { border-color: var(--border-hover); transform: translateX(2px); box-shadow: 0 0 8px rgba(59,130,246,0.08); }
     .log-item.focused { outline: 2px solid var(--accent-blue); outline-offset: -2px; }
     .log-item.expanded { border-left: 3px solid var(--accent-blue); }
+    .flash-target { box-shadow: 0 0 0 1px rgba(59,130,246,0.45), 0 0 0 8px rgba(59,130,246,0.08); }
     .log-row { display: flex; align-items: center; gap: 10px; padding: 9px 14px; cursor: pointer; }
     .log-id { font-size: 11px; color: var(--text-muted); min-width: 36px; font-variant-numeric: tabular-nums; }
     .log-model { flex: 1; font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -488,6 +489,14 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
     .empty svg { margin-bottom: 12px; }
     .empty p { margin: 0; }
     .status-line { font-size: 12px; color: var(--text-muted); }
+
+    @media (prefers-reduced-motion: reduce) {
+      .charts-panel,
+      .album-card,
+      .log-item,
+      .log-detail,
+      .flash-target { transition: none !important; animation: none !important; }
+    }
   </style>
 </head>
 <body>
@@ -636,6 +645,7 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
   var finishReasonFilter = 'all';
   var searchText = '';
   var preservedListContext = null;
+  var pendingScrollTargetId = null;
   var viewMode = readViewMode();
   var chartsCollapsed = readChartsCollapsed();
   var autoTimer = null;
@@ -744,6 +754,10 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
   function extractModel(path) {
     var m = path && path.match(/models\/([^/:]+)/);
     return m ? m[1] : (path || '');
+  }
+
+  function prefersReducedMotion() {
+    return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
   }
 
   // ── Animate Value ──────────────────────────────────
@@ -958,6 +972,18 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
       + '</div>';
   }
 
+  function openLogItem(el) {
+    var item = el.__item || null;
+    if (!item) return;
+    var d = el.querySelector('.log-detail');
+    if (!d.dataset.rendered) {
+      d.innerHTML = buildDetailMarkup(item);
+      d.dataset.rendered = '1';
+    }
+    d.classList.add('open');
+    el.classList.add('expanded');
+  }
+
   function buildRow(item) {
     var model  = extractModel(item.path);
     var isOk   = item.statusCode >= 200 && item.statusCode < 400;
@@ -988,6 +1014,7 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
     var el = document.createElement('div');
     el.className = 'log-item';
     el.dataset.itemId = String(item.id);
+    el.__item = item;
     el.dataset.status = isOk ? 'ok' : 'bad';
     el.dataset.fr = fr;
     el.dataset.search = (model + ' ' + item.path + ' ' + item.statusCode + ' ' + fr).toLowerCase();
@@ -995,12 +1022,12 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
     el.querySelector('.log-row').addEventListener('click', function () {
       var d = el.querySelector('.log-detail');
       var isOpen = d.classList.contains('open');
-      if (!d.dataset.rendered) {
-        d.innerHTML = buildDetailMarkup(item);
-        d.dataset.rendered = '1';
+      if (isOpen) {
+        d.classList.remove('open');
+        el.classList.remove('expanded');
+      } else {
+        openLogItem(el);
       }
-      d.classList.toggle('open');
-      el.classList.toggle('expanded');
       if (!isOpen) {
         setTimeout(function () { el.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }, 50);
       }
@@ -1108,6 +1135,29 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
     elAlbum.innerHTML = items.map(renderAlbumCard).join('');
   }
 
+  function jumpToListItem(itemId) {
+    pendingScrollTargetId = String(itemId);
+    setViewMode('list', true);
+    syncViewModeTabs();
+    rerenderContent();
+  }
+
+  function flushPendingScrollTarget() {
+    if (!pendingScrollTargetId) return;
+    var target = document.querySelector('.log-item[data-item-id="' + pendingScrollTargetId + '"]');
+    if (!target) {
+      console.warn('[admin] target log item is filtered out:', pendingScrollTargetId);
+      pendingScrollTargetId = null;
+      return;
+    }
+    openLogItem(target);
+    target.classList.add('flash-target');
+    var scrollBehavior = prefersReducedMotion() ? 'auto' : 'smooth';
+    target.scrollIntoView({ block: 'center', behavior: scrollBehavior });
+    setTimeout(function () { target.classList.remove('flash-target'); }, 1500);
+    pendingScrollTargetId = null;
+  }
+
   function renderMainContent(items) {
     var isAlbum = viewMode === 'album';
     elList.classList.toggle('hidden', isAlbum);
@@ -1124,6 +1174,7 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
     renderMainContent(filtered);
     if (viewMode === 'list') {
       restoreListContext(listContext, filtered);
+      flushPendingScrollTarget();
     }
     updateCount(filtered.length, allItems.length);
   }
@@ -1199,6 +1250,12 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
       syncViewModeTabs();
       rerenderContent();
     });
+  });
+
+  elAlbum.addEventListener('click', function (e) {
+    var button = e.target.closest('.jump-to-log-btn');
+    if (!button) return;
+    jumpToListItem(button.dataset.logId);
   });
 
   if (chartsToggle) {

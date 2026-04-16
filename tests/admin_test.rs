@@ -640,6 +640,37 @@ async fn admin_logs_page_contains_album_rendering_helpers() {
     );
 }
 
+#[tokio::test]
+async fn admin_logs_page_contains_album_jump_back_logic() {
+    let html = fetch_admin_logs_page_html().await;
+    assert!(
+        html.contains("function jumpToListItem(itemId)"),
+        "HTML should expose jump-back helper from album to list"
+    );
+    assert!(
+        html.contains("data-item-id"),
+        "HTML should stamp stable item ids on rendered elements"
+    );
+    assert!(
+        html.contains("pendingScrollTargetId"),
+        "HTML should keep pending list jump state"
+    );
+    assert!(
+        html.contains(".log-detail,"),
+        "HTML should disable log-detail motion in reduced-motion mode"
+    );
+    assert!(
+        html.contains("var scrollBehavior = prefersReducedMotion() ? 'auto' : 'smooth';"),
+        "HTML should avoid forced smooth scrolling when reduced-motion is preferred"
+    );
+    assert!(
+        html.contains(
+            "if (viewMode === 'list') {\n      restoreListContext(listContext, filtered);\n      flushPendingScrollTarget();\n    }"
+        ),
+        "HTML should restore list context before flushing pending jump target"
+    );
+}
+
 async fn fetch_admin_logs_page_html() -> String {
     let mut config = rust_sync_proxy::test_config();
     config.admin_password = "pw".to_string();
