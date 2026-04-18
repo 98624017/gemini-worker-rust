@@ -5,6 +5,9 @@ use axum::Router;
 use axum::extract::State;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header::CONTENT_TYPE};
 use axum::routing::get;
+use image::ColorType;
+use image::ImageEncoder;
+use image::codecs::png::{CompressionType, FilterType, PngEncoder};
 use serde_json::json;
 use tokio::net::TcpListener;
 use tokio::time::Duration;
@@ -99,6 +102,64 @@ async fn request_materialize_rejects_images_over_request_limit() {
     )));
 }
 
+#[tokio::test]
+async fn request_materialize_keeps_large_png_without_webp_optimization() {
+    let (image_url, _server) =
+        spawn_named_png_server("/large.png", noisy_png_bytes(2048, 1536)).await;
+    let runtime = rust_sync_proxy::test_blob_runtime(8 * 1024 * 1024);
+    let request = json!({
+        "contents": [{"parts": [{"inlineData": {"data": image_url}}]}]
+    });
+
+    let materialized =
+        rust_sync_proxy::request_materialize::materialize_request_images_with_services(
+            request,
+            &runtime,
+            &rust_sync_proxy::request_materialize::RequestMaterializeServices {
+                image_client: reqwest::Client::new(),
+                max_image_bytes: rust_sync_proxy::image_io::REQUEST_MAX_IMAGE_BYTES,
+                allow_private_networks: true,
+                enable_webp_optimization: false,
+                fetch_service: None,
+                cache_observer: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(materialized.replacements.len(), 1);
+    assert_eq!(materialized.replacements[0].mime_type, "image/png");
+}
+
+#[tokio::test]
+async fn request_materialize_converts_large_png_when_webp_optimization_enabled() {
+    let (image_url, _server) =
+        spawn_named_png_server("/large.png", noisy_png_bytes(2048, 1536)).await;
+    let runtime = rust_sync_proxy::test_blob_runtime(8 * 1024 * 1024);
+    let request = json!({
+        "contents": [{"parts": [{"inlineData": {"data": image_url}}]}]
+    });
+
+    let materialized =
+        rust_sync_proxy::request_materialize::materialize_request_images_with_services(
+            request,
+            &runtime,
+            &rust_sync_proxy::request_materialize::RequestMaterializeServices {
+                image_client: reqwest::Client::new(),
+                max_image_bytes: rust_sync_proxy::image_io::REQUEST_MAX_IMAGE_BYTES,
+                allow_private_networks: true,
+                enable_webp_optimization: true,
+                fetch_service: None,
+                cache_observer: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(materialized.replacements.len(), 1);
+    assert_eq!(materialized.replacements[0].mime_type, "image/webp");
+}
+
 async fn spawn_png_server() -> (String, tokio::task::JoinHandle<()>) {
     spawn_named_png_server("/image.png", vec![137, 80, 78, 71, 13, 10, 26, 10]).await
 }
@@ -159,4 +220,22 @@ async fn serve_png(State(state): State<ImageState>) -> (StatusCode, HeaderMap, V
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("image/png"));
     (StatusCode::OK, headers, state.png)
+}
+
+fn noisy_png_bytes(width: u32, height: u32) -> Vec<u8> {
+    let mut rgba = vec![0_u8; (width as usize) * (height as usize) * 4];
+    for (index, byte) in rgba.iter_mut().enumerate() {
+        *byte = ((index * 31 + 17) % 251) as u8;
+    }
+
+    let mut encoded = Vec::new();
+    PngEncoder::new_with_quality(&mut encoded, CompressionType::Fast, FilterType::NoFilter)
+        .write_image(&rgba, width, height, ColorType::Rgba8.into())
+        .unwrap();
+    assert!(
+        encoded.len() > 10 * 1024 * 1024,
+        "png too small: {}",
+        encoded.len()
+    );
+    encoded
 }

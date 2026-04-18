@@ -36,6 +36,7 @@ pub struct RequestMaterializeServices {
     pub image_client: reqwest::Client,
     pub max_image_bytes: usize,
     pub allow_private_networks: bool,
+    pub enable_webp_optimization: bool,
     pub fetch_service: Option<Arc<InlineDataUrlFetchService>>,
     pub cache_observer: Option<Arc<dyn Fn(&str, bool) + Send + Sync>>,
 }
@@ -55,6 +56,7 @@ pub async fn materialize_request_images(
         image_client: client.clone(),
         max_image_bytes: REQUEST_MAX_IMAGE_BYTES,
         allow_private_networks: true,
+        enable_webp_optimization: false,
         fetch_service: None,
         cache_observer: None,
     };
@@ -167,7 +169,11 @@ async fn fetch_request_image(
         .await?;
         let fetch_work_ms = fetch_started.elapsed().as_millis() as i64;
         let store_started = std::time::Instant::now();
-        let fetched = maybe_convert_large_png_to_lossless_webp(fetched).await?;
+        let fetched = if services.enable_webp_optimization {
+            maybe_convert_large_png_to_lossless_webp(fetched).await?
+        } else {
+            fetched
+        };
         let mime_type = fetched.mime_type.clone();
         let blob = runtime
             .store_shared_bytes(fetched.bytes, mime_type.clone())

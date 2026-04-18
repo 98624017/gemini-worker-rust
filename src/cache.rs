@@ -131,7 +131,7 @@ impl InlineDataUrlFetchService {
             client,
             max_image_bytes,
             allow_private_networks,
-            true,
+            config.enable_request_image_webp_optimization,
             config.inline_data_url_background_fetch_max_inflight,
         )
     }

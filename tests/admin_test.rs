@@ -407,27 +407,27 @@ async fn admin_logs_page_contains_chartjs_and_theme_toggle() {
 }
 
 #[tokio::test]
-async fn admin_logs_page_only_previews_proxy_images() {
+async fn admin_logs_page_album_previews_safe_images_by_default() {
     let html = fetch_admin_logs_page_html().await;
     assert!(
         html.contains("startsWith('/proxy/image')"),
-        "HTML should only auto-preview proxy image URLs"
+        "list/detail preview guard should still exist for proxy image URLs"
     );
     assert!(
-        html.contains("external image"),
-        "HTML should keep external image URLs inert until explicit open"
+        html.contains("function canPreviewAlbumImageUrl(u)"),
+        "HTML should expose album-safe-image preview helper"
     );
     assert!(
-        html.contains("function renderAlbumThumb(url, cacheHit, alt)"),
-        "HTML should expose album thumb renderer"
+        html.contains("return !!safeUrl(u);"),
+        "album preview helper should allow safe URLs by default"
     );
     assert!(
-        html.contains("if (!isProxyImageUrl(safe))"),
-        "HTML should keep album request-image preview behind proxy-image guard"
+        html.contains("var canPreviewAlbumThumb = canPreviewAlbumImageUrl(safe);"),
+        "album request-image preview should use safe-url helper instead of proxy-only guard"
     );
     assert!(
-        html.contains("var canPreviewResult = safeResultUrl && isProxyImageUrl(safeResultUrl);"),
-        "HTML should keep album result-image preview behind proxy-image guard"
+        html.contains("var canPreviewResult = canPreviewAlbumImageUrl(safeResultUrl);"),
+        "album result-image preview should use safe-url helper instead of proxy-only guard"
     );
 }
 

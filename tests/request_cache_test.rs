@@ -133,6 +133,7 @@ async fn request_materialize_reuses_fetch_service_cache_between_calls() {
             image_client: reqwest::Client::new(),
             max_image_bytes: rust_sync_proxy::image_io::DEFAULT_MAX_IMAGE_BYTES,
             allow_private_networks: true,
+            enable_webp_optimization: false,
             fetch_service: Some(service.clone()),
             cache_observer: None,
         },
@@ -146,6 +147,7 @@ async fn request_materialize_reuses_fetch_service_cache_between_calls() {
             image_client: reqwest::Client::new(),
             max_image_bytes: rust_sync_proxy::image_io::DEFAULT_MAX_IMAGE_BYTES,
             allow_private_networks: true,
+            enable_webp_optimization: false,
             fetch_service: Some(service),
             cache_observer: None,
         },
@@ -198,6 +200,7 @@ async fn request_materialize_keeps_large_cached_bytes_in_memory_without_spill() 
             image_client: reqwest::Client::new(),
             max_image_bytes: rust_sync_proxy::image_io::DEFAULT_MAX_IMAGE_BYTES,
             allow_private_networks: true,
+            enable_webp_optimization: false,
             fetch_service: Some(service.clone()),
             cache_observer: None,
         },
@@ -213,6 +216,7 @@ async fn request_materialize_keeps_large_cached_bytes_in_memory_without_spill() 
             image_client: reqwest::Client::new(),
             max_image_bytes: rust_sync_proxy::image_io::DEFAULT_MAX_IMAGE_BYTES,
             allow_private_networks: true,
+            enable_webp_optimization: false,
             fetch_service: Some(service),
             cache_observer: Some({
                 let cache_hit = Arc::clone(&cache_hit);
@@ -258,12 +262,43 @@ async fn request_cache_retries_once_after_connection_drops_before_headers() {
 }
 
 #[tokio::test]
-async fn request_cache_stores_large_png_as_lossless_webp() {
+async fn request_cache_keeps_large_png_when_request_webp_optimization_is_disabled() {
     let png = noisy_png_bytes(2048, 1536);
     assert!(png.len() > 10 * 1024 * 1024, "png too small: {}", png.len());
 
     let (address, request_count) = spawn_custom_image_server(png, "image/png", 0).await;
     let mut config = rust_sync_proxy::test_config();
+    config.inline_data_url_memory_cache_max_bytes = 64 * 1024 * 1024;
+    config.inline_data_url_background_fetch_wait_timeout = Duration::from_secs(2);
+    config.inline_data_url_background_fetch_total_timeout = Duration::from_secs(5);
+    let service = rust_sync_proxy::cache::InlineDataUrlFetchService::from_config(
+        &config,
+        reqwest::Client::new(),
+        rust_sync_proxy::image_io::REQUEST_MAX_IMAGE_BYTES,
+        true,
+    )
+    .unwrap();
+
+    let url = format!("http://{address}/image.png");
+    let first = service.fetch(&url).await.unwrap();
+    assert_eq!(first.mime_type, "image/png");
+    assert!(!first.from_cache);
+
+    let second = service.fetch(&url).await.unwrap();
+    assert_eq!(second.mime_type, "image/png");
+    assert!(second.from_cache);
+    assert_eq!(second.bytes, first.bytes);
+    assert_eq!(request_count.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn request_cache_stores_large_png_as_lossless_webp_when_enabled() {
+    let png = noisy_png_bytes(2048, 1536);
+    assert!(png.len() > 10 * 1024 * 1024, "png too small: {}", png.len());
+
+    let (address, request_count) = spawn_custom_image_server(png, "image/png", 0).await;
+    let mut config = rust_sync_proxy::test_config();
+    config.enable_request_image_webp_optimization = true;
     config.inline_data_url_memory_cache_max_bytes = 64 * 1024 * 1024;
     config.inline_data_url_background_fetch_wait_timeout = Duration::from_secs(2);
     config.inline_data_url_background_fetch_total_timeout = Duration::from_secs(5);

@@ -914,6 +914,10 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
     return !!u && u.startsWith('/proxy/image');
   }
 
+  function canPreviewAlbumImageUrl(u) {
+    return !!safeUrl(u);
+  }
+
   function renderImgs(urls, hits) {
     if (!urls || !urls.length) return '';
     var hitSet = {};
@@ -1085,7 +1089,8 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
   function renderAlbumThumb(url, cacheHit, alt) {
     var safe = safeUrl(url);
     if (!safe) return '';
-    if (!isProxyImageUrl(safe)) {
+    var canPreviewAlbumThumb = canPreviewAlbumImageUrl(safe);
+    if (!canPreviewAlbumThumb) {
       return '<a class="img-link" href="' + esc(safe) + '" target="_blank" rel="noreferrer">external image</a>';
     }
     var badge = cacheHit ? '<span class="cache-badge">CACHE</span>' : '';
@@ -1107,7 +1112,7 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
       return renderAlbumThumb(url, !!hitSet[url], '请求图片 ' + (idx + 1));
     }).join('');
     var safeResultUrl = safeUrl((item.responseImages || [])[0] || '');
-    var canPreviewResult = safeResultUrl && isProxyImageUrl(safeResultUrl);
+    var canPreviewResult = canPreviewAlbumImageUrl(safeResultUrl);
     var resultHtml = canPreviewResult
       ? '<a class="album-result" href="' + esc(safeResultUrl) + '" target="_blank" rel="noreferrer"><img src="' + esc(safeResultUrl) + '" alt="生成结果图" loading="lazy"></a>'
       : safeResultUrl

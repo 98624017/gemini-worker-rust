@@ -151,9 +151,10 @@ export MALLOC_CONF="background_thread:true,dirty_decay_ms:100,muzzy_decay_ms:100
 - `IMAGE_FETCH_EXTERNAL_PROXY_DOMAINS`
   命中时改走外部代理抓图
   响应侧按 URL 拉图转 base64 时，单张图片默认最大 `35MiB`
-  标准链路请求侧按 URL 拉图时，单张图片默认最大 `20MiB`；若抓到的 PNG
-  大于 `10MiB`，会先尝试无损转成 `image/webp` 再发往真实上游，并把这版字节
-  写入请求侧缓存
+- `ENABLE_REQUEST_IMAGE_WEBP_OPTIMIZATION`
+  默认关闭；开启后，标准链路请求侧按 URL 拉图时，单张图片默认最大 `20MiB`；
+  若抓到的 PNG 大于 `10MiB`，会先尝试无损转成 `image/webp` 再发往真实上游，
+  并把这版字节写入请求侧缓存
 - `INLINE_DATA_URL_CACHE_DIR`
   非空时启用请求侧磁盘缓存
 - `INLINE_DATA_URL_CACHE_TTL_MS`

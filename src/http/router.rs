@@ -703,6 +703,7 @@ async fn forward_gemini_request(
             image_client: state.image_client.clone(),
             max_image_bytes: crate::image_io::REQUEST_MAX_IMAGE_BYTES,
             allow_private_networks: false,
+            enable_webp_optimization: state.config.enable_request_image_webp_optimization,
             fetch_service: state.request_inline_data_fetch_service.clone(),
             cache_observer: cache_tracking.observer.clone(),
         },

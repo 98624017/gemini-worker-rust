@@ -74,6 +74,7 @@ pub async fn rewrite_request_inline_data(body: Value, services: &RewriteServices
             image_client: services.image_client.clone(),
             max_image_bytes: services.max_image_bytes,
             allow_private_networks: services.allow_private_networks,
+            enable_webp_optimization: false,
             fetch_service: services.fetch_service.clone(),
             cache_observer: services.cache_observer.clone(),
         },
