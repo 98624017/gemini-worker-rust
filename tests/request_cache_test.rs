@@ -67,6 +67,7 @@ async fn request_cache_background_bridge_reuses_inflight_download() {
             .is_some()
     );
 
+    tokio::time::sleep(Duration::from_millis(60)).await;
     let second = service.fetch(&url).await.unwrap();
     assert_eq!(second.mime_type, "image/png");
     assert_eq!(
@@ -98,6 +99,69 @@ async fn request_cache_still_populates_cache_when_background_bridge_disabled() {
     let second = service.fetch(&url).await.unwrap();
     assert!(second.from_cache);
     assert_eq!(request_count.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn response_cache_reuses_inflight_fetch_concurrently() {
+    let (address, request_count) = spawn_image_server(150).await;
+    let mut config = rust_sync_proxy::test_config();
+    config.inline_data_url_memory_cache_max_bytes = 1024;
+    config.inline_data_url_background_fetch_wait_timeout = Duration::from_millis(100);
+    config.inline_data_url_background_fetch_total_timeout = Duration::from_millis(500);
+    let service = rust_sync_proxy::cache::InlineDataUrlFetchService::from_response_config(
+        &config,
+        reqwest::Client::new(),
+        rust_sync_proxy::image_io::DEFAULT_MAX_IMAGE_BYTES,
+        true,
+    )
+    .unwrap();
+
+    let url = format!("http://{address}/image.png");
+    let first_service = service.clone();
+    let first_url = url.clone();
+    let second_url = url.clone();
+    let (first, second) = tokio::join!(
+        async move { first_service.fetch(&first_url).await.unwrap() },
+        async move { service.fetch(&second_url).await.unwrap() }
+    );
+
+    assert_eq!(first.mime_type, "image/png");
+    assert_eq!(second.mime_type, "image/png");
+    assert!(!first.from_cache);
+    assert!(!second.from_cache);
+    assert_eq!(request_count.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn response_cache_cancellation_does_not_finish_or_populate_cache() {
+    let (address, request_count) = spawn_image_server(150).await;
+    let mut config = rust_sync_proxy::test_config();
+    config.inline_data_url_memory_cache_max_bytes = 1024;
+    config.inline_data_url_background_fetch_wait_timeout = Duration::from_millis(100);
+    config.inline_data_url_background_fetch_total_timeout = Duration::from_millis(500);
+    let service = rust_sync_proxy::cache::InlineDataUrlFetchService::from_response_config(
+        &config,
+        reqwest::Client::new(),
+        rust_sync_proxy::image_io::DEFAULT_MAX_IMAGE_BYTES,
+        true,
+    )
+    .unwrap();
+
+    let url = format!("http://{address}/image.png");
+    let aborted_service = service.clone();
+    let aborted_url = url.clone();
+    let task = tokio::spawn(async move {
+        let _ = aborted_service.fetch(&aborted_url).await;
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    task.abort();
+
+    tokio::time::sleep(Duration::from_millis(220)).await;
+    let second = service.fetch(&url).await.unwrap();
+
+    assert_eq!(second.mime_type, "image/png");
+    assert!(!second.from_cache);
+    assert_eq!(request_count.load(Ordering::Relaxed), 2);
 }
 
 #[tokio::test]

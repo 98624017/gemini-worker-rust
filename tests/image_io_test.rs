@@ -9,7 +9,11 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode, header::CONTENT_TYPE};
 use axum::routing::get;
 use bytes::Bytes as RawBytes;
 use futures_util::stream;
+use image::ColorType;
+use image::ImageEncoder;
+use image::codecs::png::{CompressionType, FilterType, PngEncoder};
 use tokio::net::TcpListener;
+use tokio::time::Duration;
 
 #[tokio::test]
 async fn rejects_images_over_max_size() {
@@ -76,6 +80,26 @@ async fn png_to_webp_failure_falls_back_to_original_bytes() {
     assert_eq!(optimized.bytes, RawBytes::from(original));
 }
 
+#[tokio::test]
+async fn png_to_webp_timeout_falls_back_to_original_bytes() {
+    let original = noisy_png_bytes(2048, 1536);
+    let fetched = rust_sync_proxy::image_io::FetchedInlineData {
+        mime_type: "image/png".to_string(),
+        bytes: RawBytes::from(original.clone()),
+    };
+
+    let optimized =
+        rust_sync_proxy::image_io::maybe_convert_large_png_to_lossless_webp_with_timeout(
+            fetched,
+            Duration::from_nanos(1),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(optimized.mime_type, "image/png");
+    assert_eq!(optimized.bytes, RawBytes::from(original));
+}
+
 async fn serve_small_png() -> (StatusCode, HeaderMap, Vec<u8>) {
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("image/png"));
@@ -110,4 +134,22 @@ async fn spawn_server(app: Router) -> std::net::SocketAddr {
         axum::serve(listener, app).await.unwrap();
     });
     address
+}
+
+fn noisy_png_bytes(width: u32, height: u32) -> Vec<u8> {
+    let mut rgba = vec![0_u8; (width as usize) * (height as usize) * 4];
+    for (index, byte) in rgba.iter_mut().enumerate() {
+        *byte = ((index * 31 + 17) % 251) as u8;
+    }
+
+    let mut encoded = Vec::new();
+    PngEncoder::new_with_quality(&mut encoded, CompressionType::Fast, FilterType::NoFilter)
+        .write_image(&rgba, width, height, ColorType::Rgba8.into())
+        .unwrap();
+    assert!(
+        encoded.len() > rust_sync_proxy::image_io::REQUEST_PNG_WEBP_THRESHOLD_BYTES,
+        "png too small: {}",
+        encoded.len()
+    );
+    encoded
 }

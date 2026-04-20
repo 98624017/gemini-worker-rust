@@ -16,6 +16,8 @@ use crate::cache::ImageFetchStatusError;
 pub const DEFAULT_MAX_IMAGE_BYTES: usize = 35 * 1024 * 1024;
 pub const REQUEST_MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 pub const REQUEST_PNG_WEBP_THRESHOLD_BYTES: usize = 10 * 1024 * 1024;
+pub const REQUEST_PNG_WEBP_OPTIMIZATION_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(15);
 pub const PNG_COMPRESSION_THRESHOLD_BYTES: usize = 15 * 1024 * 1024;
 pub const DEFAULT_JPEG_QUALITY: u8 = 97;
 
@@ -116,11 +118,30 @@ pub async fn fetch_image_into_blob(
         allow_private_networks,
     )
     .await?;
-    let fetched = maybe_convert_large_png_to_lossless_webp(fetched).await?;
+    let fetched = maybe_convert_large_png_to_lossless_webp_with_timeout(
+        fetched,
+        REQUEST_PNG_WEBP_OPTIMIZATION_TIMEOUT,
+    )
+    .await?;
     let FetchedInlineData { mime_type, bytes } = fetched;
     let blob = runtime.store_shared_bytes(bytes, mime_type.clone()).await?;
 
     Ok(FetchedBlob { mime_type, blob })
+}
+
+pub async fn maybe_convert_large_png_to_lossless_webp_with_timeout(
+    fetched: FetchedInlineData,
+    timeout: std::time::Duration,
+) -> Result<FetchedInlineData> {
+    if timeout.is_zero() {
+        return maybe_convert_large_png_to_lossless_webp(fetched).await;
+    }
+
+    let fallback = fetched.clone();
+    match tokio::time::timeout(timeout, maybe_convert_large_png_to_lossless_webp(fetched)).await {
+        Ok(result) => result,
+        Err(_) => Ok(fallback),
+    }
 }
 
 pub async fn maybe_convert_large_png_to_lossless_webp(
@@ -201,6 +222,22 @@ pub fn normalize_image_mime_type(content_type: Option<&str>, raw_url: &str) -> S
         return guess_image_mime_type_from_url(raw_url);
     }
     normalized
+}
+
+pub fn sniff_image_mime_type(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
+        return Some("image/png");
+    }
+    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return Some("image/jpeg");
+    }
+    if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return Some("image/gif");
+    }
+    None
 }
 
 pub fn maybe_compress_png_bytes(

@@ -49,3 +49,19 @@ async fn proxy_image_route_is_not_exposed() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn image_generations_route_accepts_post_only() {
+    let app = rust_sync_proxy::build_router(rust_sync_proxy::test_config());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v1/images/generations")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+}

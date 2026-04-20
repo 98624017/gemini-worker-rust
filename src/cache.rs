@@ -3,6 +3,8 @@ use std::fmt::{Display, Formatter};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, anyhow};
@@ -16,8 +18,9 @@ use url::Url;
 use url::form_urlencoded;
 
 use crate::image_io::{
-    FetchedInlineData, fetch_image_as_inline_data_with_options, hostname_matches_domain_patterns,
-    maybe_convert_large_png_to_lossless_webp,
+    FetchedInlineData, REQUEST_PNG_WEBP_OPTIMIZATION_TIMEOUT,
+    fetch_image_as_inline_data_with_options, hostname_matches_domain_patterns,
+    maybe_convert_large_png_to_lossless_webp_with_timeout,
 };
 
 const EXTERNAL_IMAGE_FETCH_PROXY_PREFIX: &str = "https://gemini.xinbaoai.com/proxy/image?url=";
@@ -80,11 +83,14 @@ pub struct InlineDataUrlFetchService {
     wait_timeout: Duration,
     total_timeout: Duration,
     max_inflight: usize,
+    enable_background_bridge: bool,
 }
 
 struct FetchTask {
     notify: Notify,
     result: Mutex<Option<Result<CachedInlineData, String>>>,
+    waiter_count: AtomicUsize,
+    abort_handle: StdMutex<Option<tokio::task::AbortHandle>>,
 }
 
 #[derive(Clone)]
@@ -133,6 +139,7 @@ impl InlineDataUrlFetchService {
             allow_private_networks,
             config.enable_request_image_webp_optimization,
             config.inline_data_url_background_fetch_max_inflight,
+            true,
         )
     }
 
@@ -148,7 +155,8 @@ impl InlineDataUrlFetchService {
             max_image_bytes,
             allow_private_networks,
             false,
-            0,
+            config.inline_data_url_background_fetch_max_inflight.max(1),
+            false,
         )
     }
 
@@ -159,6 +167,7 @@ impl InlineDataUrlFetchService {
         allow_private_networks: bool,
         optimize_large_png_as_webp: bool,
         max_inflight: usize,
+        enable_background_bridge: bool,
     ) -> Option<Arc<Self>> {
         if config.inline_data_url_cache_dir.trim().is_empty()
             && config
@@ -201,6 +210,7 @@ impl InlineDataUrlFetchService {
             wait_timeout: config.inline_data_url_background_fetch_wait_timeout,
             total_timeout: config.inline_data_url_background_fetch_total_timeout,
             max_inflight,
+            enable_background_bridge,
         }))
     }
 
@@ -233,7 +243,7 @@ impl InlineDataUrlFetchService {
             inflight.get(raw_url).map(Arc::clone)
         };
         if let Some(task) = existing {
-            return self.wait_for_task(&task).await;
+            return self.wait_for_task(raw_url, &task).await;
         }
 
         let task = {
@@ -241,7 +251,7 @@ impl InlineDataUrlFetchService {
             if let Some(task) = inflight.get(raw_url) {
                 let task = Arc::clone(task);
                 drop(inflight);
-                return self.wait_for_task(&task).await;
+                return self.wait_for_task(raw_url, &task).await;
             }
             if inflight.len() >= self.max_inflight {
                 drop(inflight);
@@ -260,6 +270,8 @@ impl InlineDataUrlFetchService {
             let task = Arc::new(FetchTask {
                 notify: Notify::new(),
                 result: Mutex::new(None),
+                waiter_count: AtomicUsize::new(0),
+                abort_handle: StdMutex::new(None),
             });
             inflight.insert(raw_url.to_string(), Arc::clone(&task));
             task
@@ -268,7 +280,7 @@ impl InlineDataUrlFetchService {
         let service = Arc::clone(self);
         let url = raw_url.to_string();
         let task_for_spawn = Arc::clone(&task);
-        tokio::spawn(async move {
+        let join_handle = tokio::spawn(async move {
             let result = service
                 .direct_fetch(&url)
                 .await
@@ -289,8 +301,12 @@ impl InlineDataUrlFetchService {
                 service.store_in_caches(&url, hit).await;
             }
         });
+        *task
+            .abort_handle
+            .lock()
+            .expect("abort handle mutex poisoned") = Some(join_handle.abort_handle());
 
-        self.wait_for_task(&task).await
+        self.wait_for_task(raw_url, &task).await
     }
 
     async fn direct_fetch(&self, raw_url: &str) -> Result<FetchedInlineData> {
@@ -310,7 +326,8 @@ impl InlineDataUrlFetchService {
     }
 
     async fn fetch_once(&self, fetch_url: &str) -> Result<FetchedInlineData> {
-        let fetched = fetch_and_optimize_with_total_timeout(
+        let optimize_large_png_as_webp = self.optimize_large_png_as_webp;
+        fetch_and_optimize_with_total_timeout(
             self.total_timeout,
             fetch_image_as_inline_data_with_options(
                 &self.client,
@@ -318,15 +335,19 @@ impl InlineDataUrlFetchService {
                 self.max_image_bytes,
                 self.allow_private_networks,
             ),
-            |fetched| async move { Ok(fetched) },
+            |fetched| async move {
+                if optimize_large_png_as_webp {
+                    maybe_convert_large_png_to_lossless_webp_with_timeout(
+                        fetched,
+                        REQUEST_PNG_WEBP_OPTIMIZATION_TIMEOUT,
+                    )
+                    .await
+                } else {
+                    Ok(fetched)
+                }
+            },
         )
-        .await?;
-
-        if self.optimize_large_png_as_webp {
-            maybe_convert_large_png_to_lossless_webp(fetched).await
-        } else {
-            Ok(fetched)
-        }
+        .await
     }
 
     async fn store_in_caches(&self, raw_url: &str, hit: &CachedInlineData) {
@@ -338,10 +359,23 @@ impl InlineDataUrlFetchService {
         }
     }
 
-    async fn wait_for_task(self: &Arc<Self>, task: &Arc<FetchTask>) -> Result<FetchResult> {
+    async fn wait_for_task(
+        self: &Arc<Self>,
+        raw_url: &str,
+        task: &Arc<FetchTask>,
+    ) -> Result<FetchResult> {
+        let _waiter = FetchTaskWaiter::new(Arc::clone(self), raw_url.to_string(), Arc::clone(task));
         let notified = task.notify.notified();
         if let Some(result) = Self::published_result(task).await? {
             return Ok(result);
+        }
+
+        if !self.enable_background_bridge {
+            notified.await;
+            return match Self::published_result(task).await? {
+                Some(result) => Ok(result),
+                None => Err(anyhow!("background fetch finished without result")),
+            };
         }
 
         let wait_timeout = if self.wait_timeout.is_zero() {
@@ -378,6 +412,67 @@ impl InlineDataUrlFetchService {
             Some(Err(message)) => Err(anyhow!(message.clone())),
             None => Ok(None),
         }
+    }
+}
+
+struct FetchTaskWaiter {
+    service: Arc<InlineDataUrlFetchService>,
+    raw_url: String,
+    task: Arc<FetchTask>,
+}
+
+impl FetchTaskWaiter {
+    fn new(service: Arc<InlineDataUrlFetchService>, raw_url: String, task: Arc<FetchTask>) -> Self {
+        task.waiter_count.fetch_add(1, Ordering::AcqRel);
+        Self {
+            service,
+            raw_url,
+            task,
+        }
+    }
+}
+
+impl Drop for FetchTaskWaiter {
+    fn drop(&mut self) {
+        let previous = self.task.waiter_count.fetch_sub(1, Ordering::AcqRel);
+        if previous != 1 || self.service.enable_background_bridge {
+            return;
+        }
+
+        if let Some(handle) = self
+            .task
+            .abort_handle
+            .lock()
+            .expect("abort handle mutex poisoned")
+            .take()
+        {
+            handle.abort();
+        }
+
+        if let Ok(mut inflight) = self.service.inflight.try_lock() {
+            if inflight
+                .get(&self.raw_url)
+                .map(|existing| Arc::ptr_eq(existing, &self.task))
+                .unwrap_or(false)
+            {
+                inflight.remove(&self.raw_url);
+            }
+            return;
+        }
+
+        let service = Arc::clone(&self.service);
+        let raw_url = self.raw_url.clone();
+        let task = Arc::clone(&self.task);
+        tokio::spawn(async move {
+            let mut inflight = service.inflight.lock().await;
+            if inflight
+                .get(&raw_url)
+                .map(|existing| Arc::ptr_eq(existing, &task))
+                .unwrap_or(false)
+            {
+                inflight.remove(&raw_url);
+            }
+        });
     }
 }
 
@@ -614,6 +709,14 @@ fn _is_subpath(path: &Path, dir: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use axum::Router;
+    use axum::extract::State;
+    use axum::http::{HeaderMap, HeaderValue, StatusCode, header::CONTENT_TYPE};
+    use axum::routing::get;
+    use image::ColorType;
+    use image::ImageEncoder;
+    use image::codecs::png::{CompressionType, FilterType, PngEncoder};
+    use tokio::net::TcpListener;
     use tokio::time::{Duration, sleep};
 
     use super::*;
@@ -626,6 +729,8 @@ mod tests {
                 mime_type: Arc::from("image/png"),
                 bytes: Bytes::from_static(&[1, 2, 3]),
             }))),
+            waiter_count: AtomicUsize::new(0),
+            abort_handle: StdMutex::new(None),
         });
         let mut inflight = HashMap::new();
         inflight.insert(
@@ -645,6 +750,7 @@ mod tests {
             wait_timeout: Duration::from_millis(1),
             total_timeout: Duration::from_millis(1),
             max_inflight: 1,
+            enable_background_bridge: true,
         });
 
         let fetched = service.fetch("http://example.com/image.png").await.unwrap();
@@ -676,5 +782,65 @@ mod tests {
 
         let err = result.unwrap_err();
         assert_eq!(err.to_string(), "inlineData 图片抓取超时");
+    }
+
+    #[tokio::test]
+    async fn fetch_once_keeps_png_optimization_inside_total_timeout() {
+        let (image_url, _server) = spawn_large_png_server().await;
+        let service = InlineDataUrlFetchService {
+            client: reqwest::Client::new(),
+            max_image_bytes: crate::image_io::REQUEST_MAX_IMAGE_BYTES,
+            allow_private_networks: true,
+            optimize_large_png_as_webp: true,
+            external_proxy_domains: Vec::new(),
+            memory_cache: None,
+            disk_cache: None,
+            inflight: Arc::new(Mutex::new(HashMap::new())),
+            wait_timeout: Duration::from_secs(1),
+            total_timeout: Duration::from_millis(200),
+            max_inflight: 1,
+            enable_background_bridge: true,
+        };
+
+        let err = service.fetch_once(&image_url).await.unwrap_err();
+
+        assert_eq!(err.to_string(), "inlineData 图片抓取超时");
+    }
+
+    async fn spawn_large_png_server() -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let png = noisy_png_bytes(2048, 1536);
+        let app = Router::new()
+            .route("/large.png", get(serve_png))
+            .with_state(png);
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{address}/large.png"), server)
+    }
+
+    async fn serve_png(State(png): State<Vec<u8>>) -> (StatusCode, HeaderMap, Vec<u8>) {
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("image/png"));
+        (StatusCode::OK, headers, png)
+    }
+
+    fn noisy_png_bytes(width: u32, height: u32) -> Vec<u8> {
+        let mut rgba = vec![0_u8; (width as usize) * (height as usize) * 4];
+        for (index, byte) in rgba.iter_mut().enumerate() {
+            *byte = ((index * 31 + 17) % 251) as u8;
+        }
+
+        let mut encoded = Vec::new();
+        PngEncoder::new_with_quality(&mut encoded, CompressionType::Fast, FilterType::NoFilter)
+            .write_image(&rgba, width, height, ColorType::Rgba8.into())
+            .unwrap();
+        assert!(
+            encoded.len() > crate::image_io::REQUEST_PNG_WEBP_THRESHOLD_BYTES,
+            "png too small: {}",
+            encoded.len()
+        );
+        encoded
     }
 }

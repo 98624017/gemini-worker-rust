@@ -1,0 +1,91 @@
+<h2>相册视角候选方案</h2>
+<p class="subtitle">按单次请求分组，提示词放在请求体图片上方。请选择更接近你想要的气质。</p>
+
+<div class="cards" style="grid-template-columns: repeat(2, minmax(0, 1fr));">
+  <div class="card" data-choice="a" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">A · 档案卡册</div>
+        <div class="mockup-body" style="background:#07111f;padding:18px;">
+          <div style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#8fb3d9;margin-bottom:10px;">Request #1042 · 14:23:11</div>
+          <div style="background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:14px;padding:14px;margin-bottom:12px;">
+            <div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#7dd3fc;margin-bottom:8px;">Prompt</div>
+            <div style="font-size:13px;line-height:1.55;color:#d9e7f5;">cinematic portrait, wet glass reflections, silver-blue rim light, shallow depth of field</div>
+          </div>
+          <div style="display:grid;grid-template-columns:1.2fr .9fr;gap:12px;">
+            <div style="background:linear-gradient(180deg,#13324f,#0b1827);border-radius:16px;padding:12px;border:1px solid rgba(125,211,252,.18);">
+              <div style="font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:#9fb7ce;margin-bottom:8px;">Request Images</div>
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+                <div style="height:110px;border-radius:12px;background:linear-gradient(135deg,#345b83,#213249);"></div>
+                <div style="height:110px;border-radius:12px;background:linear-gradient(135deg,#6d7fa7,#394865);"></div>
+              </div>
+            </div>
+            <div style="background:linear-gradient(180deg,#101d2d,#0a1521);border-radius:20px;padding:12px;border:1px solid rgba(255,255,255,.08);">
+              <div style="font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:#c7d2fe;margin-bottom:8px;">Result</div>
+              <div style="height:228px;border-radius:16px;background:linear-gradient(160deg,#7a95cf,#202c48 55%,#0b1220);box-shadow:inset 0 1px 0 rgba(255,255,255,.18);"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>方案 A：档案卡册</h3>
+      <p>更像精致审片台。提示词独立成块，请求图与结果图并列，适合后台排查和回看。</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="b" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">B · 胶片画廊</div>
+        <div class="mockup-body" style="background:#0b0f17;padding:18px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+            <div style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#fbbf24;">Session #1042</div>
+            <div style="font-size:11px;color:#94a3b8;">14:23:11</div>
+          </div>
+          <div style="background:rgba(255,248,220,.07);border:1px solid rgba(251,191,36,.22);border-radius:18px;padding:14px 16px;margin-bottom:14px;">
+            <div style="font-size:12px;line-height:1.6;color:#f8fafc;">cinematic portrait, wet glass reflections, silver-blue rim light, shallow depth of field</div>
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(3, 1fr);gap:10px;align-items:start;">
+            <div style="background:#131923;border-radius:16px;padding:10px;border:1px solid rgba(255,255,255,.06);">
+              <div style="height:138px;border-radius:12px;background:linear-gradient(135deg,#425874,#1f2a39);margin-bottom:8px;"></div>
+              <div style="font-size:10px;color:#8fa0b5;text-transform:uppercase;letter-spacing:.08em;">Input 01</div>
+            </div>
+            <div style="background:#131923;border-radius:16px;padding:10px;border:1px solid rgba(255,255,255,.06);">
+              <div style="height:138px;border-radius:12px;background:linear-gradient(135deg,#6a738e,#31384a);margin-bottom:8px;"></div>
+              <div style="font-size:10px;color:#8fa0b5;text-transform:uppercase;letter-spacing:.08em;">Input 02</div>
+            </div>
+            <div style="background:linear-gradient(180deg,#1b2230,#101723);border-radius:22px;padding:10px;border:1px solid rgba(255,255,255,.08);">
+              <div style="height:182px;border-radius:16px;background:linear-gradient(160deg,#8ea0dc,#28344f 55%,#0d1320);margin-bottom:8px;"></div>
+              <div style="font-size:10px;color:#d6d3d1;text-transform:uppercase;letter-spacing:.08em;">Generated</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>方案 B：胶片画廊</h3>
+      <p>更偏展示感，结果图更突出，整体更像作品墙，但排障信息承载略弱。</p>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="pros-cons">
+    <div class="pros">
+      <h4>我推荐 A</h4>
+      <ul>
+        <li>更适合 admin，信息组织更稳。</li>
+        <li>提示词在上，请求图和结果图关系更清楚。</li>
+        <li>后续加状态标签、耗时、错误细节更自然。</li>
+      </ul>
+    </div>
+    <div class="cons">
+      <h4>B 的代价</h4>
+      <ul>
+        <li>更好看，但容易把“管理后台”做成“作品展示页”。</li>
+        <li>图多时视觉噪音更高，检索效率略差。</li>
+      </ul>
+    </div>
+  </div>
+</div>

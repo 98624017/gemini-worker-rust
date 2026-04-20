@@ -9,8 +9,8 @@ use tokio::task::JoinSet;
 use crate::blob_runtime::{BlobHandle, BlobRuntime};
 use crate::cache::InlineDataUrlFetchService;
 use crate::image_io::{
-    FetchedBlob, REQUEST_MAX_IMAGE_BYTES, fetch_image_as_inline_data_with_options,
-    maybe_convert_large_png_to_lossless_webp,
+    FetchedBlob, REQUEST_MAX_IMAGE_BYTES, REQUEST_PNG_WEBP_OPTIMIZATION_TIMEOUT,
+    fetch_image_as_inline_data_with_options, maybe_convert_large_png_to_lossless_webp_with_timeout,
 };
 use crate::request_scan::scan_request_image_urls;
 
@@ -170,7 +170,11 @@ async fn fetch_request_image(
         let fetch_work_ms = fetch_started.elapsed().as_millis() as i64;
         let store_started = std::time::Instant::now();
         let fetched = if services.enable_webp_optimization {
-            maybe_convert_large_png_to_lossless_webp(fetched).await?
+            maybe_convert_large_png_to_lossless_webp_with_timeout(
+                fetched,
+                REQUEST_PNG_WEBP_OPTIMIZATION_TIMEOUT,
+            )
+            .await?
         } else {
             fetched
         };
