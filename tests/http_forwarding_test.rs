@@ -389,6 +389,7 @@ async fn image_generations_forwards_reference_images_and_returns_uploaded_urls()
     let mut config = rust_sync_proxy::test_config();
     config.upstream_base_url = format!("http://{server_addr}");
     config.upstream_api_key = "env-key".to_string();
+    config.openai_image_b64_json_upstream_domains = vec!["127.0.0.1".to_string()];
     config.legacy_uguu_upload_url = format!("http://{server_addr}/uguu");
     let app = rust_sync_proxy::build_router(config);
 
@@ -501,7 +502,7 @@ async fn image_generations_accepts_upstream_url_payload_without_uploading() {
         upstream_json["reference_images"],
         json!(["https://img.example/a.png"])
     );
-    assert_eq!(upstream_json["response_format"], "b64_json");
+    assert_eq!(upstream_json["response_format"], "url");
     assert_eq!(*state.upload_count.lock().await, 0);
 }
 

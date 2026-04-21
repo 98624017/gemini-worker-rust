@@ -51,6 +51,7 @@ pub fn test_config() -> Config {
         image_tls_handshake_timeout: Duration::from_millis(15_000),
         image_fetch_insecure_skip_verify: false,
         image_fetch_external_proxy_domains: Vec::new(),
+        openai_image_b64_json_upstream_domains: Vec::new(),
         inline_data_url_cache_dir: String::new(),
         inline_data_url_cache_ttl: Duration::from_millis(3_600_000),
         inline_data_url_cache_max_bytes: 1 << 30,

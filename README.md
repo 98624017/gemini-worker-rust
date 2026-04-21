@@ -151,6 +151,13 @@ export MALLOC_CONF="background_thread:true,dirty_decay_ms:100,muzzy_decay_ms:100
 - `IMAGE_FETCH_EXTERNAL_PROXY_DOMAINS`
   命中时改走外部代理抓图
   响应侧按 URL 拉图转 base64 时，单张图片默认最大 `35MiB`
+- `OPENAI_IMAGE_B64_JSON_UPSTREAM_DOMAINS`
+  逗号分隔；仅 `POST /v1/images/generations` 使用。默认不改写
+  `response_format`，保持原请求；只有当上游 `baseUrl` host 命中该列表时，才会把
+  `response_format=url` 强制改写成 `b64_json`
+  - 普通值按 host 精确匹配，例如 `api.example.com`
+  - 前导点值按子域后缀匹配，例如 `.example.com` 只匹配
+    `a.example.com`，不匹配根域 `example.com`
 - `ENABLE_REQUEST_IMAGE_WEBP_OPTIMIZATION`
   默认关闭；开启后，标准链路请求侧按 URL 拉图时，单张图片默认最大 `20MiB`；
   若抓到的 PNG 大于 `10MiB`，会先尝试无损转成 `image/webp` 再发往真实上游，
@@ -226,6 +233,9 @@ R2 模式还需要：
 - `POST /v1/images/generations` 成功响应兼容两类上游返回：
   - `data[].b64_json`：代理会解码并上传，再返回最终 URL
   - `data[].url`：代理会直接复用该 URL，并按现有规则决定是否包装代理前缀
+- `POST /v1/images/generations` 请求默认保留原始 `response_format`
+  - 未命中 `OPENAI_IMAGE_B64_JSON_UPSTREAM_DOMAINS` 时，`url` 会原样发给上游
+  - 命中后，代理才会把 `url` 改写为 `b64_json`
 - 标准链路里，`legacy` 上传结果会在 `PROXY_STANDARD_OUTPUT_URLS=true` 时包装代理前缀
 - `r2` 成功后真实 URL 为 `R2_PUBLIC_BASE_URL/<objectKey>`
 - 标准链路里，`r2` 成功后永远直接返回

@@ -10,7 +10,7 @@ pub struct UploadedImage {
     pub url: String,
 }
 
-pub fn normalize_request_body(body: Value) -> Result<Value> {
+pub fn normalize_request_body(body: Value, force_b64_json: bool) -> Result<Value> {
     let mut object = match body {
         Value::Object(map) => map,
         _ => return Err(anyhow!("request body must be a json object")),
@@ -31,7 +31,11 @@ pub fn normalize_request_body(body: Value) -> Result<Value> {
     );
     object.insert(
         "response_format".to_string(),
-        Value::String("b64_json".to_string()),
+        Value::String(if force_b64_json {
+            "b64_json".to_string()
+        } else {
+            "url".to_string()
+        }),
     );
 
     Ok(Value::Object(object))

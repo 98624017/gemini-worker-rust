@@ -61,6 +61,7 @@ pub struct Config {
     pub image_tls_handshake_timeout: Duration,
     pub image_fetch_insecure_skip_verify: bool,
     pub image_fetch_external_proxy_domains: Vec<String>,
+    pub openai_image_b64_json_upstream_domains: Vec<String>,
     pub inline_data_url_cache_dir: String,
     pub inline_data_url_cache_ttl: Duration,
     pub inline_data_url_cache_max_bytes: u64,
@@ -198,6 +199,14 @@ impl Config {
                 .map(String::as_str)
                 .map(parse_csv)
                 .unwrap_or_default(),
+            openai_image_b64_json_upstream_domains: env_map
+                .get("OPENAI_IMAGE_B64_JSON_UPSTREAM_DOMAINS")
+                .map(String::as_str)
+                .map(parse_csv)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|domain| domain.to_ascii_lowercase())
+                .collect(),
             inline_data_url_cache_dir: env_map
                 .get("INLINE_DATA_URL_CACHE_DIR")
                 .map(String::as_str)
@@ -307,6 +316,19 @@ impl Config {
 
         // 兼容旧版容器配置，避免只保留 PUBLIC_BASE_URL 时忘记同步改环境变量名。
         format!("{public_base_url}/proxy/image?url=")
+    }
+
+    pub fn should_force_openai_image_b64_json_for_upstream(&self, base_url: &str) -> bool {
+        let host = Url::parse(base_url)
+            .ok()
+            .and_then(|parsed| parsed.host_str().map(|host| host.to_ascii_lowercase()));
+        let Some(host) = host else {
+            return false;
+        };
+
+        self.openai_image_b64_json_upstream_domains
+            .iter()
+            .any(|pattern| upstream_domain_pattern_matches_host(pattern, &host))
     }
 }
 
@@ -496,4 +518,17 @@ fn default_allowed_proxy_domains() -> Vec<String> {
         ".uguu.se".to_string(),
         ".aitohumanize.com".to_string(),
     ]
+}
+
+fn upstream_domain_pattern_matches_host(pattern: &str, host: &str) -> bool {
+    let pattern = pattern.trim();
+    if pattern.is_empty() {
+        return false;
+    }
+
+    if pattern.starts_with('.') {
+        host.ends_with(pattern)
+    } else {
+        host == pattern
+    }
 }

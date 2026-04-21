@@ -474,39 +474,9 @@ async fn image_generations_action(State(state): State<AppState>, request: Reques
         }
     };
 
-    let normalized_body = match crate::openai_image::normalize_request_body(parsed_body) {
-        Ok(body) => body,
-        Err(err) => {
-            let mut admin_entry = AdminLogEntry {
-                created_at,
-                method: request_method,
-                path: request_path,
-                query: request_query,
-                remote_addr,
-                is_stream: false,
-                status_code: StatusCode::BAD_REQUEST.as_u16(),
-                duration_ms: started_at.elapsed().as_millis() as i64,
-                request_parse_ms: request_parse_started.elapsed().as_millis() as i64,
-                error_source: "proxy".to_string(),
-                error_stage: "normalize_openai_image_request".to_string(),
-                error_kind: "invalid_request".to_string(),
-                error_message: "invalid openai image request".to_string(),
-                error_detail: err.to_string(),
-                ..Default::default()
-            };
-            request_log.apply_to_entry(&mut admin_entry);
-            let response = (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": {"code": 400, "message": err.to_string()}})),
-            )
-                .into_response();
-            return finalize_admin_response(&state, response, admin_entry).await;
-        }
-    };
-
     let resolved = match resolve_upstream_for_request_from_header_map(
         &parts.headers,
-        &normalized_body,
+        &parsed_body,
         &state.config.upstream_base_url,
         &state.config.upstream_api_key,
     ) {
@@ -534,6 +504,40 @@ async fn image_generations_action(State(state): State<AppState>, request: Reques
             return finalize_admin_response(&state, response, admin_entry).await;
         }
     };
+
+    let force_b64_json = state
+        .config
+        .should_force_openai_image_b64_json_for_upstream(&resolved.base_url);
+    let normalized_body =
+        match crate::openai_image::normalize_request_body(parsed_body, force_b64_json) {
+            Ok(body) => body,
+            Err(err) => {
+                let mut admin_entry = AdminLogEntry {
+                    created_at,
+                    method: request_method,
+                    path: request_path,
+                    query: request_query,
+                    remote_addr,
+                    is_stream: false,
+                    status_code: StatusCode::BAD_REQUEST.as_u16(),
+                    duration_ms: started_at.elapsed().as_millis() as i64,
+                    request_parse_ms: request_parse_started.elapsed().as_millis() as i64,
+                    error_source: "proxy".to_string(),
+                    error_stage: "normalize_openai_image_request".to_string(),
+                    error_kind: "invalid_request".to_string(),
+                    error_message: "invalid openai image request".to_string(),
+                    error_detail: err.to_string(),
+                    ..Default::default()
+                };
+                request_log.apply_to_entry(&mut admin_entry);
+                let response = (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": {"code": 400, "message": err.to_string()}})),
+                )
+                    .into_response();
+                return finalize_admin_response(&state, response, admin_entry).await;
+            }
+        };
     let request_parse_ms = request_parse_started.elapsed().as_millis() as i64;
 
     match forward_openai_image_request(

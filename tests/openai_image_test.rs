@@ -1,7 +1,7 @@
 use serde_json::json;
 
 #[test]
-fn normalize_openai_image_request_supports_all_aliases() {
+fn normalize_openai_image_request_supports_all_aliases_without_forcing_b64_json() {
     let cases = [
         (
             json!({
@@ -30,12 +30,33 @@ fn normalize_openai_image_request_supports_all_aliases() {
     ];
 
     for (body, want_images) in cases {
-        let normalized = rust_sync_proxy::openai_image::normalize_request_body(body).unwrap();
+        let normalized =
+            rust_sync_proxy::openai_image::normalize_request_body(body, false).unwrap();
         assert_eq!(normalized["reference_images"], want_images);
-        assert_eq!(normalized["response_format"], "b64_json");
+        assert_eq!(normalized["response_format"], "url");
         assert!(normalized.get("image").is_none());
         assert!(normalized.get("images").is_none());
     }
+}
+
+#[test]
+fn normalize_openai_image_request_forces_b64_json_when_requested() {
+    let normalized = rust_sync_proxy::openai_image::normalize_request_body(
+        json!({
+            "model": "gpt-image-2",
+            "prompt": "draw cat",
+            "image": ["https://img.example/a.png"],
+            "response_format": "url"
+        }),
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(
+        normalized["reference_images"],
+        json!(["https://img.example/a.png"])
+    );
+    assert_eq!(normalized["response_format"], "b64_json");
 }
 
 #[test]
