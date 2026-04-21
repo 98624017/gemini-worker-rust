@@ -53,6 +53,7 @@ pub struct Config {
     pub slow_log_threshold: Duration,
     pub proxy_standard_output_urls: bool,
     pub proxy_special_upstream_urls: bool,
+    pub openai_image_upstream_url_proxy_prefix: String,
     pub enable_image_compression: bool,
     pub enable_request_image_webp_optimization: bool,
     pub image_compression_jpeg_quality: u8,
@@ -171,6 +172,11 @@ impl Config {
                 env_map.get("PROXY_SPECIAL_UPSTREAM_URLS"),
                 true,
             ),
+            openai_image_upstream_url_proxy_prefix: env_map
+                .get("OPENAI_IMAGE_UPSTREAM_URL_PROXY_PREFIX")
+                .map(String::as_str)
+                .map(parse_optional_string_with_disabled)
+                .unwrap_or_default(),
             enable_image_compression: parse_bool(env_map.get("ENABLE_IMAGE_COMPRESSION"), false),
             enable_request_image_webp_optimization: parse_bool(
                 env_map.get("ENABLE_REQUEST_IMAGE_WEBP_OPTIMIZATION"),

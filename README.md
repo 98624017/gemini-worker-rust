@@ -126,6 +126,10 @@ export MALLOC_CONF="background_thread:true,dirty_decay_ms:100,muzzy_decay_ms:100
 - `EXTERNAL_IMAGE_PROXY_PREFIX`
   非空时优先使用；把图片 URL 包装为
   `${EXTERNAL_IMAGE_PROXY_PREFIX}<escaped-url>`
+- `OPENAI_IMAGE_UPSTREAM_URL_PROXY_PREFIX`
+  仅影响 `POST /v1/images/generations` 成功响应里的 `data[].url`
+  直链；默认关闭。非空时，会把上游直链包装为
+  `${OPENAI_IMAGE_UPSTREAM_URL_PROXY_PREFIX}<escaped-url>`
 - `PROXY_STANDARD_OUTPUT_URLS`
   默认开启；控制标准链路里 `legacy` / `r2_then_legacy` 回退到 `legacy`
   时是否包装代理前缀
@@ -232,7 +236,8 @@ R2 模式还需要：
   `EXTERNAL_IMAGE_PROXY_PREFIX` > `${PUBLIC_BASE_URL}/proxy/image?url=`
 - `POST /v1/images/generations` 成功响应兼容两类上游返回：
   - `data[].b64_json`：代理会解码并上传，再返回最终 URL
-  - `data[].url`：代理会直接复用该 URL，并按现有规则决定是否包装代理前缀
+  - `data[].url`：代理默认直接复用该 URL；仅当
+    `OPENAI_IMAGE_UPSTREAM_URL_PROXY_PREFIX` 非空时，才会包装专用代理前缀
 - `POST /v1/images/generations` 请求默认保留原始 `response_format`
   - 未命中 `OPENAI_IMAGE_B64_JSON_UPSTREAM_DOMAINS` 时，`url` 会原样发给上游
   - 命中后，代理才会把 `url` 改写为 `b64_json`

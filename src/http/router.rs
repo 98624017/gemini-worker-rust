@@ -1824,6 +1824,14 @@ fn extract_openai_image_items(body: &Value) -> Result<Vec<OpenAiImageItem>> {
 }
 
 fn build_openai_image_output_url(config: &Config, provider: &str, target_url: &str) -> String {
+    if provider.eq_ignore_ascii_case("direct") {
+        let openai_proxy_prefix = config.openai_image_upstream_url_proxy_prefix.trim();
+        if openai_proxy_prefix.is_empty() {
+            return target_url.to_string();
+        }
+        return wrap_external_proxy_url(openai_proxy_prefix, target_url);
+    }
+
     let external_proxy_prefix = config.resolved_external_image_proxy_prefix();
     if config.proxy_standard_output_urls
         && !provider.eq_ignore_ascii_case("r2")

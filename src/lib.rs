@@ -43,6 +43,7 @@ pub fn test_config() -> Config {
         slow_log_threshold: Duration::from_millis(100_000),
         proxy_standard_output_urls: true,
         proxy_special_upstream_urls: true,
+        openai_image_upstream_url_proxy_prefix: String::new(),
         enable_image_compression: false,
         enable_request_image_webp_optimization: false,
         image_compression_jpeg_quality: 97,

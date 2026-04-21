@@ -43,6 +43,7 @@ fn defaults_match_runtime_expectations() {
         "https://ai.kefan.cn/api/upload/local"
     );
     assert!(cfg.openai_image_b64_json_upstream_domains.is_empty());
+    assert!(cfg.openai_image_upstream_url_proxy_prefix.is_empty());
 }
 
 #[test]
@@ -167,6 +168,21 @@ fn external_image_proxy_prefix_still_overrides_public_base_url() {
     assert_eq!(
         cfg.resolved_external_image_proxy_prefix(),
         "https://external.example.com/fetch?url="
+    );
+}
+
+#[test]
+fn openai_image_upstream_url_proxy_prefix_can_be_loaded_from_env() {
+    let env = HashMap::from([(
+        "OPENAI_IMAGE_UPSTREAM_URL_PROXY_PREFIX".to_string(),
+        "https://openai-proxy.example.com/fetch?url=".to_string(),
+    )]);
+
+    let cfg = rust_sync_proxy::config::Config::from_env_map(&env).unwrap();
+
+    assert_eq!(
+        cfg.openai_image_upstream_url_proxy_prefix,
+        "https://openai-proxy.example.com/fetch?url="
     );
 }
 
