@@ -1237,28 +1237,40 @@ async fn handle_openai_image_response(
             err.to_string(),
         )
     })?;
-    let base64_images = extract_openai_b64_json_entries(&upstream_body)?;
+    let image_items = extract_openai_image_items(&upstream_body)?;
 
     let upload_started = Instant::now();
-    let mut uploaded = Vec::with_capacity(base64_images.len());
-    for base64_image in base64_images {
-        let decoded = base64::engine::general_purpose::STANDARD
-            .decode(base64_image.as_bytes())
-            .map_err(|err| {
-                StructuredProxyError::new(
-                    "failed to decode upstream b64_json",
-                    "decode_b64_json",
-                    "invalid_base64",
-                    err.to_string(),
-                )
-            })?;
-        let mime_type = crate::image_io::sniff_image_mime_type(&decoded).unwrap_or("image/png");
-        let upload_result = uploader
-            .upload_inline_data_base64(Arc::from(base64_image.as_str()), mime_type)
-            .await?;
-        let final_url =
-            build_openai_image_output_url(config, &upload_result.provider, &upload_result.url);
-        uploaded.push(crate::openai_image::UploadedImage { url: final_url });
+    let mut uploaded = Vec::with_capacity(image_items.len());
+    for image_item in image_items {
+        match image_item {
+            OpenAiImageItem::B64Json(base64_image) => {
+                let decoded = base64::engine::general_purpose::STANDARD
+                    .decode(base64_image.as_bytes())
+                    .map_err(|err| {
+                        StructuredProxyError::new(
+                            "failed to decode upstream b64_json",
+                            "decode_b64_json",
+                            "invalid_base64",
+                            err.to_string(),
+                        )
+                    })?;
+                let mime_type =
+                    crate::image_io::sniff_image_mime_type(&decoded).unwrap_or("image/png");
+                let upload_result = uploader
+                    .upload_inline_data_base64(Arc::from(base64_image.as_str()), mime_type)
+                    .await?;
+                let final_url = build_openai_image_output_url(
+                    config,
+                    &upload_result.provider,
+                    &upload_result.url,
+                );
+                uploaded.push(crate::openai_image::UploadedImage { url: final_url });
+            }
+            OpenAiImageItem::Url(url) => {
+                let final_url = build_openai_image_output_url(config, "direct", &url);
+                uploaded.push(crate::openai_image::UploadedImage { url: final_url });
+            }
+        }
     }
     let upload_ms = upload_started.elapsed().as_millis() as i64;
 
@@ -1756,7 +1768,13 @@ fn query_contains_output_url(query: Option<&str>) -> bool {
         .any(|(key, value)| key == "output" && value.trim().eq_ignore_ascii_case("url"))
 }
 
-fn extract_openai_b64_json_entries(body: &Value) -> Result<Vec<String>> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum OpenAiImageItem {
+    B64Json(String),
+    Url(String),
+}
+
+fn extract_openai_image_items(body: &Value) -> Result<Vec<OpenAiImageItem>> {
     let data = body.get("data").and_then(Value::as_array).ok_or_else(|| {
         StructuredProxyError::new(
             "upstream response missing data",
@@ -1780,13 +1798,20 @@ fn extract_openai_b64_json_entries(body: &Value) -> Result<Vec<String>> {
             item.get("b64_json")
                 .and_then(Value::as_str)
                 .filter(|value| !value.trim().is_empty())
-                .map(ToOwned::to_owned)
+                .map(|value| OpenAiImageItem::B64Json(value.to_owned()))
+                .or_else(|| {
+                    item.get("url")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(|value| OpenAiImageItem::Url(value.to_owned()))
+                })
                 .ok_or_else(|| {
                     StructuredProxyError::new(
-                        "upstream response missing b64_json",
+                        "upstream response missing image payload",
                         "rewrite_openai_image_response",
-                        "missing_b64_json",
-                        "upstream response missing data[].b64_json",
+                        "missing_image_payload",
+                        "upstream response missing data[].b64_json or data[].url",
                     )
                     .into()
                 })
@@ -2638,5 +2663,56 @@ mod tests {
         });
 
         address
+    }
+
+    #[test]
+    fn extract_openai_image_items_prefers_b64_json_over_url() {
+        let body = json!({
+            "data": [{
+                "b64_json": "iVBORw0KGgo=",
+                "url": "https://img.example.com/direct.png"
+            }]
+        });
+
+        let items = extract_openai_image_items(&body).unwrap();
+
+        assert_eq!(
+            items,
+            vec![OpenAiImageItem::B64Json("iVBORw0KGgo=".to_string())]
+        );
+    }
+
+    #[test]
+    fn extract_openai_image_items_accepts_url_entries() {
+        let body = json!({
+            "data": [{
+                "url": "https://img.example.com/direct.png"
+            }]
+        });
+
+        let items = extract_openai_image_items(&body).unwrap();
+
+        assert_eq!(
+            items,
+            vec![OpenAiImageItem::Url(
+                "https://img.example.com/direct.png".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn extract_openai_image_items_rejects_entries_without_b64_json_or_url() {
+        let body = json!({
+            "data": [{}]
+        });
+
+        let err = extract_openai_image_items(&body).unwrap_err();
+        let structured = err.downcast_ref::<StructuredProxyError>().unwrap();
+
+        assert_eq!(structured.kind, "missing_image_payload");
+        assert_eq!(
+            structured.detail,
+            "upstream response missing data[].b64_json or data[].url"
+        );
     }
 }

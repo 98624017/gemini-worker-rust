@@ -446,6 +446,66 @@ async fn image_generations_forwards_reference_images_and_returns_uploaded_urls()
 }
 
 #[tokio::test]
+async fn image_generations_accepts_upstream_url_payload_without_uploading() {
+    let state = TestState::default();
+    let server = Router::new()
+        .route(
+            "/v1/images/generations",
+            post(mock_openai_image_generation_direct_url),
+        )
+        .route("/uguu", post(mock_legacy_upload))
+        .with_state(state.clone());
+    let server_addr = spawn_server(server).await;
+
+    let mut config = rust_sync_proxy::test_config();
+    config.upstream_base_url = format!("http://{server_addr}");
+    config.upstream_api_key = "env-key".to_string();
+    config.external_image_proxy_prefix = "https://proxy.example.com/fetch?url=".to_string();
+    config.legacy_uguu_upload_url = format!("http://{server_addr}/uguu");
+    let app = rust_sync_proxy::build_router(config);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/images/generations")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "gpt-image-2",
+                        "prompt": "draw cat",
+                        "image": ["https://img.example/a.png"],
+                        "response_format": "url"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let json_body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json_body["created"], 1_776_663_404);
+    assert_eq!(
+        json_body["data"][0]["url"],
+        "https://proxy.example.com/fetch?url=https%3A%2F%2Fimg.example.com%2Fdirect.png"
+    );
+    assert_eq!(json_body["usage"]["total_tokens"], 2048);
+
+    let upstream_requests = state.upstream_requests.lock().await.clone();
+    assert_eq!(upstream_requests.len(), 1);
+    let upstream_json: Value = serde_json::from_slice(&upstream_requests[0].body).unwrap();
+    assert_eq!(
+        upstream_json["reference_images"],
+        json!(["https://img.example/a.png"])
+    );
+    assert_eq!(upstream_json["response_format"], "b64_json");
+    assert_eq!(*state.upload_count.lock().await, 0);
+}
+
+#[tokio::test]
 async fn image_generations_returns_bad_gateway_when_upstream_data_is_empty() {
     let state = TestState::default();
     let server = Router::new()
@@ -579,6 +639,21 @@ async fn mock_openai_image_generation_empty_data(
     Json(json!({
         "created": 1_776_663_103,
         "data": []
+    }))
+}
+
+async fn mock_openai_image_generation_direct_url(
+    State(state): State<TestState>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Json<Value> {
+    let _ = mock_openai_image_generation(State(state), headers, uri, body).await;
+    Json(json!({
+        "created": 1_776_663_404,
+        "data": [{
+            "url": "https://img.example.com/direct.png"
+        }]
     }))
 }
 

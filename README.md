@@ -223,6 +223,9 @@ R2 模式还需要：
 
 - 代理前缀解析优先级：
   `EXTERNAL_IMAGE_PROXY_PREFIX` > `${PUBLIC_BASE_URL}/proxy/image?url=`
+- `POST /v1/images/generations` 成功响应兼容两类上游返回：
+  - `data[].b64_json`：代理会解码并上传，再返回最终 URL
+  - `data[].url`：代理会直接复用该 URL，并按现有规则决定是否包装代理前缀
 - 标准链路里，`legacy` 上传结果会在 `PROXY_STANDARD_OUTPUT_URLS=true` 时包装代理前缀
 - `r2` 成功后真实 URL 为 `R2_PUBLIC_BASE_URL/<objectKey>`
 - 标准链路里，`r2` 成功后永远直接返回
