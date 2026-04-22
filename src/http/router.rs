@@ -1270,6 +1270,32 @@ async fn handle_openai_image_response(
                 );
                 uploaded.push(crate::openai_image::UploadedImage { url: final_url });
             }
+            OpenAiImageItem::DataUrl {
+                mime_type,
+                data_base64,
+            } => {
+                let decoded = base64::engine::general_purpose::STANDARD
+                    .decode(data_base64.as_bytes())
+                    .map_err(|err| {
+                        StructuredProxyError::new(
+                            "failed to decode upstream data url",
+                            "decode_data_url",
+                            "invalid_base64",
+                            err.to_string(),
+                        )
+                    })?;
+                let detected_mime_type =
+                    crate::image_io::sniff_image_mime_type(&decoded).unwrap_or(mime_type.as_str());
+                let upload_result = uploader
+                    .upload_inline_data_base64(Arc::from(data_base64.as_str()), detected_mime_type)
+                    .await?;
+                let final_url = build_openai_image_output_url(
+                    config,
+                    &upload_result.provider,
+                    &upload_result.url,
+                );
+                uploaded.push(crate::openai_image::UploadedImage { url: final_url });
+            }
             OpenAiImageItem::Url(url) => {
                 let final_url = build_openai_image_output_url(config, "direct", &url);
                 uploaded.push(crate::openai_image::UploadedImage { url: final_url });
@@ -1775,6 +1801,10 @@ fn query_contains_output_url(query: Option<&str>) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum OpenAiImageItem {
     B64Json(String),
+    DataUrl {
+        mime_type: String,
+        data_base64: String,
+    },
     Url(String),
 }
 
@@ -1808,7 +1838,15 @@ fn extract_openai_image_items(body: &Value) -> Result<Vec<OpenAiImageItem>> {
                         .and_then(Value::as_str)
                         .map(str::trim)
                         .filter(|value| !value.is_empty())
-                        .map(|value| OpenAiImageItem::Url(value.to_owned()))
+                        .map(|value| {
+                            parse_openai_image_data_url(value).map_or_else(
+                                || OpenAiImageItem::Url(value.to_owned()),
+                                |parsed| OpenAiImageItem::DataUrl {
+                                    mime_type: parsed.mime_type,
+                                    data_base64: parsed.data_base64,
+                                },
+                            )
+                        })
                 })
                 .ok_or_else(|| {
                     StructuredProxyError::new(
@@ -1821,6 +1859,51 @@ fn extract_openai_image_items(body: &Value) -> Result<Vec<OpenAiImageItem>> {
                 })
         })
         .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedOpenAiImageDataUrl {
+    mime_type: String,
+    data_base64: String,
+}
+
+fn parse_openai_image_data_url(raw: &str) -> Option<ParsedOpenAiImageDataUrl> {
+    let payload = raw.strip_prefix("data:")?;
+    let (metadata, data_base64) = payload.split_once(',')?;
+    let data_base64 = data_base64.trim();
+    if data_base64.is_empty() {
+        return None;
+    }
+
+    let mut mime_type = None;
+    let mut is_base64 = false;
+    for (index, segment) in metadata.split(';').enumerate() {
+        let segment = segment.trim();
+        if segment.is_empty() {
+            continue;
+        }
+        if index == 0 && segment.contains('/') {
+            mime_type = Some(segment.to_ascii_lowercase());
+            continue;
+        }
+        if segment.eq_ignore_ascii_case("base64") {
+            is_base64 = true;
+        }
+    }
+
+    if !is_base64 {
+        return None;
+    }
+
+    let mime_type = mime_type.unwrap_or_else(|| "image/png".to_string());
+    if !mime_type.starts_with("image/") {
+        return None;
+    }
+
+    Some(ParsedOpenAiImageDataUrl {
+        mime_type,
+        data_base64: data_base64.to_string(),
+    })
 }
 
 fn build_openai_image_output_url(config: &Config, provider: &str, target_url: &str) -> String {
@@ -2709,6 +2792,25 @@ mod tests {
             vec![OpenAiImageItem::Url(
                 "https://img.example.com/direct.png".to_string()
             )]
+        );
+    }
+
+    #[test]
+    fn extract_openai_image_items_accepts_data_url_entries() {
+        let body = json!({
+            "data": [{
+                "url": "data:image/png;base64,AQID"
+            }]
+        });
+
+        let items = extract_openai_image_items(&body).unwrap();
+
+        assert_eq!(
+            items,
+            vec![OpenAiImageItem::DataUrl {
+                mime_type: "image/png".to_string(),
+                data_base64: "AQID".to_string(),
+            }]
         );
     }
 
