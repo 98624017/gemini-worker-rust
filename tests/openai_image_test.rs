@@ -9,7 +9,7 @@ fn normalize_openai_image_request_supports_all_aliases_without_forcing_b64_json(
                 "prompt": "draw cat",
                 "image": ["https://img.example/a.png"],
             }),
-            json!(["https://img.example/a.png"]),
+            "image",
         ),
         (
             json!({
@@ -17,7 +17,7 @@ fn normalize_openai_image_request_supports_all_aliases_without_forcing_b64_json(
                 "prompt": "draw cat",
                 "images": ["https://img.example/b.png"],
             }),
-            json!(["https://img.example/b.png"]),
+            "images",
         ),
         (
             json!({
@@ -25,17 +25,22 @@ fn normalize_openai_image_request_supports_all_aliases_without_forcing_b64_json(
                 "prompt": "draw cat",
                 "reference_images": ["https://img.example/c.png"],
             }),
-            json!(["https://img.example/c.png"]),
+            "reference_images",
         ),
     ];
 
-    for (body, want_images) in cases {
+    for (body, want_field) in cases {
+        let want_images = body[want_field].clone();
         let normalized =
             rust_sync_proxy::openai_image::normalize_request_body(body, false).unwrap();
-        assert_eq!(normalized["reference_images"], want_images);
+        assert_eq!(normalized[want_field], want_images);
         assert_eq!(normalized["response_format"], "url");
-        assert!(normalized.get("image").is_none());
-        assert!(normalized.get("images").is_none());
+        for alias in ["image", "images", "reference_images"] {
+            if alias == want_field {
+                continue;
+            }
+            assert!(normalized.get(alias).is_none());
+        }
     }
 }
 
@@ -52,11 +57,10 @@ fn normalize_openai_image_request_forces_b64_json_when_requested() {
     )
     .unwrap();
 
-    assert_eq!(
-        normalized["reference_images"],
-        json!(["https://img.example/a.png"])
-    );
+    assert_eq!(normalized["image"], json!(["https://img.example/a.png"]));
     assert_eq!(normalized["response_format"], "b64_json");
+    assert!(normalized.get("images").is_none());
+    assert!(normalized.get("reference_images").is_none());
 }
 
 #[test]

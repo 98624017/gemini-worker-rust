@@ -378,7 +378,7 @@ async fn malformed_dual_upstream_header_returns_bad_request() {
 }
 
 #[tokio::test]
-async fn image_generations_forwards_reference_images_and_returns_uploaded_urls() {
+async fn image_generations_preserves_image_alias_and_returns_uploaded_urls() {
     let state = TestState::default();
     let server = Router::new()
         .route("/v1/images/generations", post(mock_openai_image_generation))
@@ -430,13 +430,10 @@ async fn image_generations_forwards_reference_images_and_returns_uploaded_urls()
     let upstream_requests = state.upstream_requests.lock().await.clone();
     assert_eq!(upstream_requests.len(), 1);
     let upstream_json: Value = serde_json::from_slice(&upstream_requests[0].body).unwrap();
-    assert_eq!(
-        upstream_json["reference_images"],
-        json!(["https://img.example/a.png"])
-    );
+    assert_eq!(upstream_json["image"], json!(["https://img.example/a.png"]));
     assert_eq!(upstream_json["response_format"], "b64_json");
-    assert!(upstream_json.get("image").is_none());
     assert!(upstream_json.get("images").is_none());
+    assert!(upstream_json.get("reference_images").is_none());
     assert_eq!(upstream_requests[0].api_key, "");
     assert_eq!(
         upstream_requests[0].authorization,
@@ -498,11 +495,10 @@ async fn image_generations_accepts_upstream_url_payload_without_uploading() {
     let upstream_requests = state.upstream_requests.lock().await.clone();
     assert_eq!(upstream_requests.len(), 1);
     let upstream_json: Value = serde_json::from_slice(&upstream_requests[0].body).unwrap();
-    assert_eq!(
-        upstream_json["reference_images"],
-        json!(["https://img.example/a.png"])
-    );
+    assert_eq!(upstream_json["image"], json!(["https://img.example/a.png"]));
     assert_eq!(upstream_json["response_format"], "url");
+    assert!(upstream_json.get("images").is_none());
+    assert!(upstream_json.get("reference_images").is_none());
     assert_eq!(*state.upload_count.lock().await, 0);
 }
 
@@ -560,11 +556,10 @@ async fn image_generations_can_wrap_upstream_url_payload_with_dedicated_proxy_pr
     let upstream_requests = state.upstream_requests.lock().await.clone();
     assert_eq!(upstream_requests.len(), 1);
     let upstream_json: Value = serde_json::from_slice(&upstream_requests[0].body).unwrap();
-    assert_eq!(
-        upstream_json["reference_images"],
-        json!(["https://img.example/a.png"])
-    );
+    assert_eq!(upstream_json["image"], json!(["https://img.example/a.png"]));
     assert_eq!(upstream_json["response_format"], "url");
+    assert!(upstream_json.get("images").is_none());
+    assert!(upstream_json.get("reference_images").is_none());
     assert_eq!(*state.upload_count.lock().await, 0);
 }
 

@@ -24,11 +24,13 @@ pub fn normalize_request_body(body: Value, force_b64_json: bool) -> Result<Value
         return Err(anyhow!("response_format must be url when provided"));
     }
 
-    let reference_images = collect_reference_images(&mut object)?;
-    object.insert(
-        "reference_images".to_string(),
-        Value::Array(reference_images.into_iter().map(Value::String).collect()),
-    );
+    let image_field = collect_reference_images(&mut object)?;
+    if let Some((field_name, images)) = image_field {
+        object.insert(
+            field_name.to_string(),
+            Value::Array(images.into_iter().map(Value::String).collect()),
+        );
+    }
     object.insert(
         "response_format".to_string(),
         Value::String(if force_b64_json {
@@ -74,7 +76,14 @@ pub fn build_response_payload(
     }))
 }
 
-fn collect_reference_images(object: &mut Map<String, Value>) -> Result<Vec<String>> {
+fn collect_reference_images(
+    object: &mut Map<String, Value>,
+) -> Result<Option<(&'static str, Vec<String>)>> {
+    let target_alias = IMAGE_FIELD_ALIASES
+        .iter()
+        .rev()
+        .find(|alias| object.contains_key(**alias))
+        .copied();
     let mut images = Vec::new();
 
     for alias in IMAGE_FIELD_ALIASES {
@@ -94,7 +103,7 @@ fn collect_reference_images(object: &mut Map<String, Value>) -> Result<Vec<Strin
         }
     }
 
-    Ok(images)
+    Ok(target_alias.map(|alias| (alias, images)))
 }
 
 fn validate_reference_image_url(raw: &str) -> Result<()> {
