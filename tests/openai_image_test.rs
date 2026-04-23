@@ -103,6 +103,46 @@ fn build_openai_image_response_preserves_upstream_created_timestamp() {
 }
 
 #[test]
+fn build_openai_image_response_uses_aiapidev_finished_time_when_created_missing() {
+    let body = json!({
+        "finishedTime": "2026-04-23 15:52:58",
+        "result": {
+            "items": [{
+                "url": "https://pub.example.com/result.png",
+                "type": "image"
+            }]
+        }
+    });
+
+    let response = rust_sync_proxy::openai_image::build_response_payload(
+        body,
+        &[rust_sync_proxy::openai_image::UploadedImage {
+            url: "https://img.example/final.png".to_string(),
+        }],
+        1_776_663_103,
+    )
+    .unwrap();
+
+    assert_eq!(response["created"], 1_776_959_578_i64);
+}
+
+#[test]
+fn build_aiapidev_openai_image_response_uses_fixed_usage() {
+    let response = rust_sync_proxy::openai_image::build_response_payload_from_uploaded(
+        &[rust_sync_proxy::openai_image::UploadedImage {
+            url: "https://img.example/final.png".to_string(),
+        }],
+        1_776_663_103,
+    );
+
+    assert_eq!(response["created"], 1_776_663_103);
+    assert_eq!(response["data"][0]["url"], "https://img.example/final.png");
+    assert_eq!(response["usage"]["input_tokens"], 1024);
+    assert_eq!(response["usage"]["output_tokens"], 1024);
+    assert_eq!(response["usage"]["total_tokens"], 2048);
+}
+
+#[test]
 fn sniff_image_mime_type_detects_known_formats() {
     let cases = [
         (&[137, 80, 78, 71, 13, 10, 26, 10][..], Some("image/png")),

@@ -202,7 +202,7 @@ fn extract_markdown_image_url(text: &str) -> Option<String> {
     None
 }
 
-fn extract_aiapidev_image_urls(body: &Value) -> Vec<String> {
+pub fn extract_aiapidev_image_urls(body: &Value) -> Vec<String> {
     body.pointer("/result/items")
         .and_then(Value::as_array)
         .into_iter()

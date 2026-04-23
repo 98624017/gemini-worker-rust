@@ -1,9 +1,12 @@
 use anyhow::{Result, anyhow};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
+use time::{PrimitiveDateTime, format_description::FormatItem, macros::format_description};
 use url::Url;
 
 const IMAGE_FIELD_ALIASES: [&str; 3] = ["reference_images", "images", "image"];
+const AIAPIDEV_TIMESTAMP_FORMAT: &[FormatItem<'static>] =
+    format_description!("[year]-[month]-[day] [hour]:[minute]:[second]");
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct UploadedImage {
@@ -64,16 +67,38 @@ pub fn build_response_payload(
     uploaded: &[UploadedImage],
     fallback_created: i64,
 ) -> Result<Value> {
-    let created = upstream_body
-        .get("created")
-        .and_then(Value::as_i64)
-        .unwrap_or(fallback_created);
+    let created = extract_created_timestamp(&upstream_body, fallback_created);
 
     Ok(json!({
         "created": created,
         "data": uploaded,
         "usage": build_fixed_usage(),
     }))
+}
+
+pub fn build_response_payload_from_uploaded(uploaded: &[UploadedImage], created: i64) -> Value {
+    json!({
+        "created": created,
+        "data": uploaded,
+        "usage": build_fixed_usage(),
+    })
+}
+
+pub fn extract_created_timestamp(upstream_body: &Value, fallback_created: i64) -> i64 {
+    if let Some(created) = upstream_body.get("created").and_then(Value::as_i64) {
+        return created;
+    }
+
+    for key in ["finishedTime", "submittedTime", "createTime"] {
+        let Some(raw) = upstream_body.get(key).and_then(Value::as_str) else {
+            continue;
+        };
+        if let Some(created) = parse_aiapidev_timestamp(raw) {
+            return created;
+        }
+    }
+
+    fallback_created
 }
 
 fn collect_reference_images(
@@ -115,4 +140,9 @@ fn validate_reference_image_url(raw: &str) -> Result<()> {
         return Err(anyhow!("reference image host is required"));
     }
     Ok(())
+}
+
+fn parse_aiapidev_timestamp(raw: &str) -> Option<i64> {
+    let parsed = PrimitiveDateTime::parse(raw.trim(), AIAPIDEV_TIMESTAMP_FORMAT).ok()?;
+    Some(parsed.assume_utc().unix_timestamp())
 }

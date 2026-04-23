@@ -26,8 +26,9 @@ use crate::request_materialize::{
 use crate::request_rewrite::rewrite_aiapidev_request_body;
 use crate::response_materialize::{finalize_output_urls, optimize_inline_data_images};
 use crate::response_rewrite::{
-    OutputMode, keep_largest_inline_image, normalize_aiapidev_task_response,
-    normalize_special_markdown_image_response, remove_thought_signatures,
+    OutputMode, extract_aiapidev_image_urls, keep_largest_inline_image,
+    normalize_aiapidev_task_response, normalize_special_markdown_image_response,
+    remove_thought_signatures,
 };
 use crate::upload::{Uploader, wrap_external_proxy_url};
 use crate::upstream::{
@@ -37,6 +38,7 @@ use crate::upstream::{
 
 const MAX_REQUEST_BODY_BYTES: usize = 20 * 1024 * 1024;
 const AIAPIDEV_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const AIAPIDEV_OPENAI_IMAGE_POLL_INTERVAL: Duration = Duration::from_secs(10);
 const AIAPIDEV_MAX_POLL_TIME: Duration = Duration::from_secs(450);
 const AIAPIDEV_MAX_CONSECUTIVE_POLL_FAILURES: usize = 5;
 
@@ -1074,6 +1076,29 @@ async fn forward_openai_image_request(
     };
 
     let upstream_build_started = Instant::now();
+    if is_aiapidev_base_url(&resolved.base_url) {
+        let response = handle_aiapidev_openai_image_response(
+            &resolved,
+            request_query.as_deref(),
+            request_body,
+            &state.upstream_client,
+            state.config.as_ref(),
+        )
+        .await;
+
+        admin_entry.upstream_build_ms = upstream_build_started.elapsed().as_millis() as i64;
+        admin_entry.request_upstream = request_upstream
+            .as_ref()
+            .map(|value| value.pretty.clone())
+            .unwrap_or_default();
+        admin_entry.request_upstream_images = request_upstream
+            .as_ref()
+            .map(|value| value.image_urls.clone())
+            .unwrap_or_default();
+        admin_entry.status_code = response.status().as_u16();
+        return Ok((response, admin_entry));
+    }
+
     let upstream_url = build_upstream_url(
         &resolved.base_url,
         "/v1/images/generations",
@@ -1326,6 +1351,247 @@ async fn handle_openai_image_response(
     ))
 }
 
+async fn handle_aiapidev_openai_image_response(
+    resolved: &ResolvedUpstream,
+    request_query: Option<&str>,
+    request_body: Value,
+    upstream_client: &reqwest::Client,
+    config: &Config,
+) -> Response {
+    let upstream_url =
+        match build_upstream_url(&resolved.base_url, "/v1/images/generations", request_query) {
+            Ok(url) => url,
+            Err(err) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({"error": {"code": 502, "message": err.to_string()}})),
+                )
+                    .into_response();
+            }
+        };
+    let create_response = upstream_client
+        .post(upstream_url)
+        .header(CONTENT_TYPE, "application/json")
+        .header(AUTHORIZATION, format!("Bearer {}", resolved.api_key))
+        .json(&request_body)
+        .send()
+        .await;
+
+    let create_response = match create_response {
+        Ok(response) => response,
+        Err(err) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({"error": {"code": 502, "message": err.to_string()}})),
+            )
+                .into_response();
+        }
+    };
+
+    if !create_response.status().is_success() {
+        return raw_reqwest_response(create_response).await;
+    }
+
+    let created_task: Value = match create_response.json().await {
+        Ok(body) => body,
+        Err(_) => {
+            return proxy_error_response(
+                StatusCode::BAD_GATEWAY,
+                "failed to parse aiapidev create response",
+                "aiapidev_create_task",
+                "invalid_json",
+            );
+        }
+    };
+    let request_id = created_task
+        .get("requestId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(ToOwned::to_owned);
+    let Some(request_id) = request_id else {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({"error": {"code": 502, "message": "aiapidev task create response missing requestId"}})),
+        )
+            .into_response();
+    };
+
+    let task_body =
+        match poll_aiapidev_openai_image_task(upstream_client, resolved, &request_id).await {
+            Ok(body) => body,
+            Err(response) => return response,
+        };
+    let status = task_body
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    if status != "succeeded" {
+        let message = task_body
+            .get("errorMessage")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                task_body
+                    .get("errorCode")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .unwrap_or("aiapidev task failed");
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({"error": {"code": 502, "message": message}})),
+        )
+            .into_response();
+    }
+
+    let image_urls = extract_aiapidev_image_urls(&task_body);
+    if image_urls.is_empty() {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({"error": {"code": 502, "message": "aiapidev task result did not contain image urls"}})),
+        )
+            .into_response();
+    }
+
+    let external_proxy_prefix = config.resolved_external_image_proxy_prefix();
+    let uploaded: Vec<_> = image_urls
+        .into_iter()
+        .map(|image_url| {
+            let url = if config.proxy_special_upstream_urls && !external_proxy_prefix.is_empty() {
+                wrap_external_proxy_url(&external_proxy_prefix, &image_url)
+            } else {
+                image_url
+            };
+            crate::openai_image::UploadedImage { url }
+        })
+        .collect();
+    let fallback_created = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let created = crate::openai_image::extract_created_timestamp(&task_body, fallback_created);
+    let final_json = crate::openai_image::build_response_payload_from_uploaded(&uploaded, created);
+
+    match serde_json::to_vec(&final_json) {
+        Ok(final_body) => {
+            let mut response = Response::new(Body::from(final_body));
+            *response.status_mut() = StatusCode::OK;
+            response
+                .headers_mut()
+                .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+            response
+        }
+        Err(err) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({"error": {"code": 502, "message": err.to_string()}})),
+        )
+            .into_response(),
+    }
+}
+
+async fn poll_aiapidev_openai_image_task(
+    upstream_client: &reqwest::Client,
+    resolved: &ResolvedUpstream,
+    request_id: &str,
+) -> std::result::Result<Value, Response> {
+    let deadline = Instant::now() + AIAPIDEV_MAX_POLL_TIME;
+    let mut consecutive_failures = 0usize;
+    loop {
+        let task_path = format!("/v1/tasks/{request_id}");
+        let task_url = match build_upstream_url(&resolved.base_url, &task_path, None) {
+            Ok(url) => url,
+            Err(err) => {
+                return Err((
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({"error": {"code": 502, "message": err.to_string()}})),
+                )
+                    .into_response());
+            }
+        };
+        let response = upstream_client
+            .get(task_url)
+            .header(AUTHORIZATION, format!("Bearer {}", resolved.api_key))
+            .send()
+            .await;
+
+        let response = match response {
+            Ok(response) => response,
+            Err(err) => {
+                consecutive_failures += 1;
+                if consecutive_failures >= AIAPIDEV_MAX_CONSECUTIVE_POLL_FAILURES {
+                    return Err((
+                        StatusCode::BAD_GATEWAY,
+                        Json(json!({"error": {"code": 502, "message": err.to_string()}})),
+                    )
+                        .into_response());
+                }
+                if Instant::now() >= deadline {
+                    return Err(proxy_error_response(
+                        StatusCode::BAD_GATEWAY,
+                        "aiapidev task poll timed out",
+                        "aiapidev_poll_task",
+                        "timeout",
+                    ));
+                }
+                tokio::time::sleep(AIAPIDEV_OPENAI_IMAGE_POLL_INTERVAL).await;
+                continue;
+            }
+        };
+
+        if !response.status().is_success() {
+            if !is_aiapidev_retryable_poll_status(response.status()) {
+                return Err(raw_reqwest_response(response).await);
+            }
+            consecutive_failures += 1;
+            if consecutive_failures >= AIAPIDEV_MAX_CONSECUTIVE_POLL_FAILURES {
+                return Err(raw_reqwest_response(response).await);
+            }
+            if Instant::now() >= deadline {
+                return Err(proxy_error_response(
+                    StatusCode::BAD_GATEWAY,
+                    "aiapidev task poll timed out",
+                    "aiapidev_poll_task",
+                    "timeout",
+                ));
+            }
+            tokio::time::sleep(AIAPIDEV_OPENAI_IMAGE_POLL_INTERVAL).await;
+            continue;
+        }
+        consecutive_failures = 0;
+
+        let task_body: Value = match response.json().await {
+            Ok(body) => body,
+            Err(_) => {
+                return Err(proxy_error_response(
+                    StatusCode::BAD_GATEWAY,
+                    "failed to parse aiapidev poll response",
+                    "aiapidev_parse_task_response",
+                    "invalid_json",
+                ));
+            }
+        };
+        let status = task_body
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if is_aiapidev_terminal_status(&status) {
+            return Ok(task_body);
+        }
+        if Instant::now() >= deadline {
+            return Err(proxy_error_response(
+                StatusCode::BAD_GATEWAY,
+                "aiapidev task poll timed out",
+                "aiapidev_poll_task",
+                "timeout",
+            ));
+        }
+        tokio::time::sleep(AIAPIDEV_OPENAI_IMAGE_POLL_INTERVAL).await;
+    }
+}
+
 async fn handle_aiapidev_response(
     resolved: &ResolvedUpstream,
     target_path: &str,
@@ -1394,7 +1660,14 @@ async fn handle_aiapidev_response(
             .into_response();
     };
 
-    let task_body = match poll_aiapidev_task(upstream_client, resolved, &request_id).await {
+    let task_body = match poll_aiapidev_task(
+        upstream_client,
+        resolved,
+        &request_id,
+        AIAPIDEV_POLL_INTERVAL,
+    )
+    .await
+    {
         Ok(body) => body,
         Err(response) => return response,
     };
@@ -1472,6 +1745,7 @@ async fn poll_aiapidev_task(
     upstream_client: &reqwest::Client,
     resolved: &ResolvedUpstream,
     request_id: &str,
+    poll_interval: Duration,
 ) -> std::result::Result<Value, Response> {
     let deadline = Instant::now() + AIAPIDEV_MAX_POLL_TIME;
     let mut consecutive_failures = 0usize;
@@ -1512,7 +1786,7 @@ async fn poll_aiapidev_task(
                         "timeout",
                     ));
                 }
-                tokio::time::sleep(AIAPIDEV_POLL_INTERVAL).await;
+                tokio::time::sleep(poll_interval).await;
                 continue;
             }
         };
@@ -1533,7 +1807,7 @@ async fn poll_aiapidev_task(
                     "timeout",
                 ));
             }
-            tokio::time::sleep(AIAPIDEV_POLL_INTERVAL).await;
+            tokio::time::sleep(poll_interval).await;
             continue;
         }
         consecutive_failures = 0;
@@ -1565,7 +1839,7 @@ async fn poll_aiapidev_task(
                 "timeout",
             ));
         }
-        tokio::time::sleep(AIAPIDEV_POLL_INTERVAL).await;
+        tokio::time::sleep(poll_interval).await;
     }
 }
 
@@ -1981,6 +2255,11 @@ mod tests {
     }
 
     #[test]
+    fn aiapidev_openai_image_poll_interval_is_10_seconds() {
+        assert_eq!(AIAPIDEV_OPENAI_IMAGE_POLL_INTERVAL, Duration::from_secs(10));
+    }
+
+    #[test]
     fn proxy_error_json_contains_structured_fields() {
         let body = proxy_error_json(
             502,
@@ -2084,6 +2363,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn aiapidev_openai_image_flow_polls_task_and_returns_openai_response() {
+        let state = AiapidevMockState::default();
+        let app = Router::new()
+            .route("/v1/images/generations", post(mock_aiapidev_create))
+            .route("/v1/tasks/{request_id}", get(mock_aiapidev_poll))
+            .with_state(state.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let resolved = ResolvedUpstream {
+            base_url: format!("http://{address}"),
+            api_key: "special-key".to_string(),
+        };
+        let mut config = crate::test_config();
+        config.public_base_url = "https://proxy.example.com/base/".to_string();
+        config.proxy_special_upstream_urls = true;
+
+        let response = handle_aiapidev_openai_image_response(
+            &resolved,
+            None,
+            json!({
+                "model": "gpt-image-2",
+                "prompt": "鞋子商业拍摄",
+                "image": ["https://img.example.com/demo.png"],
+                "response_format": "url"
+            }),
+            &reqwest::Client::new(),
+            &config,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json_body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            json_body["data"][0]["url"],
+            "https://proxy.example.com/base/proxy/image?url=https%3A%2F%2Fpub.example.com%2Fresult.png"
+        );
+        assert_eq!(json_body["usage"]["input_tokens"], 1024);
+        assert_eq!(json_body["usage"]["output_tokens"], 1024);
+        assert_eq!(json_body["usage"]["total_tokens"], 2048);
+
+        let create_paths = state.create_paths.lock().await.clone();
+        assert_eq!(create_paths.as_slice(), ["/v1/images/generations"]);
+
+        let create_headers = state.create_headers.lock().await;
+        assert_eq!(
+            create_headers[0]
+                .get(AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer special-key")
+        );
+        assert!(create_headers[0].get("x-goog-api-key").is_none());
+        drop(create_headers);
+
+        let poll_headers = state.poll_headers.lock().await;
+        assert_eq!(
+            poll_headers[0]
+                .get(AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer special-key")
+        );
+        assert!(poll_headers[0].get("x-goog-api-key").is_none());
+        drop(poll_headers);
+
+        let create_bodies = state.create_bodies.lock().await;
+        assert_eq!(create_bodies[0]["model"], "gpt-image-2");
+        assert_eq!(create_bodies[0]["response_format"], "url");
+    }
+
+    #[tokio::test]
     async fn forward_gemini_request_rewrites_aiapidev_base64_inline_data_before_create_call() {
         let mock_state = AiapidevMockState::default();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2169,6 +2522,96 @@ mod tests {
                 .get("inlineData")
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn forward_openai_image_request_uses_aiapidev_async_flow() {
+        let mock_state = AiapidevMockState::default();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let proxy_state = mock_state.clone();
+        tokio::spawn(async move {
+            let service = service_fn(move |request| {
+                let state = proxy_state.clone();
+                async move { Ok::<_, Infallible>(mock_aiapidev_proxy(state, request).await) }
+            });
+            axum::serve(listener, Shared::new(service)).await.unwrap();
+        });
+
+        let resolved = ResolvedUpstream {
+            base_url: "http://www.aiapidev.com".to_string(),
+            api_key: "special-key".to_string(),
+        };
+        let upstream_client = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::http(format!("http://127.0.0.1:{}", address.port())).unwrap())
+            .build()
+            .unwrap();
+        let mut config = crate::test_config();
+        config.public_base_url = "https://proxy.example.com/base/".to_string();
+        config.proxy_special_upstream_urls = true;
+        let state = AppState {
+            config: Arc::new(config.clone()),
+            upstream_client,
+            image_client: reqwest::Client::new(),
+            uploader: Arc::new(Uploader::new(reqwest::Client::new(), config)),
+            admin: None,
+            request_inline_data_fetch_service: None,
+            response_inline_data_fetch_service: None,
+            blob_runtime: Arc::new(crate::test_blob_runtime(8 * 1024 * 1024)),
+        };
+
+        let (response, admin_entry) = forward_openai_image_request(
+            state,
+            resolved,
+            json!({
+                "model": "gpt-image-2",
+                "prompt": "鞋子商业拍摄",
+                "image": ["https://img.example.com/demo.png"],
+                "response_format": "url"
+            }),
+            None,
+            RequestLogSnapshot::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(admin_entry.output_mode, "url");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json_body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json_body["created"], 1_776_959_578_i64);
+        assert_eq!(
+            json_body["data"][0]["url"],
+            "https://proxy.example.com/base/proxy/image?url=https%3A%2F%2Fpub.example.com%2Fresult.png"
+        );
+        assert_eq!(json_body["usage"]["total_tokens"], 2048);
+
+        let create_paths = mock_state.create_paths.lock().await.clone();
+        assert_eq!(create_paths.as_slice(), ["/v1/images/generations"]);
+
+        let create_headers = mock_state.create_headers.lock().await;
+        assert_eq!(
+            create_headers[0]
+                .get(AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer special-key")
+        );
+        assert!(create_headers[0].get("x-goog-api-key").is_none());
+        drop(create_headers);
+
+        let poll_headers = mock_state.poll_headers.lock().await;
+        assert_eq!(
+            poll_headers[0]
+                .get(AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer special-key")
+        );
+        assert!(poll_headers[0].get("x-goog-api-key").is_none());
+        drop(poll_headers);
+
+        let create_bodies = mock_state.create_bodies.lock().await;
+        assert_eq!(create_bodies[0]["model"], "gpt-image-2");
+        assert_eq!(create_bodies[0]["response_format"], "url");
     }
 
     #[test]
@@ -2664,15 +3107,19 @@ mod tests {
         let path = extract_proxy_path(request.uri());
         let headers = request.headers().clone();
 
-        if path == "/v1beta/models/nanobananapro:generateContent" {
+        if path == "/v1beta/models/nanobananapro:generateContent"
+            || path == "/v1/images/generations"
+        {
             let body = to_bytes(request.into_body(), usize::MAX).await.unwrap();
             let parsed: Value = serde_json::from_slice(&body).unwrap();
             state.create_paths.lock().await.push(path);
             state.create_headers.lock().await.push(headers);
             state.create_bodies.lock().await.push(parsed);
             return Json(json!({
+                "taskOrderId": "task_demo",
                 "requestId": "req_demo",
-                "status": "created"
+                "status": "created",
+                "createTime": "2026-04-23 15:52:08"
             }))
             .into_response();
         }
@@ -2680,6 +3127,7 @@ mod tests {
         if path == "/v1beta/tasks/req_demo" {
             state.poll_headers.lock().await.push(headers);
             return Json(json!({
+                "taskOrderId": "task_demo",
                 "requestId": "req_demo",
                 "status": "succeeded",
                 "result": {
@@ -2687,7 +3135,27 @@ mod tests {
                         "url": "https://pub.example.com/result.png",
                         "type": "image"
                     }]
-                }
+                },
+                "finishedTime": "2026-04-23 15:52:58",
+                "createTime": "2026-04-23 15:52:08"
+            }))
+            .into_response();
+        }
+
+        if path == "/v1/tasks/req_demo" {
+            state.poll_headers.lock().await.push(headers);
+            return Json(json!({
+                "taskOrderId": "task_demo",
+                "requestId": "req_demo",
+                "status": "succeeded",
+                "result": {
+                    "items": [{
+                        "url": "https://pub.example.com/result.png",
+                        "type": "image"
+                    }]
+                },
+                "finishedTime": "2026-04-23 15:52:58",
+                "createTime": "2026-04-23 15:52:08"
             }))
             .into_response();
         }
