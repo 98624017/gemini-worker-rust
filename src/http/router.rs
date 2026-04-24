@@ -32,8 +32,8 @@ use crate::response_rewrite::{
 };
 use crate::upload::{Uploader, wrap_external_proxy_url};
 use crate::upstream::{
-    ResolvedUpstream, is_aiapidev_base_url, resolve_upstream_for_request_from_header_map,
-    rewrite_aiapidev_model_path,
+    ResolvedUpstream, is_aiapidev_base_url, is_happyapi_base_url,
+    resolve_upstream_for_request_from_header_map, rewrite_aiapidev_model_path,
 };
 
 const MAX_REQUEST_BODY_BYTES: usize = 20 * 1024 * 1024;
@@ -1066,6 +1066,8 @@ async fn forward_openai_image_request(
     let admin_enabled = state.admin.is_some();
     let mut admin_entry = request_log.base_entry();
     admin_entry.output_mode = "url".to_string();
+    let cache_tracking =
+        build_request_cache_tracking(state.admin.as_ref().map(|admin| admin.stats()));
 
     let request_upstream = if admin_enabled {
         let request_upstream_bytes = serde_json::to_vec(&request_body)
@@ -1096,6 +1098,54 @@ async fn forward_openai_image_request(
             .map(|value| value.image_urls.clone())
             .unwrap_or_default();
         admin_entry.status_code = response.status().as_u16();
+        return Ok((response, admin_entry));
+    }
+
+    if is_happyapi_base_url(&resolved.base_url) && openai_image_request_has_images(&request_body) {
+        let upstream_url = build_upstream_url(
+            &resolved.base_url,
+            "/v1/images/edits",
+            request_query.as_deref(),
+        )
+        .map_err(|err| ForwardRequestFailure::new(err, admin_entry.clone()))?;
+        let form = build_happyapi_image_edit_form(
+            &state.image_client,
+            state.request_inline_data_fetch_service.as_ref(),
+            cache_tracking.observer.as_ref(),
+            &request_body,
+        )
+        .await
+        .map_err(|err| ForwardRequestFailure::new(err, admin_entry.clone()))?;
+        let upstream_response = state
+            .upstream_client
+            .post(upstream_url)
+            .header(AUTHORIZATION, format!("Bearer {}", resolved.api_key))
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|err| ForwardRequestFailure::new(err, admin_entry.clone()))?;
+
+        admin_entry.upstream_build_ms = upstream_build_started.elapsed().as_millis() as i64;
+        admin_entry.request_upstream = request_upstream
+            .as_ref()
+            .map(|value| value.pretty.clone())
+            .unwrap_or_default();
+        admin_entry.request_upstream_images = request_upstream
+            .as_ref()
+            .map(|value| value.image_urls.clone())
+            .unwrap_or_default();
+
+        let (response, response_durations) = handle_openai_image_response(
+            upstream_response,
+            state.uploader.as_ref(),
+            state.config.as_ref(),
+        )
+        .await
+        .map_err(|err| ForwardRequestFailure::new(err, admin_entry.clone()))?;
+        admin_entry.status_code = response.status().as_u16();
+        admin_entry.response_process_ms = response_durations.response_process_ms;
+        admin_entry.upload_ms = response_durations.upload_ms;
+        update_request_cache_hits(&mut admin_entry, &cache_tracking);
         return Ok((response, admin_entry));
     }
 
@@ -1136,6 +1186,97 @@ async fn forward_openai_image_request(
     admin_entry.response_process_ms = response_durations.response_process_ms;
     admin_entry.upload_ms = response_durations.upload_ms;
     Ok((response, admin_entry))
+}
+
+fn openai_image_request_has_images(request_body: &Value) -> bool {
+    request_body
+        .get("image")
+        .and_then(Value::as_array)
+        .is_some_and(|images| !images.is_empty())
+}
+
+async fn build_happyapi_image_edit_form(
+    image_client: &reqwest::Client,
+    fetch_service: Option<&Arc<InlineDataUrlFetchService>>,
+    cache_observer: Option<&Arc<dyn Fn(&str, bool) + Send + Sync>>,
+    request_body: &Value,
+) -> Result<reqwest::multipart::Form> {
+    let object = request_body
+        .as_object()
+        .ok_or_else(|| anyhow!("request body must be a json object"))?;
+    let image_urls = object
+        .get("image")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("image must be an array"))?;
+
+    let mut form = reqwest::multipart::Form::new();
+    for (key, value) in object {
+        if key == "image" {
+            continue;
+        }
+        let field_value = multipart_text_value(value)?;
+        form = form.text(key.clone(), field_value);
+    }
+
+    for image_url in image_urls {
+        let image_url = image_url
+            .as_str()
+            .ok_or_else(|| anyhow!("image items must be strings"))?;
+        let fetched =
+            fetch_happyapi_edit_image(image_client, fetch_service, cache_observer, image_url)
+                .await?;
+        let file_name = filename_from_url(image_url).unwrap_or_else(|| "image.png".to_string());
+        let part = reqwest::multipart::Part::bytes(fetched.bytes.to_vec())
+            .file_name(file_name)
+            .mime_str(&fetched.mime_type)?;
+        form = form.part("image", part);
+    }
+
+    Ok(form)
+}
+
+async fn fetch_happyapi_edit_image(
+    image_client: &reqwest::Client,
+    fetch_service: Option<&Arc<InlineDataUrlFetchService>>,
+    cache_observer: Option<&Arc<dyn Fn(&str, bool) + Send + Sync>>,
+    image_url: &str,
+) -> Result<crate::image_io::FetchedInlineData> {
+    if let Some(fetch_service) = fetch_service {
+        let fetched = fetch_service.fetch(image_url).await?;
+        if let Some(observer) = cache_observer {
+            observer(image_url, fetched.from_cache);
+        }
+        return Ok(crate::image_io::FetchedInlineData {
+            mime_type: fetched.mime_type,
+            bytes: fetched.bytes,
+        });
+    }
+
+    crate::image_io::fetch_image_as_inline_data(
+        image_client,
+        image_url,
+        crate::image_io::REQUEST_MAX_IMAGE_BYTES,
+    )
+    .await
+}
+
+fn multipart_text_value(value: &Value) -> Result<String> {
+    match value {
+        Value::String(text) => Ok(text.clone()),
+        Value::Number(number) => Ok(number.to_string()),
+        Value::Bool(boolean) => Ok(boolean.to_string()),
+        Value::Null => Ok(String::new()),
+        Value::Array(_) | Value::Object(_) => serde_json::to_string(value).map_err(Into::into),
+    }
+}
+
+fn filename_from_url(raw_url: &str) -> Option<String> {
+    let parsed = Url::parse(raw_url).ok()?;
+    let segment = parsed.path_segments()?.next_back()?.trim();
+    if segment.is_empty() {
+        return None;
+    }
+    Some(segment.to_string())
 }
 
 async fn handle_non_stream_response(
@@ -2228,6 +2369,13 @@ mod tests {
         poll_responses: Arc<Mutex<VecDeque<MockPollResponse>>>,
     }
 
+    #[derive(Clone, Default)]
+    struct MultipartMockState {
+        create_paths: Arc<Mutex<Vec<String>>>,
+        create_headers: Arc<Mutex<Vec<HeaderMap>>>,
+        create_bodies: Arc<Mutex<Vec<Vec<u8>>>>,
+    }
+
     #[derive(Clone)]
     enum MockPollResponse {
         Success(Value),
@@ -2612,6 +2760,264 @@ mod tests {
         let create_bodies = mock_state.create_bodies.lock().await;
         assert_eq!(create_bodies[0]["model"], "gpt-image-2");
         assert_eq!(create_bodies[0]["response_format"], "url");
+    }
+
+    #[tokio::test]
+    async fn forward_openai_image_request_uses_happyapi_edits_multipart_when_images_exist() {
+        let image_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let image_address = image_listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let service = service_fn(|_request| async move {
+                Ok::<_, Infallible>(
+                    (
+                        [(CONTENT_TYPE, HeaderValue::from_static("image/png"))],
+                        vec![137, 80, 78, 71, 13, 10, 26, 10],
+                    )
+                        .into_response(),
+                )
+            });
+            axum::serve(image_listener, Shared::new(service))
+                .await
+                .unwrap();
+        });
+
+        let mock_state = MultipartMockState::default();
+        let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_address = upstream_listener.local_addr().unwrap();
+        let proxy_state = mock_state.clone();
+        tokio::spawn(async move {
+            let service = service_fn(move |request| {
+                let state = proxy_state.clone();
+                async move { Ok::<_, Infallible>(mock_happyapi_proxy(state, request).await) }
+            });
+            axum::serve(upstream_listener, Shared::new(service))
+                .await
+                .unwrap();
+        });
+
+        let resolved = ResolvedUpstream {
+            base_url: "http://happyapi.org".to_string(),
+            api_key: "happy-key".to_string(),
+        };
+        let upstream_client = reqwest::Client::builder()
+            .proxy(
+                reqwest::Proxy::http(format!("http://127.0.0.1:{}", upstream_address.port()))
+                    .unwrap(),
+            )
+            .build()
+            .unwrap();
+        let config = crate::test_config();
+        let state = AppState {
+            config: Arc::new(config.clone()),
+            upstream_client,
+            image_client: reqwest::Client::builder()
+                .proxy(
+                    reqwest::Proxy::http(format!("http://127.0.0.1:{}", image_address.port()))
+                        .unwrap(),
+                )
+                .build()
+                .unwrap(),
+            uploader: Arc::new(Uploader::new(reqwest::Client::new(), config)),
+            admin: None,
+            request_inline_data_fetch_service: None,
+            response_inline_data_fetch_service: None,
+            blob_runtime: Arc::new(crate::test_blob_runtime(8 * 1024 * 1024)),
+        };
+
+        let (response, _admin_entry) = forward_openai_image_request(
+            state,
+            resolved,
+            json!({
+                "model": "gpt-image-2",
+                "prompt": "鞋子商业拍摄",
+                "image": ["http://img.example.com/demo.png"],
+                "size": "3840x2160",
+                "quality": "high",
+                "n": 1,
+                "response_format": "url"
+            }),
+            None,
+            RequestLogSnapshot::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let paths = mock_state.create_paths.lock().await.clone();
+        assert_eq!(paths.as_slice(), ["/v1/images/edits"]);
+
+        let headers = mock_state.create_headers.lock().await;
+        assert_eq!(
+            headers[0]
+                .get(AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer happy-key")
+        );
+        assert!(
+            headers[0]
+                .get(CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.starts_with("multipart/form-data; boundary="))
+        );
+        drop(headers);
+
+        let bodies = mock_state.create_bodies.lock().await;
+        let body_text = String::from_utf8_lossy(&bodies[0]);
+        assert!(body_text.contains("name=\"model\""));
+        assert!(body_text.contains("gpt-image-2"));
+        assert!(body_text.contains("name=\"prompt\""));
+        assert!(body_text.contains("鞋子商业拍摄"));
+        assert!(body_text.contains("name=\"image\"; filename=\"demo.png\""));
+        assert!(body_text.contains("Content-Type: image/png"));
+    }
+
+    #[tokio::test]
+    async fn forward_openai_image_request_keeps_happyapi_generations_when_images_missing() {
+        let mock_state = MultipartMockState::default();
+        let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_address = upstream_listener.local_addr().unwrap();
+        let proxy_state = mock_state.clone();
+        tokio::spawn(async move {
+            let service = service_fn(move |request| {
+                let state = proxy_state.clone();
+                async move { Ok::<_, Infallible>(mock_happyapi_proxy(state, request).await) }
+            });
+            axum::serve(upstream_listener, Shared::new(service))
+                .await
+                .unwrap();
+        });
+
+        let resolved = ResolvedUpstream {
+            base_url: "http://happyapi.org".to_string(),
+            api_key: "happy-key".to_string(),
+        };
+        let upstream_client = reqwest::Client::builder()
+            .proxy(
+                reqwest::Proxy::http(format!("http://127.0.0.1:{}", upstream_address.port()))
+                    .unwrap(),
+            )
+            .build()
+            .unwrap();
+        let config = crate::test_config();
+        let state = AppState {
+            config: Arc::new(config.clone()),
+            upstream_client,
+            image_client: reqwest::Client::new(),
+            uploader: Arc::new(Uploader::new(reqwest::Client::new(), config)),
+            admin: None,
+            request_inline_data_fetch_service: None,
+            response_inline_data_fetch_service: None,
+            blob_runtime: Arc::new(crate::test_blob_runtime(8 * 1024 * 1024)),
+        };
+
+        let (response, _admin_entry) = forward_openai_image_request(
+            state,
+            resolved,
+            json!({
+                "model": "gpt-image-2",
+                "prompt": "鞋子商业拍摄",
+                "size": "3840x2160",
+                "quality": "high",
+                "n": 1,
+                "response_format": "url"
+            }),
+            None,
+            RequestLogSnapshot::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let paths = mock_state.create_paths.lock().await.clone();
+        assert_eq!(paths.as_slice(), ["/v1/images/generations"]);
+
+        let headers = mock_state.create_headers.lock().await;
+        assert_eq!(
+            headers[0]
+                .get(CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("application/json")
+        );
+        drop(headers);
+
+        let body: Value =
+            serde_json::from_slice(&mock_state.create_bodies.lock().await[0]).unwrap();
+        assert_eq!(body["model"], "gpt-image-2");
+        assert_eq!(body.get("image"), None);
+    }
+
+    #[tokio::test]
+    async fn forward_openai_image_request_reuses_request_image_cache_for_happyapi_edits() {
+        let image_request_count = Arc::new(AtomicUsize::new(0));
+        let image_address = spawn_image_server(Arc::clone(&image_request_count)).await;
+        let image_url = format!("http://{image_address}/image.png");
+
+        let mock_state = MultipartMockState::default();
+        let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_address = upstream_listener.local_addr().unwrap();
+        let proxy_state = mock_state.clone();
+        tokio::spawn(async move {
+            let service = service_fn(move |request| {
+                let state = proxy_state.clone();
+                async move { Ok::<_, Infallible>(mock_happyapi_proxy(state, request).await) }
+            });
+            axum::serve(upstream_listener, Shared::new(service))
+                .await
+                .unwrap();
+        });
+
+        let mut config = crate::test_config();
+        config.inline_data_url_memory_cache_max_bytes = 1024;
+        config.inline_data_url_background_fetch_wait_timeout = Duration::from_millis(100);
+        config.inline_data_url_background_fetch_total_timeout = Duration::from_millis(500);
+        let request_fetch_service = crate::cache::InlineDataUrlFetchService::from_config(
+            &config,
+            reqwest::Client::new(),
+            crate::image_io::REQUEST_MAX_IMAGE_BYTES,
+            true,
+        )
+        .unwrap();
+        let first_fetch = request_fetch_service.fetch(&image_url).await.unwrap();
+        assert!(!first_fetch.from_cache);
+
+        let upstream_client = reqwest::Client::builder()
+            .proxy(
+                reqwest::Proxy::http(format!("http://127.0.0.1:{}", upstream_address.port()))
+                    .unwrap(),
+            )
+            .build()
+            .unwrap();
+        let state = AppState {
+            config: Arc::new(config.clone()),
+            upstream_client,
+            image_client: reqwest::Client::new(),
+            uploader: Arc::new(Uploader::new(reqwest::Client::new(), config)),
+            admin: None,
+            request_inline_data_fetch_service: Some(request_fetch_service),
+            response_inline_data_fetch_service: None,
+            blob_runtime: Arc::new(crate::test_blob_runtime(8 * 1024 * 1024)),
+        };
+
+        let (response, _admin_entry) = forward_openai_image_request(
+            state,
+            ResolvedUpstream {
+                base_url: "http://happyapi.org".to_string(),
+                api_key: "happy-key".to_string(),
+            },
+            json!({
+                "model": "gpt-image-2",
+                "prompt": "鞋子商业拍摄",
+                "image": [image_url],
+                "response_format": "url"
+            }),
+            None,
+            RequestLogSnapshot::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(image_request_count.load(Ordering::Relaxed), 1);
     }
 
     #[test]
@@ -3161,6 +3567,24 @@ mod tests {
         }
 
         StatusCode::NOT_FOUND.into_response()
+    }
+
+    async fn mock_happyapi_proxy(state: MultipartMockState, request: Request) -> Response {
+        let path = extract_proxy_path(request.uri());
+        let headers = request.headers().clone();
+        let body = to_bytes(request.into_body(), usize::MAX).await.unwrap();
+
+        state.create_paths.lock().await.push(path);
+        state.create_headers.lock().await.push(headers);
+        state.create_bodies.lock().await.push(body.to_vec());
+
+        Json(json!({
+            "created": 1_776_959_578_i64,
+            "data": [{
+                "url": "https://pub.example.com/result.png"
+            }]
+        }))
+        .into_response()
     }
 
     fn extract_proxy_path(uri: &Uri) -> String {

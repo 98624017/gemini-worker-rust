@@ -159,6 +159,16 @@ pub fn is_aiapidev_base_url(raw: &str) -> bool {
     )
 }
 
+pub fn is_happyapi_base_url(raw: &str) -> bool {
+    let Ok(parsed) = Url::parse(raw) else {
+        return false;
+    };
+    matches!(
+        parsed.host_str(),
+        Some("happyapi.org") | Some("www.happyapi.org")
+    )
+}
+
 pub fn rewrite_aiapidev_model_path(path: &str) -> String {
     let Some(model_part) = path.strip_prefix("/v1beta/models/") else {
         return path.to_string();
