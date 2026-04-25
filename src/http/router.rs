@@ -41,6 +41,7 @@ const AIAPIDEV_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const AIAPIDEV_OPENAI_IMAGE_POLL_INTERVAL: Duration = Duration::from_secs(10);
 const AIAPIDEV_MAX_POLL_TIME: Duration = Duration::from_secs(450);
 const AIAPIDEV_MAX_CONSECUTIVE_POLL_FAILURES: usize = 5;
+const MAX_OPENAI_REFERENCE_IMAGES: usize = 6;
 
 #[cfg_attr(not(test), allow(dead_code))]
 fn proxy_error_json(code: u16, message: &str, source: &str, stage: &str, kind: &str) -> Value {
@@ -1069,6 +1070,23 @@ async fn forward_openai_image_request(
     let cache_tracking =
         build_request_cache_tracking(state.admin.as_ref().map(|admin| admin.stats()));
 
+    if openai_image_reference_image_count(&request_body) > MAX_OPENAI_REFERENCE_IMAGES {
+        admin_entry.status_code = StatusCode::BAD_REQUEST.as_u16();
+        admin_entry.error_source = "proxy".to_string();
+        admin_entry.error_stage = "validate_request".to_string();
+        admin_entry.error_kind = "too_many_reference_images".to_string();
+        admin_entry.error_message = "reference images cannot exceed 6".to_string();
+        admin_entry.error_detail =
+            format!("reference image count exceeds limit: max={MAX_OPENAI_REFERENCE_IMAGES}");
+        let response = proxy_error_response(
+            StatusCode::BAD_REQUEST,
+            "reference images cannot exceed 6",
+            "validate_request",
+            "too_many_reference_images",
+        );
+        return Ok((response, admin_entry));
+    }
+
     let request_upstream = if admin_enabled {
         let request_upstream_bytes = serde_json::to_vec(&request_body)
             .map_err(|err| ForwardRequestFailure::new(err, admin_entry.clone()))?;
@@ -1193,6 +1211,13 @@ fn openai_image_request_has_images(request_body: &Value) -> bool {
         .get("image")
         .and_then(Value::as_array)
         .is_some_and(|images| !images.is_empty())
+}
+
+fn openai_image_reference_image_count(request_body: &Value) -> usize {
+    request_body
+        .get("image")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len)
 }
 
 async fn build_happyapi_image_edit_form(
@@ -2869,6 +2894,49 @@ mod tests {
         assert!(body_text.contains("鞋子商业拍摄"));
         assert!(body_text.contains("name=\"image\"; filename=\"demo.png\""));
         assert!(body_text.contains("Content-Type: image/png"));
+    }
+
+    #[tokio::test]
+    async fn forward_openai_image_request_rejects_more_than_six_reference_images() {
+        let resolved = ResolvedUpstream {
+            base_url: "http://happyapi.org".to_string(),
+            api_key: "happy-key".to_string(),
+        };
+        let config = crate::test_config();
+        let state = test_app_state(config, None);
+
+        let (response, _admin_entry) = forward_openai_image_request(
+            state,
+            resolved,
+            json!({
+                "model": "gpt-image-2",
+                "prompt": "鞋子商业拍摄",
+                "image": [
+                    "http://img.example.com/1.png",
+                    "http://img.example.com/2.png",
+                    "http://img.example.com/3.png",
+                    "http://img.example.com/4.png",
+                    "http://img.example.com/5.png",
+                    "http://img.example.com/6.png",
+                    "http://img.example.com/7.png"
+                ],
+                "response_format": "url"
+            }),
+            None,
+            RequestLogSnapshot::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json_body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            json_body["error"]["message"],
+            "reference images cannot exceed 6"
+        );
+        assert_eq!(json_body["error"]["source"], "proxy");
+        assert_eq!(json_body["error"]["kind"], "too_many_reference_images");
     }
 
     #[tokio::test]
