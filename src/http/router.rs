@@ -11,6 +11,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::Engine;
+use http_body_util::LengthLimitError;
 use serde_json::{Value, json};
 use tokio_util::io::ReaderStream;
 use url::{Url, form_urlencoded};
@@ -68,6 +69,35 @@ fn proxy_error_response(status: StatusCode, message: &str, stage: &str, kind: &s
         )),
     )
         .into_response()
+}
+
+fn request_body_read_error_response(err: &axum::Error) -> (StatusCode, &'static str, &'static str) {
+    let mut source = StdError::source(err);
+    while let Some(err) = source {
+        if err.is::<LengthLimitError>() {
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "request body too large",
+                "request_body_too_large",
+            );
+        }
+        source = err.source();
+    }
+
+    (
+        StatusCode::BAD_GATEWAY,
+        "failed to read request body",
+        "request_body_read_failed",
+    )
+}
+
+fn invalid_json_response() -> Response {
+    proxy_error_response(
+        StatusCode::BAD_REQUEST,
+        "invalid request json body",
+        "parse_request_json",
+        "invalid_json",
+    )
 }
 
 #[derive(Debug)]
@@ -404,17 +434,8 @@ async fn image_generations_action(State(state): State<AppState>, request: Reques
     let request_body = match to_bytes(body, MAX_REQUEST_BODY_BYTES).await {
         Ok(body) => body,
         Err(err) => {
-            let response = (
-                StatusCode::BAD_GATEWAY,
-                Json(proxy_error_json(
-                    502,
-                    "failed to read request body",
-                    "proxy",
-                    "read_request_body",
-                    "request_body_read_failed",
-                )),
-            )
-                .into_response();
+            let (status, message, kind) = request_body_read_error_response(&err);
+            let response = proxy_error_response(status, message, "read_request_body", kind);
             return finalize_admin_response(
                 &state,
                 response,
@@ -425,13 +446,13 @@ async fn image_generations_action(State(state): State<AppState>, request: Reques
                     query: request_query,
                     remote_addr,
                     is_stream: false,
-                    status_code: StatusCode::BAD_GATEWAY.as_u16(),
+                    status_code: status.as_u16(),
                     duration_ms: started_at.elapsed().as_millis() as i64,
                     request_parse_ms: request_parse_started.elapsed().as_millis() as i64,
                     error_source: "proxy".to_string(),
                     error_stage: "read_request_body".to_string(),
-                    error_kind: "request_body_read_failed".to_string(),
-                    error_message: "failed to read request body".to_string(),
+                    error_kind: kind.to_string(),
+                    error_message: message.to_string(),
                     error_detail: err.to_string(),
                     ..Default::default()
                 },
@@ -451,7 +472,7 @@ async fn image_generations_action(State(state): State<AppState>, request: Reques
                 query: request_query,
                 remote_addr,
                 is_stream: false,
-                status_code: StatusCode::BAD_GATEWAY.as_u16(),
+                status_code: StatusCode::BAD_REQUEST.as_u16(),
                 duration_ms: started_at.elapsed().as_millis() as i64,
                 request_parse_ms: request_parse_started.elapsed().as_millis() as i64,
                 error_source: "proxy".to_string(),
@@ -462,17 +483,7 @@ async fn image_generations_action(State(state): State<AppState>, request: Reques
                 ..Default::default()
             };
             request_log.apply_to_entry(&mut admin_entry);
-            let response = (
-                StatusCode::BAD_GATEWAY,
-                Json(proxy_error_json(
-                    502,
-                    "invalid request json body",
-                    "proxy",
-                    "parse_request_json",
-                    "invalid_json",
-                )),
-            )
-                .into_response();
+            let response = invalid_json_response();
             return finalize_admin_response(&state, response, admin_entry).await;
         }
     };
@@ -643,17 +654,8 @@ async fn model_action(
     let request_body = match to_bytes(body, MAX_REQUEST_BODY_BYTES).await {
         Ok(body) => body,
         Err(err) => {
-            let response = (
-                StatusCode::BAD_GATEWAY,
-                Json(proxy_error_json(
-                    502,
-                    "failed to read request body",
-                    "proxy",
-                    "read_request_body",
-                    "request_body_read_failed",
-                )),
-            )
-                .into_response();
+            let (status, message, kind) = request_body_read_error_response(&err);
+            let response = proxy_error_response(status, message, "read_request_body", kind);
             return finalize_admin_response(
                 &state,
                 response,
@@ -664,13 +666,13 @@ async fn model_action(
                     query: request_query,
                     remote_addr,
                     is_stream: false,
-                    status_code: StatusCode::BAD_GATEWAY.as_u16(),
+                    status_code: status.as_u16(),
                     duration_ms: started_at.elapsed().as_millis() as i64,
                     request_parse_ms: request_parse_started.elapsed().as_millis() as i64,
                     error_source: "proxy".to_string(),
                     error_stage: "read_request_body".to_string(),
-                    error_kind: "request_body_read_failed".to_string(),
-                    error_message: "failed to read request body".to_string(),
+                    error_kind: kind.to_string(),
+                    error_message: message.to_string(),
                     error_detail: err.to_string(),
                     ..Default::default()
                 },
@@ -690,7 +692,7 @@ async fn model_action(
                 query: request_query,
                 remote_addr,
                 is_stream: false,
-                status_code: StatusCode::BAD_GATEWAY.as_u16(),
+                status_code: StatusCode::BAD_REQUEST.as_u16(),
                 duration_ms: started_at.elapsed().as_millis() as i64,
                 request_parse_ms: request_parse_started.elapsed().as_millis() as i64,
                 error_source: "proxy".to_string(),
@@ -701,17 +703,7 @@ async fn model_action(
                 ..Default::default()
             };
             request_log.apply_to_entry(&mut admin_entry);
-            let response = (
-                StatusCode::BAD_GATEWAY,
-                Json(proxy_error_json(
-                    502,
-                    "invalid request json body",
-                    "proxy",
-                    "parse_request_json",
-                    "invalid_json",
-                )),
-            )
-                .into_response();
+            let response = invalid_json_response();
             return finalize_admin_response(&state, response, admin_entry).await;
         }
     };

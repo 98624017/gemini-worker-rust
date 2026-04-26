@@ -1092,6 +1092,7 @@ dependencies = [
  "hex",
  "hmac",
  "http",
+ "http-body-util",
  "image",
  "jpeg-encoder",
  "lru",

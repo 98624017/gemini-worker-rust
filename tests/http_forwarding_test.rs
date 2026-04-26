@@ -170,14 +170,92 @@ async fn invalid_request_json_returns_structured_proxy_error() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let json_body: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json_body["error"]["code"], 502);
+    assert_eq!(json_body["error"]["code"], 400);
     assert_eq!(json_body["error"]["message"], "invalid request json body");
     assert_eq!(json_body["error"]["source"], "proxy");
     assert_eq!(json_body["error"]["stage"], "parse_request_json");
     assert_eq!(json_body["error"]["kind"], "invalid_json");
+}
+
+#[tokio::test]
+async fn image_generations_invalid_json_returns_bad_request() {
+    let app = rust_sync_proxy::build_router(rust_sync_proxy::test_config());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/images/generations")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"model":"gpt-image-2","prompt":"cat""#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let json_body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json_body["error"]["code"], 400);
+    assert_eq!(json_body["error"]["message"], "invalid request json body");
+    assert_eq!(json_body["error"]["source"], "proxy");
+    assert_eq!(json_body["error"]["stage"], "parse_request_json");
+    assert_eq!(json_body["error"]["kind"], "invalid_json");
+}
+
+#[tokio::test]
+async fn generate_content_oversized_body_returns_payload_too_large() {
+    let app = rust_sync_proxy::build_router(rust_sync_proxy::test_config());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1beta/models/demo:generateContent")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from("x".repeat(20 * 1024 * 1024 + 1)))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let json_body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json_body["error"]["code"], 413);
+    assert_eq!(json_body["error"]["message"], "request body too large");
+    assert_eq!(json_body["error"]["source"], "proxy");
+    assert_eq!(json_body["error"]["stage"], "read_request_body");
+    assert_eq!(json_body["error"]["kind"], "request_body_too_large");
+}
+
+#[tokio::test]
+async fn image_generations_oversized_body_returns_payload_too_large() {
+    let app = rust_sync_proxy::build_router(rust_sync_proxy::test_config());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/images/generations")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from("x".repeat(20 * 1024 * 1024 + 1)))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let json_body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json_body["error"]["code"], 413);
+    assert_eq!(json_body["error"]["message"], "request body too large");
+    assert_eq!(json_body["error"]["source"], "proxy");
+    assert_eq!(json_body["error"]["stage"], "read_request_body");
+    assert_eq!(json_body["error"]["kind"], "request_body_too_large");
 }
 
 #[tokio::test]

@@ -146,7 +146,7 @@ async fn admin_logs_and_stats_include_stage_duration_fields() {
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
     let auth = format!("Basic {}", STANDARD.encode("user:pw"));
     let logs_response = app
@@ -220,7 +220,7 @@ async fn admin_logs_capture_structured_proxy_error_fields() {
         )
         .await
         .unwrap();
-    assert_eq!(invalid_json_response.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(invalid_json_response.status(), StatusCode::BAD_REQUEST);
 
     let auth = format!("Basic {}", STANDARD.encode("user:pw"));
     let logs_response = app
@@ -239,10 +239,17 @@ async fn admin_logs_capture_structured_proxy_error_fields() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let item = &json["items"][0];
+    assert_eq!(item["statusCode"], 400);
     assert_eq!(item["errorSource"], "proxy");
     assert_eq!(item["errorStage"], "parse_request_json");
     assert_eq!(item["errorKind"], "invalid_json");
     assert_eq!(item["errorMessage"], "invalid request json body");
+    assert!(
+        item["errorDetail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("invalid request json body")
+    );
 }
 
 #[tokio::test]

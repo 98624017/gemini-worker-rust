@@ -9,6 +9,7 @@ axum = "0.8"
 base64 = "0.22"
 bytes = "1.10"
 http = "1.3"
+http-body-util = "0.1"
 mime = "0.3"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 jpeg-encoder = "0.7"
