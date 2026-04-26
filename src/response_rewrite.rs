@@ -262,16 +262,10 @@ pub fn keep_largest_inline_image(mut body: Value) -> Value {
         let mut best_size = 0usize;
 
         for (index, part) in parts.iter().enumerate() {
-            let Some(inline_data) = part.get("inlineData").and_then(Value::as_object) else {
+            let Some(data) = inline_data_payload(part) else {
                 continue;
             };
-            let Some(data) = inline_data.get("data").and_then(Value::as_str) else {
-                continue;
-            };
-            if data.starts_with("http://")
-                || data.starts_with("https://")
-                || data.starts_with("/proxy/image")
-            {
+            if is_url_like(data) {
                 continue;
             }
             if data.len() > best_size {
@@ -281,22 +275,29 @@ pub fn keep_largest_inline_image(mut body: Value) -> Value {
         }
 
         if let Some(best_index) = best_index {
-            let mut retained = Vec::with_capacity(parts.len());
-            for (index, part) in parts.iter().enumerate() {
-                let is_inline_image = part
-                    .get("inlineData")
-                    .and_then(Value::as_object)
-                    .and_then(|inline_data| inline_data.get("data"))
-                    .and_then(Value::as_str)
-                    .is_some();
+            let original_parts = std::mem::take(parts);
+            let mut retained = Vec::with_capacity(original_parts.len());
 
-                if !is_inline_image || index == best_index {
-                    retained.push(part.clone());
+            for (index, part) in original_parts.into_iter().enumerate() {
+                if !is_base64_inline_image_part(&part) || index == best_index {
+                    retained.push(part);
                 }
             }
+
             *parts = retained;
         }
     }
 
     body
+}
+
+fn inline_data_payload(part: &Value) -> Option<&str> {
+    part.get("inlineData")
+        .and_then(Value::as_object)
+        .and_then(|inline_data| inline_data.get("data"))
+        .and_then(Value::as_str)
+}
+
+fn is_base64_inline_image_part(part: &Value) -> bool {
+    inline_data_payload(part).is_some_and(|data| !is_url_like(data))
 }

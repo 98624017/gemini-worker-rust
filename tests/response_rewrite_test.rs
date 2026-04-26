@@ -28,6 +28,36 @@ fn keeps_only_largest_inline_image_per_candidate() {
     assert_eq!(parts[0]["inlineData"]["data"], "aaaaaaaa");
 }
 
+#[test]
+fn keep_largest_inline_image_preserves_text_and_url_inline_data() {
+    let input = json!({
+        "candidates": [{
+            "content": {"parts": [
+                {"text": "before"},
+                {"inlineData": {"mimeType": "image/png", "data": "small"}},
+                {"inlineData": {"mimeType": "image/png", "data": "https://img.example/kept.png"}},
+                {"inlineData": {"mimeType": "image/png", "data": "largest-base64"}},
+                {"text": "after"}
+            ]}
+        }]
+    });
+
+    let output = rust_sync_proxy::response_rewrite::keep_largest_inline_image(input);
+    let parts = output["candidates"][0]["content"]["parts"]
+        .as_array()
+        .unwrap();
+
+    assert_eq!(
+        parts,
+        &vec![
+            json!({"text": "before"}),
+            json!({"inlineData": {"mimeType": "image/png", "data": "https://img.example/kept.png"}}),
+            json!({"inlineData": {"mimeType": "image/png", "data": "largest-base64"}}),
+            json!({"text": "after"})
+        ]
+    );
+}
+
 #[derive(Clone)]
 struct MarkdownImageState {
     png: Vec<u8>,
