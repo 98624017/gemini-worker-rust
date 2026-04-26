@@ -19,7 +19,7 @@ struct InlineDataEntry {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct InlineDataReplacement {
     mime_type: String,
-    data: String,
+    data: Option<String>,
 }
 
 pub fn optimize_inline_data_images(body: &mut Value, config: &Config) -> Result<()> {
@@ -95,26 +95,32 @@ fn optimize_inline_data_images_with_options(
             continue;
         };
 
-        let optimized = crate::image_io::maybe_compress_png_bytes_with_options(
+        let optimized = crate::image_io::maybe_compress_png_bytes_result(
             &image_bytes,
             &entry.mime_type,
             enabled,
             threshold_bytes,
             jpeg_quality,
         )?;
-        if optimized.mime_type == entry.mime_type
-            && optimized.bytes.as_ref() == image_bytes.as_slice()
-        {
-            continue;
-        }
+        let replacement = match optimized {
+            crate::image_io::ImageOptimizationResult::Unchanged { mime_type } => {
+                if mime_type == entry.mime_type {
+                    continue;
+                }
+                InlineDataReplacement {
+                    mime_type,
+                    data: None,
+                }
+            }
+            crate::image_io::ImageOptimizationResult::Reencoded { mime_type, bytes } => {
+                InlineDataReplacement {
+                    mime_type,
+                    data: Some(STANDARD.encode(bytes)),
+                }
+            }
+        };
 
-        replacements.insert(
-            entry,
-            InlineDataReplacement {
-                mime_type: optimized.mime_type,
-                data: STANDARD.encode(optimized.bytes),
-            },
-        );
+        replacements.insert(entry, replacement);
     }
 
     patch_inline_data_base64(body, &replacements);
@@ -209,8 +215,9 @@ fn patch_inline_data_base64(
                             "mimeType".to_string(),
                             Value::String(replacement.mime_type.clone()),
                         );
-                        inline_data
-                            .insert("data".to_string(), Value::String(replacement.data.clone()));
+                        if let Some(data) = &replacement.data {
+                            inline_data.insert("data".to_string(), Value::String(data.clone()));
+                        }
                     }
                 }
             }
@@ -277,5 +284,30 @@ mod tests {
         let inline_data = &body["candidates"][0]["content"]["parts"][0]["inlineData"];
         assert_eq!(inline_data["mimeType"], "image/jpeg");
         assert_ne!(inline_data["data"], png_base64);
+    }
+
+    #[test]
+    fn optimize_inline_data_images_normalizes_mime_without_reencoding_unchanged_data() {
+        let png_base64 = base64::engine::general_purpose::STANDARD.encode([
+            137_u8, 80, 78, 71, 13, 10, 26, 10,
+        ]);
+        let mut body = json!({
+            "candidates": [{
+                "content": {
+                    "parts": [{
+                        "inlineData": {
+                            "mimeType": " IMAGE/PNG ",
+                            "data": png_base64
+                        }
+                    }]
+                }
+            }]
+        });
+
+        optimize_inline_data_images_with_threshold(&mut body, true, 1024).unwrap();
+
+        let inline_data = &body["candidates"][0]["content"]["parts"][0]["inlineData"];
+        assert_eq!(inline_data["mimeType"], "image/png");
+        assert_eq!(inline_data["data"], png_base64);
     }
 }

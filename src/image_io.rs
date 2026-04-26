@@ -34,6 +34,34 @@ pub struct OptimizedImage {
 }
 
 #[derive(Clone, Debug)]
+pub enum ImageOptimizationResult {
+    Unchanged { mime_type: String },
+    Reencoded { mime_type: String, bytes: Bytes },
+}
+
+impl ImageOptimizationResult {
+    pub fn is_unchanged(&self) -> bool {
+        matches!(self, Self::Unchanged { .. })
+    }
+
+    pub fn mime_type(&self) -> &str {
+        match self {
+            Self::Unchanged { mime_type } | Self::Reencoded { mime_type, .. } => mime_type,
+        }
+    }
+
+    pub fn into_optimized_image(self, original: &[u8]) -> OptimizedImage {
+        match self {
+            Self::Unchanged { mime_type } => OptimizedImage {
+                mime_type,
+                bytes: Bytes::copy_from_slice(original),
+            },
+            Self::Reencoded { mime_type, bytes } => OptimizedImage { mime_type, bytes },
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct FetchedBlob {
     pub mime_type: String,
     pub blob: BlobHandle,
@@ -276,11 +304,21 @@ pub fn maybe_compress_png_bytes_with_options(
     threshold_bytes: usize,
     jpeg_quality: u8,
 ) -> Result<OptimizedImage> {
+    maybe_compress_png_bytes_result(bytes, mime_type, enabled, threshold_bytes, jpeg_quality)
+        .map(|result| result.into_optimized_image(bytes))
+}
+
+pub fn maybe_compress_png_bytes_result(
+    bytes: &[u8],
+    mime_type: &str,
+    enabled: bool,
+    threshold_bytes: usize,
+    jpeg_quality: u8,
+) -> Result<ImageOptimizationResult> {
     let normalized_mime = mime_type.trim().to_ascii_lowercase();
     if !enabled || normalized_mime != "image/png" || bytes.len() <= threshold_bytes {
-        return Ok(OptimizedImage {
+        return Ok(ImageOptimizationResult::Unchanged {
             mime_type: normalized_mime,
-            bytes: Bytes::copy_from_slice(bytes),
         });
     }
 
@@ -295,13 +333,12 @@ pub fn maybe_compress_png_bytes_with_options(
     encoder.encode(rgb.as_raw(), width, height, JpegColorType::Rgb)?;
 
     if encoded.len() >= bytes.len() {
-        return Ok(OptimizedImage {
+        return Ok(ImageOptimizationResult::Unchanged {
             mime_type: normalized_mime,
-            bytes: Bytes::copy_from_slice(bytes),
         });
     }
 
-    Ok(OptimizedImage {
+    Ok(ImageOptimizationResult::Reencoded {
         mime_type: "image/jpeg".to_string(),
         bytes: Bytes::from(encoded),
     })

@@ -100,6 +100,70 @@ async fn png_to_webp_timeout_falls_back_to_original_bytes() {
     assert_eq!(optimized.bytes, RawBytes::from(original));
 }
 
+#[test]
+fn compression_result_marks_disabled_optimization_as_unchanged() {
+    let original = vec![137, 80, 78, 71, 13, 10, 26, 10];
+    let optimized = rust_sync_proxy::image_io::maybe_compress_png_bytes_result(
+        &original,
+        "image/png",
+        false,
+        1,
+        97,
+    )
+    .unwrap();
+
+    assert!(optimized.is_unchanged());
+    assert_eq!(optimized.mime_type(), "image/png");
+}
+
+#[test]
+fn compression_result_marks_non_png_as_unchanged() {
+    let original = b"jpeg bytes";
+    let optimized = rust_sync_proxy::image_io::maybe_compress_png_bytes_result(
+        original,
+        "image/jpeg",
+        true,
+        1,
+        97,
+    )
+    .unwrap();
+
+    assert!(optimized.is_unchanged());
+    assert_eq!(optimized.mime_type(), "image/jpeg");
+}
+
+#[test]
+fn compression_result_marks_small_png_as_unchanged() {
+    let original = small_png_bytes();
+    let optimized = rust_sync_proxy::image_io::maybe_compress_png_bytes_result(
+        &original,
+        " image/png ",
+        true,
+        original.len(),
+        97,
+    )
+    .unwrap();
+
+    assert!(optimized.is_unchanged());
+    assert_eq!(optimized.mime_type(), "image/png");
+}
+
+#[test]
+fn compression_result_marks_png_as_unchanged_when_jpeg_is_not_smaller() {
+    let original = small_png_bytes();
+    let optimized = rust_sync_proxy::image_io::maybe_compress_png_bytes_result(
+        &original,
+        "image/png",
+        true,
+        1,
+        97,
+    )
+    .unwrap();
+
+    assert!(optimized.is_unchanged());
+    assert_eq!(optimized.mime_type(), "image/png");
+}
+
 async fn serve_small_png() -> (StatusCode, HeaderMap, Vec<u8>) {
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("image/png"));
@@ -134,6 +198,15 @@ async fn spawn_server(app: Router) -> std::net::SocketAddr {
         axum::serve(listener, app).await.unwrap();
     });
     address
+}
+
+fn small_png_bytes() -> Vec<u8> {
+    let rgba = [255_u8, 0, 0, 255];
+    let mut encoded = Vec::new();
+    PngEncoder::new(&mut encoded)
+        .write_image(&rgba, 1, 1, ColorType::Rgba8.into())
+        .unwrap();
+    encoded
 }
 
 fn noisy_png_bytes(width: u32, height: u32) -> Vec<u8> {
