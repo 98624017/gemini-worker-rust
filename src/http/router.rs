@@ -742,13 +742,12 @@ async fn model_action(
 
     let target_path = format!("/v1beta/models/{rest}");
     let is_aiapidev_upstream = is_aiapidev_base_url(&resolved.base_url);
-    let request = Request::from_parts(parts, Body::from(request_body));
-
     match forward_gemini_request(
         state.clone(),
         resolved,
         target_path,
-        request,
+        parts,
+        parsed_body,
         request_log.clone(),
     )
     .await
@@ -760,7 +759,7 @@ async fn model_action(
             admin_entry.query = request_query;
             admin_entry.remote_addr = remote_addr;
             admin_entry.is_stream = false;
-            admin_entry.request_parse_ms += request_parse_ms;
+            admin_entry.request_parse_ms = request_parse_ms;
             admin_entry.duration_ms = started_at.elapsed().as_millis() as i64;
             finalize_admin_response(&state, response, admin_entry).await
         }
@@ -773,7 +772,7 @@ async fn model_action(
             admin_entry.remote_addr = remote_addr;
             admin_entry.is_stream = false;
             admin_entry.status_code = StatusCode::BAD_GATEWAY.as_u16();
-            admin_entry.request_parse_ms += request_parse_ms;
+            admin_entry.request_parse_ms = request_parse_ms;
             admin_entry.duration_ms = started_at.elapsed().as_millis() as i64;
             let response = if !is_aiapidev_upstream {
                 if let Some(structured) = classify_standard_proxy_error_detail(&failure.error) {
@@ -805,46 +804,21 @@ async fn forward_gemini_request(
     state: AppState,
     resolved: ResolvedUpstream,
     target_path: String,
-    request: Request,
+    parts: axum::http::request::Parts,
+    body: Value,
     request_log: RequestLogSnapshot,
 ) -> Result<(Response, AdminLogEntry), ForwardRequestFailure> {
-    let request_parse_started = Instant::now();
-    let content_type_header = request.headers().get(CONTENT_TYPE).cloned();
-    let accept_header = request.headers().get(ACCEPT).cloned();
-    let request_query = request.uri().query().map(ToOwned::to_owned);
+    let content_type_header = parts.headers.get(CONTENT_TYPE).cloned();
+    let accept_header = parts.headers.get(ACCEPT).cloned();
+    let request_query = parts.uri.query().map(ToOwned::to_owned);
     let admin_enabled = state.admin.is_some();
-    let request_body = to_bytes(request.into_body(), MAX_REQUEST_BODY_BYTES)
-        .await
-        .map_err(|err| {
-            ForwardRequestFailure::new(
-                anyhow!("failed to read request body: {err}"),
-                request_log.base_entry(),
-            )
-        })?;
     let mut admin_entry = request_log.base_entry();
-    let body: Value = match serde_json::from_slice(&request_body) {
-        Ok(body) => body,
-        Err(err) => {
-            admin_entry.request_parse_ms = request_parse_started.elapsed().as_millis() as i64;
-            return Err(ForwardRequestFailure::new(
-                StructuredProxyError::new(
-                    "invalid request json body",
-                    "parse_request_json",
-                    "invalid_json",
-                    format!("invalid request json body: {err}"),
-                ),
-                admin_entry,
-            ));
-        }
-    };
     let output_mode = get_output_mode(request_query.as_deref(), &body);
     admin_entry.output_mode = match output_mode {
         OutputMode::Base64 => "base64".to_string(),
         OutputMode::Url => "url".to_string(),
     };
     let is_aiapidev = is_aiapidev_base_url(&resolved.base_url);
-    let request_parse_ms = request_parse_started.elapsed().as_millis() as i64;
-    admin_entry.request_parse_ms = request_parse_ms;
 
     let admin_stats = state.admin.as_ref().map(|admin| admin.stats());
     let cache_tracking = build_request_cache_tracking(admin_stats);
@@ -2634,31 +2608,35 @@ mod tests {
             response_inline_data_fetch_service: None,
             blob_runtime: Arc::new(crate::test_blob_runtime(8 * 1024 * 1024)),
         };
+        let request_body = bytes::Bytes::from(
+            json!({
+                "contents": [{
+                    "role": "user",
+                    "parts": [{
+                        "inlineData": {
+                            "data": "iVBORw0KGgoAAAANSUhEUgAAAAUA",
+                            "mimeType": "image/png"
+                        }
+                    }]
+                }]
+            })
+            .to_string(),
+        );
+        let parsed_body: Value = serde_json::from_slice(&request_body).unwrap();
         let request = Request::builder()
             .method("POST")
             .uri("/v1beta/models/gemini-3-pro-image-preview:generateContent?output=url")
             .header(CONTENT_TYPE, "application/json")
-            .body(Body::from(
-                json!({
-                    "contents": [{
-                        "role": "user",
-                        "parts": [{
-                            "inlineData": {
-                                "data": "iVBORw0KGgoAAAANSUhEUgAAAAUA",
-                                "mimeType": "image/png"
-                            }
-                        }]
-                    }]
-                })
-                .to_string(),
-            ))
+            .body(Body::from(request_body.clone()))
             .unwrap();
+        let (parts, _) = request.into_parts();
 
         let (response, admin_entry) = forward_gemini_request(
             state,
             resolved,
             "/v1beta/models/gemini-3-pro-image-preview:generateContent".to_string(),
-            request,
+            parts,
+            parsed_body,
             RequestLogSnapshot::default(),
         )
         .await

@@ -6,6 +6,7 @@ use axum::http::header::{AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
 use axum::http::{HeaderMap, Request, StatusCode, Uri};
 use axum::routing::post;
 use axum::{Json, Router};
+use base64::Engine;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -178,6 +179,54 @@ async fn invalid_request_json_returns_structured_proxy_error() {
     assert_eq!(json_body["error"]["source"], "proxy");
     assert_eq!(json_body["error"]["stage"], "parse_request_json");
     assert_eq!(json_body["error"]["kind"], "invalid_json");
+}
+
+#[tokio::test]
+async fn generate_content_invalid_json_is_recorded_once_in_admin_logs() {
+    let mut config = rust_sync_proxy::test_config();
+    config.admin_password = "pw".to_string();
+    let app = rust_sync_proxy::build_router(config);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1beta/models/demo:generateContent")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"contents":["#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let auth = format!(
+        "Basic {}",
+        base64::engine::general_purpose::STANDARD.encode("user:pw")
+    );
+    let logs_response = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/api/logs")
+                .header("authorization", auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(logs_response.status(), StatusCode::OK);
+    let body = to_bytes(logs_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json_body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json_body["items"].as_array().unwrap().len(), 1);
+    let item = &json_body["items"][0];
+    assert_eq!(item["statusCode"], 400);
+    assert_eq!(item["errorStage"], "parse_request_json");
+    assert_eq!(item["errorKind"], "invalid_json");
+    assert_eq!(item["errorMessage"], "invalid request json body");
+    assert!(item["requestParseMs"].as_i64().unwrap_or_default() >= 0);
 }
 
 #[tokio::test]
