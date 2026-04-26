@@ -288,9 +288,8 @@ mod tests {
 
     #[test]
     fn optimize_inline_data_images_normalizes_mime_without_reencoding_unchanged_data() {
-        let png_base64 = base64::engine::general_purpose::STANDARD.encode([
-            137_u8, 80, 78, 71, 13, 10, 26, 10,
-        ]);
+        let png_base64 =
+            base64::engine::general_purpose::STANDARD.encode([137_u8, 80, 78, 71, 13, 10, 26, 10]);
         let mut body = json!({
             "candidates": [{
                 "content": {
