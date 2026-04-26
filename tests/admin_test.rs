@@ -87,6 +87,78 @@ async fn admin_routes_require_basic_auth_and_return_logs() {
 }
 
 #[tokio::test]
+async fn admin_rejects_invalid_basic_auth_variants() {
+    let mut config = rust_sync_proxy::test_config();
+    config.admin_password = "pw".to_string();
+    let app = rust_sync_proxy::build_router(config);
+
+    let wrong_password = format!("Basic {}", STANDARD.encode("user:wrong"));
+    let cases = [
+        wrong_password.as_str(),
+        "Basic wrong-password",
+        "Basic !!!not-base64!!!",
+        "Basic dXNlcm5vY29sb24=",
+        "Bearer dXNlcjpwdw==",
+    ];
+
+    for auth in cases {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/api/logs")
+                    .header("authorization", auth)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "auth={auth}");
+    }
+}
+
+#[tokio::test]
+async fn admin_routes_return_not_found_when_admin_is_disabled() {
+    let app = rust_sync_proxy::build_router(rust_sync_proxy::test_config());
+
+    for uri in [
+        "/admin",
+        "/admin/",
+        "/admin/logs",
+        "/admin/api/logs",
+        "/admin/api/stats",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "uri={uri}");
+    }
+}
+
+#[tokio::test]
+async fn admin_log_buffer_keeps_latest_hundred_entries() {
+    let admin = rust_sync_proxy::admin::AdminState::new("pw".to_string());
+
+    for index in 0..101 {
+        admin
+            .record(rust_sync_proxy::admin::AdminLogEntry {
+                path: format!("/request-{index}"),
+                status_code: 200,
+                ..Default::default()
+            })
+            .await;
+    }
+
+    let logs = admin.snapshot_logs().await;
+    assert_eq!(logs.len(), 100);
+    assert_eq!(logs[0].path, "/request-100");
+    assert_eq!(logs[99].path, "/request-1");
+    assert!(logs.iter().all(|entry| entry.path != "/request-0"));
+}
+
+#[tokio::test]
 async fn admin_stats_track_model_requests() {
     let admin = rust_sync_proxy::admin::AdminState::new("pw".to_string());
     rust_sync_proxy::admin::apply_admin_stats(

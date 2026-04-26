@@ -20,62 +20,12 @@ pub use http::build_router;
 
 use config::Config;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
 
 pub fn test_config() -> Config {
-    Config {
-        port: 8787,
-        upstream_base_url: "https://magic666.top".to_string(),
-        upstream_api_key: "test-upstream-key".to_string(),
-        upstream_timeout: Duration::from_millis(600_000),
-        upstream_connect_timeout: Duration::from_millis(10_000),
-        upstream_tcp_keepalive: Duration::from_millis(30_000),
-        upstream_pool_idle_timeout: Duration::from_millis(15_000),
-        image_host_mode: "legacy".to_string(),
-        allowed_proxy_domains: vec![
-            "ai.kefan.cn".to_string(),
-            "uguu.se".to_string(),
-            ".uguu.se".to_string(),
-            ".aitohumanize.com".to_string(),
-        ],
-        public_base_url: String::new(),
-        external_image_proxy_prefix: String::new(),
-        slow_log_threshold: Duration::from_millis(100_000),
-        proxy_standard_output_urls: true,
-        proxy_special_upstream_urls: true,
-        openai_image_upstream_url_proxy_prefix: String::new(),
-        enable_image_compression: false,
-        enable_request_image_webp_optimization: false,
-        image_compression_jpeg_quality: 97,
-        admin_password: String::new(),
-        image_fetch_timeout: Duration::from_millis(20_000),
-        image_tls_handshake_timeout: Duration::from_millis(15_000),
-        image_fetch_insecure_skip_verify: false,
-        image_fetch_external_proxy_domains: Vec::new(),
-        openai_image_b64_json_upstream_domains: Vec::new(),
-        inline_data_url_cache_dir: String::new(),
-        inline_data_url_cache_ttl: Duration::from_millis(3_600_000),
-        inline_data_url_cache_max_bytes: 1 << 30,
-        inline_data_url_memory_cache_max_bytes: 100 * 1024 * 1024,
-        inline_data_url_background_fetch_wait_timeout: Duration::from_millis(20_000),
-        inline_data_url_background_fetch_total_timeout: Duration::from_millis(90_000),
-        inline_data_url_background_fetch_max_inflight: 128,
-        blob_inline_max_bytes: 8 * 1024 * 1024,
-        blob_request_hot_budget_bytes: 24 * 1024 * 1024,
-        blob_global_hot_budget_bytes: 384 * 1024 * 1024,
-        blob_spill_dir: "/tmp/rust-sync-proxy-blobs".to_string(),
-        upload_timeout: Duration::from_millis(10_000),
-        upload_tls_handshake_timeout: Duration::from_millis(10_000),
-        upload_insecure_skip_verify: false,
-        legacy_uguu_upload_url: "https://uguu.se/upload".to_string(),
-        legacy_kefan_upload_url: "https://ai.kefan.cn/api/upload/local".to_string(),
-        r2_endpoint: String::new(),
-        r2_bucket: String::new(),
-        r2_access_key_id: String::new(),
-        r2_secret_access_key: String::new(),
-        r2_public_base_url: String::new(),
-        r2_object_prefix: "images".to_string(),
-    }
+    let mut config = Config::from_env_map(&std::collections::HashMap::new())
+        .expect("empty config map should produce default test config");
+    config.upstream_api_key = "test-upstream-key".to_string();
+    config
 }
 
 pub fn test_blob_runtime(inline_max_bytes: u64) -> BlobRuntime {

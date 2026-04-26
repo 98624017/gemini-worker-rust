@@ -47,6 +47,15 @@ fn defaults_match_runtime_expectations() {
 }
 
 #[test]
+fn test_config_uses_runtime_defaults_except_test_api_key() {
+    let mut expected = rust_sync_proxy::config::Config::from_env_map(&HashMap::new()).unwrap();
+    expected.upstream_api_key = "test-upstream-key".to_string();
+    let test = rust_sync_proxy::test_config();
+
+    assert_eq!(test, expected);
+}
+
+#[test]
 fn disabled_values_follow_go_semantics() {
     let env = HashMap::from([
         ("PUBLIC_BASE_URL".to_string(), "off".to_string()),
