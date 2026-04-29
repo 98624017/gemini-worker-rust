@@ -43,6 +43,7 @@ use crate::upstream_block_cache::{
 };
 
 const MAX_REQUEST_BODY_BYTES: usize = 20 * 1024 * 1024;
+const MAX_UPSTREAM_BLOCK_CACHE_BODY_BYTES: usize = 64 * 1024;
 const AIAPIDEV_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const AIAPIDEV_OPENAI_IMAGE_POLL_INTERVAL: Duration = Duration::from_secs(10);
 const AIAPIDEV_MAX_POLL_TIME: Duration = Duration::from_secs(450);
@@ -277,6 +278,12 @@ fn build_request_cache_tracking(
 
 fn update_request_cache_hits(entry: &mut AdminLogEntry, tracking: &RequestCacheTracking) {
     entry.request_raw_image_cache_hits = tracking.hit_urls.lock().unwrap().clone();
+}
+
+fn preserves_admin_error_fields(entry: &AdminLogEntry) -> bool {
+    entry.error_source == "proxy"
+        && entry.error_stage == "upstream_block_cache"
+        && entry.error_kind == "cache_hit"
 }
 
 fn build_upstream_client(config: &Config) -> reqwest::Client {
@@ -2107,6 +2114,9 @@ async fn maybe_store_upstream_block_error(
     let Some(key) = key else {
         return;
     };
+    if body.len() > MAX_UPSTREAM_BLOCK_CACHE_BODY_BYTES {
+        return;
+    }
     let Some(reason) = classify_blockable_upstream_error(status, body) else {
         return;
     };
@@ -2191,7 +2201,9 @@ async fn finalize_admin_response(
         entry.response_downstream = response_downstream.clone();
         if let Ok(value) = serde_json::from_slice::<Value>(&body_bytes) {
             entry.finish_reason = admin::extract_finish_reason(&value).unwrap_or_default();
-            apply_admin_error_fields(&mut entry, parts.status, &value, &response_downstream);
+            if !preserves_admin_error_fields(&entry) {
+                apply_admin_error_fields(&mut entry, parts.status, &value, &response_downstream);
+            }
         }
     }
 
