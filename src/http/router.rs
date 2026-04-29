@@ -77,7 +77,7 @@ fn proxy_error_response(status: StatusCode, message: &str, stage: &str, kind: &s
         .into_response()
 }
 
-async fn cacheable_json_error_response(
+async fn upstream_block_cache_json_error_response(
     status: StatusCode,
     value: Value,
     block_cache: Option<&Arc<UpstreamBlockCache>>,
@@ -1694,7 +1694,7 @@ async fn handle_aiapidev_openai_image_response(
                     .filter(|value| !value.trim().is_empty())
             })
             .unwrap_or("aiapidev task failed");
-        return cacheable_json_error_response(
+        return upstream_block_cache_json_error_response(
             StatusCode::BAD_GATEWAY,
             json!({"error": {"code": 502, "message": message}}),
             block_cache,
@@ -1952,7 +1952,7 @@ async fn handle_aiapidev_response(
                     .filter(|value| !value.trim().is_empty())
             })
             .unwrap_or("aiapidev task failed");
-        return cacheable_json_error_response(
+        return upstream_block_cache_json_error_response(
             StatusCode::BAD_GATEWAY,
             json!({"error": {"code": 502, "message": message}}),
             block_cache,
@@ -1972,25 +1972,21 @@ async fn handle_aiapidev_response(
     let mut final_json = match final_json {
         Ok(body) => body,
         Err(err) => {
-            return cacheable_json_error_response(
+            return (
                 StatusCode::BAD_GATEWAY,
-                json!({"error": {"code": 502, "message": err.to_string()}}),
-                block_cache,
-                block_cache_key,
+                Json(json!({"error": {"code": 502, "message": err.to_string()}})),
             )
-            .await;
+                .into_response();
         }
     };
     remove_thought_signatures(&mut final_json);
     final_json = keep_largest_inline_image(final_json);
     if let Err(err) = optimize_inline_data_images(&mut final_json, config) {
-        return cacheable_json_error_response(
+        return (
             StatusCode::BAD_GATEWAY,
-            json!({"error": {"code": 502, "message": err.to_string()}}),
-            block_cache,
-            block_cache_key,
+            Json(json!({"error": {"code": 502, "message": err.to_string()}})),
         )
-        .await;
+            .into_response();
     }
 
     match serde_json::to_vec(&final_json) {
