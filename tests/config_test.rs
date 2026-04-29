@@ -13,10 +13,7 @@ fn defaults_match_runtime_expectations() {
         cfg.upstream_pool_idle_timeout,
         Duration::from_millis(15_000)
     );
-    assert_eq!(
-        cfg.upstream_block_cache_ttl,
-        Duration::from_millis(300_000)
-    );
+    assert_eq!(cfg.upstream_block_cache_ttl, Duration::from_millis(300_000));
     assert_eq!(cfg.upstream_block_cache_max_entries, 1024);
     assert_eq!(cfg.image_host_mode.as_str(), "legacy");
     assert_eq!(cfg.slow_log_threshold, Duration::from_millis(100_000));
@@ -146,10 +143,7 @@ fn upstream_http_timeouts_can_be_overridden_from_env() {
 fn upstream_block_cache_defaults_to_five_minutes_and_1024_entries() {
     let cfg = rust_sync_proxy::config::Config::from_env_map(&HashMap::new()).unwrap();
 
-    assert_eq!(
-        cfg.upstream_block_cache_ttl,
-        Duration::from_millis(300_000)
-    );
+    assert_eq!(cfg.upstream_block_cache_ttl, Duration::from_millis(300_000));
     assert_eq!(cfg.upstream_block_cache_max_entries, 1024);
 }
 
@@ -176,7 +170,10 @@ fn upstream_block_cache_can_be_configured_from_env() {
 fn upstream_block_cache_can_be_disabled_from_env() {
     let env = HashMap::from([
         ("UPSTREAM_BLOCK_CACHE_TTL_MS".to_string(), "0".to_string()),
-        ("UPSTREAM_BLOCK_CACHE_MAX_ENTRIES".to_string(), "0".to_string()),
+        (
+            "UPSTREAM_BLOCK_CACHE_MAX_ENTRIES".to_string(),
+            "0".to_string(),
+        ),
     ]);
 
     let cfg = rust_sync_proxy::config::Config::from_env_map(&env).unwrap();
