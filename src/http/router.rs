@@ -77,6 +77,32 @@ fn proxy_error_response(status: StatusCode, message: &str, stage: &str, kind: &s
         .into_response()
 }
 
+async fn cacheable_json_error_response(
+    status: StatusCode,
+    value: Value,
+    block_cache: Option<&Arc<UpstreamBlockCache>>,
+    block_cache_key: Option<&UpstreamBlockCacheKey>,
+) -> Response {
+    let body = serde_json::to_vec(&value).unwrap_or_else(|_| {
+        json!({"error": {"code": status.as_u16(), "message": "failed to encode error response"}})
+            .to_string()
+            .into_bytes()
+    });
+    let content_type = HeaderValue::from_static("application/json");
+    maybe_store_upstream_block_error(
+        block_cache,
+        block_cache_key,
+        status,
+        content_type.clone(),
+        &body,
+    )
+    .await;
+    let mut response = Response::new(Body::from(body));
+    *response.status_mut() = status;
+    response.headers_mut().insert(CONTENT_TYPE, content_type);
+    response
+}
+
 fn request_body_read_error_response(err: &axum::Error) -> (StatusCode, &'static str, &'static str) {
     let mut source = StdError::source(err);
     while let Some(err) = source {
@@ -905,6 +931,8 @@ async fn forward_gemini_request(
             &state.image_client,
             state.response_inline_data_fetch_service.as_ref(),
             state.config.as_ref(),
+            state.upstream_block_cache.as_ref(),
+            block_cache_key.as_ref(),
         )
         .await;
         let upstream_build_ms = upstream_build_started.elapsed().as_millis() as i64;
@@ -1128,6 +1156,8 @@ async fn forward_openai_image_request(
             request_body,
             &state.upstream_client,
             state.config.as_ref(),
+            state.upstream_block_cache.as_ref(),
+            block_cache_key.as_ref(),
         )
         .await;
 
@@ -1573,6 +1603,8 @@ async fn handle_aiapidev_openai_image_response(
     request_body: Value,
     upstream_client: &reqwest::Client,
     config: &Config,
+    block_cache: Option<&Arc<UpstreamBlockCache>>,
+    block_cache_key: Option<&UpstreamBlockCacheKey>,
 ) -> Response {
     let upstream_url =
         match build_upstream_url(&resolved.base_url, "/v1/images/generations", request_query) {
@@ -1605,7 +1637,7 @@ async fn handle_aiapidev_openai_image_response(
     };
 
     if !create_response.status().is_success() {
-        return raw_reqwest_response(create_response).await;
+        return raw_reqwest_response(create_response, block_cache, block_cache_key).await;
     }
 
     let created_task: Value = match create_response.json().await {
@@ -1632,11 +1664,18 @@ async fn handle_aiapidev_openai_image_response(
             .into_response();
     };
 
-    let task_body =
-        match poll_aiapidev_openai_image_task(upstream_client, resolved, &request_id).await {
-            Ok(body) => body,
-            Err(response) => return response,
-        };
+    let task_body = match poll_aiapidev_openai_image_task(
+        upstream_client,
+        resolved,
+        &request_id,
+        block_cache,
+        block_cache_key,
+    )
+    .await
+    {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
     let status = task_body
         .get("status")
         .and_then(Value::as_str)
@@ -1655,11 +1694,13 @@ async fn handle_aiapidev_openai_image_response(
                     .filter(|value| !value.trim().is_empty())
             })
             .unwrap_or("aiapidev task failed");
-        return (
+        return cacheable_json_error_response(
             StatusCode::BAD_GATEWAY,
-            Json(json!({"error": {"code": 502, "message": message}})),
+            json!({"error": {"code": 502, "message": message}}),
+            block_cache,
+            block_cache_key,
         )
-            .into_response();
+        .await;
     }
 
     let image_urls = extract_aiapidev_image_urls(&task_body);
@@ -1711,6 +1752,8 @@ async fn poll_aiapidev_openai_image_task(
     upstream_client: &reqwest::Client,
     resolved: &ResolvedUpstream,
     request_id: &str,
+    block_cache: Option<&Arc<UpstreamBlockCache>>,
+    block_cache_key: Option<&UpstreamBlockCacheKey>,
 ) -> std::result::Result<Value, Response> {
     let deadline = Instant::now() + AIAPIDEV_MAX_POLL_TIME;
     let mut consecutive_failures = 0usize;
@@ -1758,11 +1801,11 @@ async fn poll_aiapidev_openai_image_task(
 
         if !response.status().is_success() {
             if !is_aiapidev_retryable_poll_status(response.status()) {
-                return Err(raw_reqwest_response(response).await);
+                return Err(raw_reqwest_response(response, block_cache, block_cache_key).await);
             }
             consecutive_failures += 1;
             if consecutive_failures >= AIAPIDEV_MAX_CONSECUTIVE_POLL_FAILURES {
-                return Err(raw_reqwest_response(response).await);
+                return Err(raw_reqwest_response(response, block_cache, block_cache_key).await);
             }
             if Instant::now() >= deadline {
                 return Err(proxy_error_response(
@@ -1818,6 +1861,8 @@ async fn handle_aiapidev_response(
     image_client: &reqwest::Client,
     fetch_service: Option<&Arc<InlineDataUrlFetchService>>,
     config: &Config,
+    block_cache: Option<&Arc<UpstreamBlockCache>>,
+    block_cache_key: Option<&UpstreamBlockCacheKey>,
 ) -> Response {
     let upstream_url = match build_upstream_url(&resolved.base_url, target_path, request_query) {
         Ok(url) => url,
@@ -1849,7 +1894,7 @@ async fn handle_aiapidev_response(
     };
 
     if !create_response.status().is_success() {
-        return raw_reqwest_response(create_response).await;
+        return raw_reqwest_response(create_response, block_cache, block_cache_key).await;
     }
 
     let created_task: Value = match create_response.json().await {
@@ -1881,6 +1926,8 @@ async fn handle_aiapidev_response(
         resolved,
         &request_id,
         AIAPIDEV_POLL_INTERVAL,
+        block_cache,
+        block_cache_key,
     )
     .await
     {
@@ -1905,11 +1952,13 @@ async fn handle_aiapidev_response(
                     .filter(|value| !value.trim().is_empty())
             })
             .unwrap_or("aiapidev task failed");
-        return (
+        return cacheable_json_error_response(
             StatusCode::BAD_GATEWAY,
-            Json(json!({"error": {"code": 502, "message": message}})),
+            json!({"error": {"code": 502, "message": message}}),
+            block_cache,
+            block_cache_key,
         )
-            .into_response();
+        .await;
     }
 
     let final_json = normalize_aiapidev_task_response(
@@ -1923,21 +1972,25 @@ async fn handle_aiapidev_response(
     let mut final_json = match final_json {
         Ok(body) => body,
         Err(err) => {
-            return (
+            return cacheable_json_error_response(
                 StatusCode::BAD_GATEWAY,
-                Json(json!({"error": {"code": 502, "message": err.to_string()}})),
+                json!({"error": {"code": 502, "message": err.to_string()}}),
+                block_cache,
+                block_cache_key,
             )
-                .into_response();
+            .await;
         }
     };
     remove_thought_signatures(&mut final_json);
     final_json = keep_largest_inline_image(final_json);
     if let Err(err) = optimize_inline_data_images(&mut final_json, config) {
-        return (
+        return cacheable_json_error_response(
             StatusCode::BAD_GATEWAY,
-            Json(json!({"error": {"code": 502, "message": err.to_string()}})),
+            json!({"error": {"code": 502, "message": err.to_string()}}),
+            block_cache,
+            block_cache_key,
         )
-            .into_response();
+        .await;
     }
 
     match serde_json::to_vec(&final_json) {
@@ -1962,6 +2015,8 @@ async fn poll_aiapidev_task(
     resolved: &ResolvedUpstream,
     request_id: &str,
     poll_interval: Duration,
+    block_cache: Option<&Arc<UpstreamBlockCache>>,
+    block_cache_key: Option<&UpstreamBlockCacheKey>,
 ) -> std::result::Result<Value, Response> {
     let deadline = Instant::now() + AIAPIDEV_MAX_POLL_TIME;
     let mut consecutive_failures = 0usize;
@@ -2009,11 +2064,11 @@ async fn poll_aiapidev_task(
 
         if !response.status().is_success() {
             if !is_aiapidev_retryable_poll_status(response.status()) {
-                return Err(raw_reqwest_response(response).await);
+                return Err(raw_reqwest_response(response, block_cache, block_cache_key).await);
             }
             consecutive_failures += 1;
             if consecutive_failures >= AIAPIDEV_MAX_CONSECUTIVE_POLL_FAILURES {
-                return Err(raw_reqwest_response(response).await);
+                return Err(raw_reqwest_response(response, block_cache, block_cache_key).await);
             }
             if Instant::now() >= deadline {
                 return Err(proxy_error_response(
@@ -2079,7 +2134,11 @@ fn is_aiapidev_retryable_poll_status(status: StatusCode) -> bool {
     )
 }
 
-async fn raw_reqwest_response(upstream_response: reqwest::Response) -> Response {
+async fn raw_reqwest_response(
+    upstream_response: reqwest::Response,
+    block_cache: Option<&Arc<UpstreamBlockCache>>,
+    block_cache_key: Option<&UpstreamBlockCacheKey>,
+) -> Response {
     let status = upstream_response.status();
     let content_type = upstream_response
         .headers()
@@ -2096,6 +2155,16 @@ async fn raw_reqwest_response(upstream_response: reqwest::Response) -> Response 
                 .into_response();
         }
     };
+
+    let response_status = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    maybe_store_upstream_block_error(
+        block_cache,
+        block_cache_key,
+        response_status,
+        content_type.clone(),
+        &body_bytes,
+    )
+    .await;
 
     raw_reqwest_response_with_body(status, content_type, body_bytes.to_vec())
 }
@@ -2598,6 +2667,8 @@ mod tests {
             &reqwest::Client::new(),
             None,
             &crate::test_config(),
+            None,
+            None,
         )
         .await;
 
@@ -2674,6 +2745,8 @@ mod tests {
             }),
             &reqwest::Client::new(),
             &config,
+            None,
+            None,
         )
         .await;
 
@@ -3378,6 +3451,8 @@ mod tests {
             &reqwest::Client::new(),
             None,
             &crate::test_config(),
+            None,
+            None,
         )
         .await;
 
@@ -3414,6 +3489,8 @@ mod tests {
             &reqwest::Client::new(),
             None,
             &crate::test_config(),
+            None,
+            None,
         )
         .await;
 
@@ -3462,6 +3539,8 @@ mod tests {
             &reqwest::Client::new(),
             None,
             &crate::test_config(),
+            None,
+            None,
         )
         .await;
 
@@ -3524,6 +3603,8 @@ mod tests {
             &reqwest::Client::new(),
             None,
             &crate::test_config(),
+            None,
+            None,
         )
         .await;
 
@@ -3595,6 +3676,8 @@ mod tests {
             &reqwest::Client::new(),
             None,
             &crate::test_config(),
+            None,
+            None,
         )
         .await;
 
