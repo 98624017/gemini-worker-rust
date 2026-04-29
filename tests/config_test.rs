@@ -13,6 +13,11 @@ fn defaults_match_runtime_expectations() {
         cfg.upstream_pool_idle_timeout,
         Duration::from_millis(15_000)
     );
+    assert_eq!(
+        cfg.upstream_block_cache_ttl,
+        Duration::from_millis(300_000)
+    );
+    assert_eq!(cfg.upstream_block_cache_max_entries, 1024);
     assert_eq!(cfg.image_host_mode.as_str(), "legacy");
     assert_eq!(cfg.slow_log_threshold, Duration::from_millis(100_000));
     assert_eq!(cfg.image_fetch_timeout, Duration::from_millis(20_000));
@@ -135,6 +140,49 @@ fn upstream_http_timeouts_can_be_overridden_from_env() {
     assert_eq!(cfg.upstream_connect_timeout, Duration::from_millis(4_321));
     assert_eq!(cfg.upstream_tcp_keepalive, Duration::from_millis(21_000));
     assert_eq!(cfg.upstream_pool_idle_timeout, Duration::from_millis(9_000));
+}
+
+#[test]
+fn upstream_block_cache_defaults_to_five_minutes_and_1024_entries() {
+    let cfg = rust_sync_proxy::config::Config::from_env_map(&HashMap::new()).unwrap();
+
+    assert_eq!(
+        cfg.upstream_block_cache_ttl,
+        Duration::from_millis(300_000)
+    );
+    assert_eq!(cfg.upstream_block_cache_max_entries, 1024);
+}
+
+#[test]
+fn upstream_block_cache_can_be_configured_from_env() {
+    let env = HashMap::from([
+        (
+            "UPSTREAM_BLOCK_CACHE_TTL_MS".to_string(),
+            "12345".to_string(),
+        ),
+        (
+            "UPSTREAM_BLOCK_CACHE_MAX_ENTRIES".to_string(),
+            "17".to_string(),
+        ),
+    ]);
+
+    let cfg = rust_sync_proxy::config::Config::from_env_map(&env).unwrap();
+
+    assert_eq!(cfg.upstream_block_cache_ttl, Duration::from_millis(12_345));
+    assert_eq!(cfg.upstream_block_cache_max_entries, 17);
+}
+
+#[test]
+fn upstream_block_cache_can_be_disabled_from_env() {
+    let env = HashMap::from([
+        ("UPSTREAM_BLOCK_CACHE_TTL_MS".to_string(), "0".to_string()),
+        ("UPSTREAM_BLOCK_CACHE_MAX_ENTRIES".to_string(), "0".to_string()),
+    ]);
+
+    let cfg = rust_sync_proxy::config::Config::from_env_map(&env).unwrap();
+
+    assert_eq!(cfg.upstream_block_cache_ttl, Duration::from_millis(0));
+    assert_eq!(cfg.upstream_block_cache_max_entries, 0);
 }
 
 #[test]
