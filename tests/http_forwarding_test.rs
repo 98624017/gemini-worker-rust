@@ -981,6 +981,104 @@ async fn image_generations_returns_bad_gateway_when_upstream_data_is_empty() {
     assert_eq!(*state.upload_count.lock().await, 0);
 }
 
+#[tokio::test]
+async fn image_generations_reuses_cached_upstream_block_error() {
+    let state = TestState::default();
+    let server = Router::new()
+        .route(
+            "/v1/images/generations",
+            post(mock_openai_image_generation_image_unsafe),
+        )
+        .with_state(state.clone());
+    let server_addr = spawn_server(server).await;
+
+    let mut config = rust_sync_proxy::test_config();
+    config.upstream_base_url = format!("http://{server_addr}");
+    config.upstream_api_key = "env-key".to_string();
+    let app = rust_sync_proxy::build_router(config);
+
+    let body = json!({
+        "model": "gpt-image-2",
+        "prompt": "blocked image prompt",
+        "response_format": "url"
+    })
+    .to_string();
+
+    let first = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/images/generations")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::BAD_GATEWAY);
+    let first_body = to_bytes(first.into_body(), usize::MAX).await.unwrap();
+
+    let second = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/images/generations")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(second.status(), StatusCode::BAD_GATEWAY);
+    let second_body = to_bytes(second.into_body(), usize::MAX).await.unwrap();
+
+    assert_eq!(second_body, first_body);
+    assert_eq!(state.upstream_requests.lock().await.len(), 1);
+}
+
+#[tokio::test]
+async fn upstream_block_cache_ttl_zero_disables_cache() {
+    let state = TestState::default();
+    let server = Router::new()
+        .route(
+            "/v1/images/generations",
+            post(mock_openai_image_generation_image_unsafe),
+        )
+        .with_state(state.clone());
+    let server_addr = spawn_server(server).await;
+
+    let mut config = rust_sync_proxy::test_config();
+    config.upstream_base_url = format!("http://{server_addr}");
+    config.upstream_api_key = "env-key".to_string();
+    config.upstream_block_cache_ttl = std::time::Duration::from_millis(0);
+    let app = rust_sync_proxy::build_router(config);
+
+    let body = json!({
+        "model": "gpt-image-2",
+        "prompt": "blocked image prompt"
+    })
+    .to_string();
+
+    for _ in 0..2 {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/images/generations")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    assert_eq!(state.upstream_requests.lock().await.len(), 2);
+}
+
 async fn mock_generate_content(
     State(state): State<TestState>,
     headers: HeaderMap,
@@ -1104,6 +1202,22 @@ async fn mock_openai_image_generation_empty_data(
         "created": 1_776_663_103,
         "data": []
     }))
+}
+
+async fn mock_openai_image_generation_image_unsafe(
+    State(state): State<TestState>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> (StatusCode, Json<Value>) {
+    let _ = mock_openai_image_generation(State(state), headers, uri, body).await;
+    (
+        StatusCode::BAD_GATEWAY,
+        Json(json!({
+            "error_code": "image_unsafe",
+            "message": "The generated images appear to be unsafe. Try modifying the prompts or the seeds."
+        })),
+    )
 }
 
 async fn mock_openai_image_generation_direct_url(

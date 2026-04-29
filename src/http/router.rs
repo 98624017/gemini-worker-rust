@@ -571,6 +571,23 @@ async fn image_generations_action(State(state): State<AppState>, request: Reques
                 return finalize_admin_response(&state, response, admin_entry).await;
             }
         };
+    let block_cache_key =
+        UpstreamBlockCacheKey::new(&request_path, &resolved.base_url, &normalized_body);
+    if let Some(cache) = state.upstream_block_cache.as_ref() {
+        if let Some(hit) = cache.get(&block_cache_key).await {
+            let mut admin_entry = block_cache_hit_entry(&request_log, &hit);
+            admin_entry.created_at = created_at;
+            admin_entry.method = request_method;
+            admin_entry.path = request_path;
+            admin_entry.query = request_query;
+            admin_entry.remote_addr = remote_addr;
+            admin_entry.is_stream = false;
+            admin_entry.request_parse_ms = request_parse_started.elapsed().as_millis() as i64;
+            admin_entry.duration_ms = started_at.elapsed().as_millis() as i64;
+            let response = response_from_block_cache_hit(hit);
+            return finalize_admin_response(&state, response, admin_entry).await;
+        }
+    }
     let request_parse_ms = request_parse_started.elapsed().as_millis() as i64;
 
     match forward_openai_image_request(
@@ -583,6 +600,7 @@ async fn image_generations_action(State(state): State<AppState>, request: Reques
             Some(request_query.clone())
         },
         request_log.clone(),
+        Some(block_cache_key),
     )
     .await
     {
@@ -1069,6 +1087,7 @@ async fn forward_openai_image_request(
     request_body: Value,
     request_query: Option<String>,
     request_log: RequestLogSnapshot,
+    block_cache_key: Option<UpstreamBlockCacheKey>,
 ) -> Result<(Response, AdminLogEntry), ForwardRequestFailure> {
     let admin_enabled = state.admin.is_some();
     let mut admin_entry = request_log.base_entry();
@@ -1163,6 +1182,8 @@ async fn forward_openai_image_request(
             upstream_response,
             state.uploader.as_ref(),
             state.config.as_ref(),
+            state.upstream_block_cache.as_ref(),
+            block_cache_key.as_ref(),
         )
         .await
         .map_err(|err| ForwardRequestFailure::new(err, admin_entry.clone()))?;
@@ -1203,6 +1224,8 @@ async fn forward_openai_image_request(
         upstream_response,
         state.uploader.as_ref(),
         state.config.as_ref(),
+        state.upstream_block_cache.as_ref(),
+        block_cache_key.as_ref(),
     )
     .await
     .map_err(|err| ForwardRequestFailure::new(err, admin_entry.clone()))?;
@@ -1412,6 +1435,8 @@ async fn handle_openai_image_response(
     upstream_response: reqwest::Response,
     uploader: &Uploader,
     config: &Config,
+    block_cache: Option<&Arc<UpstreamBlockCache>>,
+    block_cache_key: Option<&UpstreamBlockCacheKey>,
 ) -> Result<(Response, ResponseStageDurations)> {
     let response_started = Instant::now();
     let status = upstream_response.status();
@@ -1430,6 +1455,15 @@ async fn handle_openai_image_response(
     })?;
 
     if !status.is_success() {
+        let response_status = StatusCode::from_u16(status.as_u16())?;
+        maybe_store_upstream_block_error(
+            block_cache,
+            block_cache_key,
+            response_status,
+            content_type.clone(),
+            &body_bytes,
+        )
+        .await;
         let response = raw_reqwest_response_with_body(status, content_type, body_bytes.to_vec());
         return Ok((
             response,
@@ -2824,6 +2858,7 @@ mod tests {
             }),
             None,
             RequestLogSnapshot::default(),
+            None,
         )
         .await
         .unwrap();
@@ -2944,6 +2979,7 @@ mod tests {
             }),
             None,
             RequestLogSnapshot::default(),
+            None,
         )
         .await
         .unwrap();
@@ -3005,6 +3041,7 @@ mod tests {
             }),
             None,
             RequestLogSnapshot::default(),
+            None,
         )
         .await
         .unwrap();
@@ -3073,6 +3110,7 @@ mod tests {
             }),
             None,
             RequestLogSnapshot::default(),
+            None,
         )
         .await
         .unwrap();
@@ -3163,6 +3201,7 @@ mod tests {
             }),
             None,
             RequestLogSnapshot::default(),
+            None,
         )
         .await
         .unwrap();
