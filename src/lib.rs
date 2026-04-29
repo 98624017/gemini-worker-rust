@@ -14,6 +14,7 @@ pub mod response_materialize;
 pub mod response_rewrite;
 pub mod upload;
 pub mod upstream;
+pub mod upstream_block_cache;
 
 pub use blob_runtime::{BlobHandle, BlobRuntime, BlobRuntimeConfig, BlobStorage};
 pub use http::build_router;
