@@ -196,6 +196,10 @@ mod tests {
             Some("upstream_moderation")
         );
         assert_eq!(
+            classify_blockable_upstream_error(StatusCode::BAD_REQUEST, b"content blocked"),
+            Some("content_blocked")
+        );
+        assert_eq!(
             classify_blockable_upstream_error(StatusCode::TOO_MANY_REQUESTS, b"image_unsafe"),
             None
         );
@@ -227,6 +231,7 @@ mod tests {
 
         let hit = cache.get(&key).await.expect("cache hit before ttl");
         assert_eq!(hit.status, StatusCode::BAD_GATEWAY);
+        assert_eq!(hit.content_type, HeaderValue::from_static("application/json"));
         assert_eq!(hit.reason, "content_blocked");
         assert_eq!(
             hit.body,
