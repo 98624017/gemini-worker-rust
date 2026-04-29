@@ -395,6 +395,67 @@ async fn upstream_json_error_preserves_message_and_adds_proxy_metadata() {
 }
 
 #[tokio::test]
+async fn generate_content_reuses_cached_upstream_block_error() {
+    let state = TestState::default();
+    let server = Router::new()
+        .route(
+            "/v1beta/models/demo:generateContent",
+            post(mock_generate_content_content_blocked),
+        )
+        .with_state(state.clone());
+    let server_addr = spawn_server(server).await;
+
+    let mut config = rust_sync_proxy::test_config();
+    config.upstream_base_url = format!("http://{server_addr}");
+    config.upstream_api_key = "first-key".to_string();
+    let app = rust_sync_proxy::build_router(config);
+
+    let body = json!({
+        "contents": [{
+            "parts": [{
+                "text": "blocked prompt"
+            }]
+        }]
+    })
+    .to_string();
+
+    let first = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1beta/models/demo:generateContent")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::BAD_GATEWAY);
+    let first_body = to_bytes(first.into_body(), usize::MAX).await.unwrap();
+
+    let second = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1beta/models/demo:generateContent")
+                .header(CONTENT_TYPE, "application/json")
+                .header("x-goog-api-key", format!("http://{server_addr}|second-key"))
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(second.status(), StatusCode::BAD_GATEWAY);
+    let second_body = to_bytes(second.into_body(), usize::MAX).await.unwrap();
+
+    assert_eq!(second_body, first_body);
+    let upstream_requests = state.upstream_requests.lock().await.clone();
+    assert_eq!(upstream_requests.len(), 1);
+    assert_eq!(upstream_requests[0].api_key, "first-key");
+}
+
+#[tokio::test]
 async fn dual_upstream_header_routes_4k_requests_to_second_standard_upstream() {
     let first_state = TestState::default();
     let first_server = Router::new()
@@ -836,6 +897,23 @@ async fn mock_generate_content(
             }
         }]
     }))
+}
+
+async fn mock_generate_content_content_blocked(
+    State(state): State<TestState>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> (StatusCode, Json<Value>) {
+    let _ = mock_generate_content(State(state), headers, uri, body).await;
+    (
+        StatusCode::BAD_GATEWAY,
+        Json(json!({
+            "error": {
+                "message": "content blocked: {\"error_code\":\"image_unsafe\",\"message\":\"unsafe\"}"
+            }
+        })),
+    )
 }
 
 async fn mock_openai_image_generation(

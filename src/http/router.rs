@@ -11,6 +11,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::Engine;
+use bytes::Bytes;
 use http_body_util::LengthLimitError;
 use serde_json::{Value, json};
 use tokio_util::io::ReaderStream;
@@ -35,6 +36,10 @@ use crate::upload::{Uploader, wrap_external_proxy_url};
 use crate::upstream::{
     ResolvedUpstream, is_aiapidev_base_url, is_happyapi_base_url,
     resolve_upstream_for_request_from_header_map, rewrite_aiapidev_model_path,
+};
+use crate::upstream_block_cache::{
+    CachedBlockResponse, UpstreamBlockCache, UpstreamBlockCacheKey,
+    classify_blockable_upstream_error,
 };
 
 const MAX_REQUEST_BODY_BYTES: usize = 20 * 1024 * 1024;
@@ -351,6 +356,7 @@ struct AppState {
     request_inline_data_fetch_service: Option<Arc<InlineDataUrlFetchService>>,
     response_inline_data_fetch_service: Option<Arc<InlineDataUrlFetchService>>,
     blob_runtime: Arc<BlobRuntime>,
+    upstream_block_cache: Option<Arc<UpstreamBlockCache>>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -394,6 +400,11 @@ pub fn build_router(config: Config) -> Router {
         global_hot_budget_bytes: config.blob_global_hot_budget_bytes,
         spill_dir: config.blob_spill_dir.clone().into(),
     }));
+    let upstream_block_cache = UpstreamBlockCache::new(
+        config.upstream_block_cache_ttl,
+        config.upstream_block_cache_max_entries,
+    )
+    .map(Arc::new);
     let state = AppState {
         uploader: Arc::new(Uploader::new(upload_client, config.clone())),
         config: Arc::new(config),
@@ -403,6 +414,7 @@ pub fn build_router(config: Config) -> Router {
         request_inline_data_fetch_service,
         response_inline_data_fetch_service,
         blob_runtime,
+        upstream_block_cache,
     };
 
     Router::new()
@@ -738,8 +750,25 @@ async fn model_action(
             return finalize_admin_response(&state, response, admin_entry).await;
         }
     };
-    let request_parse_ms = request_parse_started.elapsed().as_millis() as i64;
+    let block_cache_key =
+        UpstreamBlockCacheKey::new(&request_path, &resolved.base_url, &parsed_body);
+    if let Some(cache) = state.upstream_block_cache.as_ref() {
+        if let Some(hit) = cache.get(&block_cache_key).await {
+            let mut admin_entry = block_cache_hit_entry(&request_log, &hit);
+            admin_entry.created_at = created_at;
+            admin_entry.method = request_method;
+            admin_entry.path = request_path;
+            admin_entry.query = request_query;
+            admin_entry.remote_addr = remote_addr;
+            admin_entry.is_stream = false;
+            admin_entry.request_parse_ms = request_parse_started.elapsed().as_millis() as i64;
+            admin_entry.duration_ms = started_at.elapsed().as_millis() as i64;
+            let response = response_from_block_cache_hit(hit);
+            return finalize_admin_response(&state, response, admin_entry).await;
+        }
+    }
 
+    let request_parse_ms = request_parse_started.elapsed().as_millis() as i64;
     let target_path = format!("/v1beta/models/{rest}");
     let is_aiapidev_upstream = is_aiapidev_base_url(&resolved.base_url);
     match forward_gemini_request(
@@ -749,6 +778,7 @@ async fn model_action(
         parts,
         parsed_body,
         request_log.clone(),
+        Some(block_cache_key),
     )
     .await
     {
@@ -807,6 +837,7 @@ async fn forward_gemini_request(
     parts: axum::http::request::Parts,
     body: Value,
     request_log: RequestLogSnapshot,
+    block_cache_key: Option<UpstreamBlockCacheKey>,
 ) -> Result<(Response, AdminLogEntry), ForwardRequestFailure> {
     let content_type_header = parts.headers.get(CONTENT_TYPE).cloned();
     let accept_header = parts.headers.get(ACCEPT).cloned();
@@ -1011,6 +1042,8 @@ async fn forward_gemini_request(
         state.uploader.as_ref(),
         state.blob_runtime.as_ref(),
         state.config.as_ref(),
+        state.upstream_block_cache.as_ref(),
+        block_cache_key.as_ref(),
     )
     .await
     {
@@ -1278,6 +1311,8 @@ async fn handle_non_stream_response(
     uploader: &Uploader,
     blob_runtime: &BlobRuntime,
     config: &Config,
+    block_cache: Option<&Arc<UpstreamBlockCache>>,
+    block_cache_key: Option<&UpstreamBlockCacheKey>,
 ) -> Result<(Response, ResponseStageDurations)> {
     let response_started = Instant::now();
     let status = upstream_response.status();
@@ -1296,11 +1331,19 @@ async fn handle_non_stream_response(
     })?;
 
     if !status.is_success() {
-        let response_body = annotate_upstream_error_json(status, &body_bytes)
-            .map(Body::from)
-            .unwrap_or_else(|| Body::from(body_bytes));
-        let mut response = Response::new(response_body);
-        *response.status_mut() = StatusCode::from_u16(status.as_u16())?;
+        let response_body_bytes = annotate_upstream_error_json(status, &body_bytes)
+            .unwrap_or_else(|| body_bytes.to_vec());
+        let response_status = StatusCode::from_u16(status.as_u16())?;
+        maybe_store_upstream_block_error(
+            block_cache,
+            block_cache_key,
+            response_status,
+            content_type.clone(),
+            &response_body_bytes,
+        )
+        .await;
+        let mut response = Response::new(Body::from(response_body_bytes));
+        *response.status_mut() = response_status;
         response.headers_mut().insert(CONTENT_TYPE, content_type);
         return Ok((
             response,
@@ -2028,6 +2071,58 @@ fn raw_reqwest_response_with_body(
     response
 }
 
+fn response_from_block_cache_hit(hit: crate::upstream_block_cache::BlockCacheHit) -> Response {
+    let mut response = Response::new(Body::from(hit.body));
+    *response.status_mut() = hit.status;
+    response
+        .headers_mut()
+        .insert(CONTENT_TYPE, hit.content_type);
+    response
+}
+
+fn block_cache_hit_entry(
+    request_log: &RequestLogSnapshot,
+    hit: &crate::upstream_block_cache::BlockCacheHit,
+) -> AdminLogEntry {
+    let mut entry = request_log.base_entry();
+    entry.status_code = hit.status.as_u16();
+    entry.error_source = "proxy".to_string();
+    entry.error_stage = "upstream_block_cache".to_string();
+    entry.error_kind = "cache_hit".to_string();
+    entry.error_message = "upstream block cache hit".to_string();
+    entry.error_detail = format!("upstream_block_cache_hit:{}", hit.reason);
+    entry
+}
+
+async fn maybe_store_upstream_block_error(
+    cache: Option<&Arc<UpstreamBlockCache>>,
+    key: Option<&UpstreamBlockCacheKey>,
+    status: StatusCode,
+    content_type: HeaderValue,
+    body: &[u8],
+) {
+    let Some(cache) = cache else {
+        return;
+    };
+    let Some(key) = key else {
+        return;
+    };
+    let Some(reason) = classify_blockable_upstream_error(status, body) else {
+        return;
+    };
+    cache
+        .insert(
+            key.clone(),
+            CachedBlockResponse {
+                status,
+                content_type,
+                body: Bytes::copy_from_slice(body),
+                reason,
+            },
+        )
+        .await;
+}
+
 async fn admin_root(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if let Some(response) = authorize_admin(&state, &headers).await {
         return response;
@@ -2607,6 +2702,7 @@ mod tests {
             request_inline_data_fetch_service: None,
             response_inline_data_fetch_service: None,
             blob_runtime: Arc::new(crate::test_blob_runtime(8 * 1024 * 1024)),
+            upstream_block_cache: None,
         };
         let request_body = bytes::Bytes::from(
             json!({
@@ -2638,6 +2734,7 @@ mod tests {
             parts,
             parsed_body,
             RequestLogSnapshot::default(),
+            None,
         )
         .await
         .unwrap();
@@ -2701,6 +2798,7 @@ mod tests {
             request_inline_data_fetch_service: None,
             response_inline_data_fetch_service: None,
             blob_runtime: Arc::new(crate::test_blob_runtime(8 * 1024 * 1024)),
+            upstream_block_cache: None,
         };
 
         let (response, admin_entry) = forward_openai_image_request(
@@ -2817,6 +2915,7 @@ mod tests {
             request_inline_data_fetch_service: None,
             response_inline_data_fetch_service: None,
             blob_runtime: Arc::new(crate::test_blob_runtime(8 * 1024 * 1024)),
+            upstream_block_cache: None,
         };
 
         let (response, _admin_entry) = forward_openai_image_request(
@@ -2946,6 +3045,7 @@ mod tests {
             request_inline_data_fetch_service: None,
             response_inline_data_fetch_service: None,
             blob_runtime: Arc::new(crate::test_blob_runtime(8 * 1024 * 1024)),
+            upstream_block_cache: None,
         };
 
         let (response, _admin_entry) = forward_openai_image_request(
@@ -3034,6 +3134,7 @@ mod tests {
             request_inline_data_fetch_service: Some(request_fetch_service),
             response_inline_data_fetch_service: None,
             blob_runtime: Arc::new(crate::test_blob_runtime(8 * 1024 * 1024)),
+            upstream_block_cache: None,
         };
 
         let (response, _admin_entry) = forward_openai_image_request(
@@ -3643,6 +3744,7 @@ mod tests {
             request_inline_data_fetch_service: None,
             response_inline_data_fetch_service: None,
             blob_runtime: Arc::new(crate::test_blob_runtime(8 * 1024 * 1024)),
+            upstream_block_cache: None,
             config: Arc::new(config),
         }
     }
