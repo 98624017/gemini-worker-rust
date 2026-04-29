@@ -456,6 +456,158 @@ async fn generate_content_reuses_cached_upstream_block_error() {
 }
 
 #[tokio::test]
+async fn upstream_block_cache_does_not_match_different_request_body() {
+    let state = TestState::default();
+    let server = Router::new()
+        .route(
+            "/v1beta/models/demo:generateContent",
+            post(mock_generate_content_content_blocked),
+        )
+        .with_state(state.clone());
+    let server_addr = spawn_server(server).await;
+
+    let mut config = rust_sync_proxy::test_config();
+    config.upstream_base_url = format!("http://{server_addr}");
+    config.upstream_api_key = "env-key".to_string();
+    let app = rust_sync_proxy::build_router(config);
+
+    for prompt in ["blocked prompt one", "blocked prompt two"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1beta/models/demo:generateContent")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "contents": [{
+                                "parts": [{
+                                    "text": prompt
+                                }]
+                            }]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    assert_eq!(state.upstream_requests.lock().await.len(), 2);
+}
+
+#[tokio::test]
+async fn upstream_block_cache_does_not_match_different_upstream_base_url() {
+    let first_state = TestState::default();
+    let first_server = Router::new()
+        .route(
+            "/v1beta/models/demo:generateContent",
+            post(mock_generate_content_content_blocked),
+        )
+        .with_state(first_state.clone());
+    let first_addr = spawn_server(first_server).await;
+
+    let second_state = TestState::default();
+    let second_server = Router::new()
+        .route(
+            "/v1beta/models/demo:generateContent",
+            post(mock_generate_content_content_blocked),
+        )
+        .with_state(second_state.clone());
+    let second_addr = spawn_server(second_server).await;
+
+    let mut config = rust_sync_proxy::test_config();
+    config.upstream_base_url = format!("http://{first_addr}");
+    config.upstream_api_key = "env-key".to_string();
+    let app = rust_sync_proxy::build_router(config);
+    let body = json!({
+        "contents": [{
+            "parts": [{
+                "text": "blocked prompt"
+            }]
+        }]
+    })
+    .to_string();
+
+    let first = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1beta/models/demo:generateContent")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::BAD_GATEWAY);
+
+    let second = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1beta/models/demo:generateContent")
+                .header(CONTENT_TYPE, "application/json")
+                .header("x-goog-api-key", format!("http://{second_addr}|other-key"))
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(second.status(), StatusCode::BAD_GATEWAY);
+
+    assert_eq!(first_state.upstream_requests.lock().await.len(), 1);
+    assert_eq!(second_state.upstream_requests.lock().await.len(), 1);
+}
+
+#[tokio::test]
+async fn upstream_block_cache_does_not_store_non_blockable_400() {
+    let state = TestState::default();
+    let server = Router::new()
+        .route(
+            "/v1beta/models/demo:generateContent",
+            post(mock_generate_content_bad_request_non_blockable),
+        )
+        .with_state(state.clone());
+    let server_addr = spawn_server(server).await;
+
+    let mut config = rust_sync_proxy::test_config();
+    config.upstream_base_url = format!("http://{server_addr}");
+    config.upstream_api_key = "env-key".to_string();
+    let app = rust_sync_proxy::build_router(config);
+    let body = json!({
+        "contents": [{
+            "parts": [{
+                "text": "missing field"
+            }]
+        }]
+    })
+    .to_string();
+
+    for _ in 0..2 {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1beta/models/demo:generateContent")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    assert_eq!(state.upstream_requests.lock().await.len(), 2);
+}
+
+#[tokio::test]
 async fn upstream_block_cache_hit_is_marked_in_admin_logs() {
     let state = TestState::default();
     let server = Router::new()
@@ -1133,6 +1285,23 @@ async fn mock_generate_content_content_blocked(
         Json(json!({
             "error": {
                 "message": "content blocked: {\"error_code\":\"image_unsafe\",\"message\":\"unsafe\"}"
+            }
+        })),
+    )
+}
+
+async fn mock_generate_content_bad_request_non_blockable(
+    State(state): State<TestState>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> (StatusCode, Json<Value>) {
+    let _ = mock_generate_content(State(state), headers, uri, body).await;
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({
+            "error": {
+                "message": "missing required field"
             }
         })),
     )
