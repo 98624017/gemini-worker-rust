@@ -81,11 +81,13 @@ impl UpstreamBlockCache {
 
     pub async fn insert(&self, key: UpstreamBlockCacheKey, response: CachedBlockResponse) {
         let mut entries = self.entries.lock().await;
+        let now = Instant::now();
+        prune_expired_entries(&mut entries, now);
         entries.put(
             key,
             StoredBlockResponse {
                 response,
-                expires_at: Instant::now() + self.ttl,
+                expires_at: now + self.ttl,
             },
         );
     }
@@ -121,6 +123,19 @@ fn canonicalize_json(value: &Value) -> Value {
             Value::Object(sorted)
         }
         _ => value.clone(),
+    }
+}
+
+fn prune_expired_entries(
+    entries: &mut LruCache<UpstreamBlockCacheKey, StoredBlockResponse>,
+    now: Instant,
+) {
+    let expired_keys: Vec<_> = entries
+        .iter()
+        .filter_map(|(key, entry)| (entry.expires_at <= now).then(|| key.clone()))
+        .collect();
+    for key in expired_keys {
+        entries.pop(&key);
     }
 }
 
@@ -231,7 +246,10 @@ mod tests {
 
         let hit = cache.get(&key).await.expect("cache hit before ttl");
         assert_eq!(hit.status, StatusCode::BAD_GATEWAY);
-        assert_eq!(hit.content_type, HeaderValue::from_static("application/json"));
+        assert_eq!(
+            hit.content_type,
+            HeaderValue::from_static("application/json")
+        );
         assert_eq!(hit.reason, "content_blocked");
         assert_eq!(
             hit.body,
@@ -265,6 +283,40 @@ mod tests {
 
         assert!(cache.get(&key_a).await.is_some());
         assert!(cache.get(&key_b).await.is_none());
+        assert!(cache.get(&key_c).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn cache_prunes_expired_entries_before_inserting_new_entry() {
+        let cache = UpstreamBlockCache::new(Duration::from_secs(60), 2).unwrap();
+        let key_a =
+            UpstreamBlockCacheKey::new("/a", "https://upstream.example", &json!({"p": "a"}));
+        let key_b =
+            UpstreamBlockCacheKey::new("/b", "https://upstream.example", &json!({"p": "b"}));
+        let key_c =
+            UpstreamBlockCacheKey::new("/c", "https://upstream.example", &json!({"p": "c"}));
+        let entry = |message: &'static str| CachedBlockResponse {
+            status: StatusCode::BAD_GATEWAY,
+            content_type: HeaderValue::from_static("application/json"),
+            body: Bytes::from_static(message.as_bytes()),
+            reason: "content_blocked",
+        };
+
+        cache.insert(key_a.clone(), entry("a")).await;
+        cache.insert(key_b.clone(), entry("b")).await;
+        {
+            let mut entries = cache.entries.lock().await;
+            entries
+                .get_mut(&key_a)
+                .expect("seeded entry should exist")
+                .expires_at = Instant::now() - Duration::from_millis(1);
+            entries.promote(&key_a);
+        }
+
+        cache.insert(key_c.clone(), entry("c")).await;
+
+        assert!(cache.get(&key_a).await.is_none());
+        assert!(cache.get(&key_b).await.is_some());
         assert!(cache.get(&key_c).await.is_some());
     }
 }
