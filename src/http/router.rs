@@ -34,8 +34,8 @@ use crate::response_rewrite::{
 };
 use crate::upload::{Uploader, wrap_external_proxy_url};
 use crate::upstream::{
-    ResolvedUpstream, is_aiapidev_base_url, is_happyapi_base_url,
-    resolve_upstream_for_request_from_header_map, rewrite_aiapidev_model_path,
+    ResolvedUpstream, is_aiapidev_base_url, resolve_upstream_for_request_from_header_map,
+    rewrite_aiapidev_model_path,
 };
 use crate::upstream_block_cache::{
     CachedBlockResponse, UpstreamBlockCache, UpstreamBlockCacheKey,
@@ -49,6 +49,7 @@ const AIAPIDEV_OPENAI_IMAGE_POLL_INTERVAL: Duration = Duration::from_secs(10);
 const AIAPIDEV_MAX_POLL_TIME: Duration = Duration::from_secs(450);
 const AIAPIDEV_MAX_CONSECUTIVE_POLL_FAILURES: usize = 5;
 const MAX_OPENAI_REFERENCE_IMAGES: usize = 6;
+const OPENAI_IMAGE_REFERENCE_FIELDS: [&str; 3] = ["image", "images", "reference_images"];
 
 #[cfg_attr(not(test), allow(dead_code))]
 fn proxy_error_json(code: u16, message: &str, source: &str, stage: &str, kind: &str) -> Value {
@@ -1174,7 +1175,11 @@ async fn forward_openai_image_request(
         return Ok((response, admin_entry));
     }
 
-    if is_happyapi_base_url(&resolved.base_url) && openai_image_request_has_images(&request_body) {
+    if state
+        .config
+        .should_use_openai_image_edits_for_upstream(&resolved.base_url)
+        && openai_image_request_has_images(&request_body)
+    {
         let upstream_url = build_upstream_url(
             &resolved.base_url,
             "/v1/images/edits",
@@ -1266,17 +1271,15 @@ async fn forward_openai_image_request(
 }
 
 fn openai_image_request_has_images(request_body: &Value) -> bool {
-    request_body
-        .get("image")
-        .and_then(Value::as_array)
-        .is_some_and(|images| !images.is_empty())
+    openai_image_reference_image_count(request_body) > 0
 }
 
 fn openai_image_reference_image_count(request_body: &Value) -> usize {
-    request_body
-        .get("image")
-        .and_then(Value::as_array)
-        .map_or(0, Vec::len)
+    OPENAI_IMAGE_REFERENCE_FIELDS
+        .iter()
+        .filter_map(|field| request_body.get(field).and_then(Value::as_array))
+        .map(Vec::len)
+        .sum()
 }
 
 async fn build_happyapi_image_edit_form(
@@ -1288,14 +1291,23 @@ async fn build_happyapi_image_edit_form(
     let object = request_body
         .as_object()
         .ok_or_else(|| anyhow!("request body must be a json object"))?;
-    let image_urls = object
-        .get("image")
-        .and_then(Value::as_array)
-        .ok_or_else(|| anyhow!("image must be an array"))?;
+    let mut image_urls = Vec::new();
+    for field in OPENAI_IMAGE_REFERENCE_FIELDS {
+        let Some(value) = object.get(field) else {
+            continue;
+        };
+        let array = value
+            .as_array()
+            .ok_or_else(|| anyhow!("{field} must be an array"))?;
+        image_urls.extend(array);
+    }
+    if image_urls.is_empty() {
+        return Err(anyhow!("image must be an array"));
+    }
 
     let mut form = reqwest::multipart::Form::new();
     for (key, value) in object {
-        if key == "image" {
+        if OPENAI_IMAGE_REFERENCE_FIELDS.contains(&key.as_str()) {
             continue;
         }
         let field_value = multipart_text_value(value)?;
@@ -3187,6 +3199,91 @@ mod tests {
         assert!(body_text.contains("鞋子商业拍摄"));
         assert!(body_text.contains("name=\"image\"; filename=\"demo.png\""));
         assert!(body_text.contains("Content-Type: image/png"));
+    }
+
+    #[tokio::test]
+    async fn forward_openai_image_request_uses_configured_edits_domain_when_images_alias_exists() {
+        let image_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let image_address = image_listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let service = service_fn(|_request| async move {
+                Ok::<_, Infallible>(
+                    (
+                        [(CONTENT_TYPE, HeaderValue::from_static("image/png"))],
+                        vec![137, 80, 78, 71, 13, 10, 26, 10],
+                    )
+                        .into_response(),
+                )
+            });
+            axum::serve(image_listener, Shared::new(service))
+                .await
+                .unwrap();
+        });
+
+        let mock_state = MultipartMockState::default();
+        let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_address = upstream_listener.local_addr().unwrap();
+        let proxy_state = mock_state.clone();
+        tokio::spawn(async move {
+            let service = service_fn(move |request| {
+                let state = proxy_state.clone();
+                async move { Ok::<_, Infallible>(mock_happyapi_proxy(state, request).await) }
+            });
+            axum::serve(upstream_listener, Shared::new(service))
+                .await
+                .unwrap();
+        });
+
+        let resolved = ResolvedUpstream {
+            base_url: "http://edits.example.com".to_string(),
+            api_key: "edits-key".to_string(),
+        };
+        let upstream_client = reqwest::Client::builder()
+            .proxy(
+                reqwest::Proxy::http(format!("http://127.0.0.1:{}", upstream_address.port()))
+                    .unwrap(),
+            )
+            .build()
+            .unwrap();
+        let mut config = crate::test_config();
+        config.openai_image_edits_upstream_domains = vec!["edits.example.com".to_string()];
+        let state = AppState {
+            config: Arc::new(config.clone()),
+            upstream_client,
+            image_client: reqwest::Client::builder()
+                .proxy(
+                    reqwest::Proxy::http(format!("http://127.0.0.1:{}", image_address.port()))
+                        .unwrap(),
+                )
+                .build()
+                .unwrap(),
+            uploader: Arc::new(Uploader::new(reqwest::Client::new(), config)),
+            admin: None,
+            request_inline_data_fetch_service: None,
+            response_inline_data_fetch_service: None,
+            blob_runtime: Arc::new(crate::test_blob_runtime(8 * 1024 * 1024)),
+            upstream_block_cache: None,
+        };
+
+        let (response, _admin_entry) = forward_openai_image_request(
+            state,
+            resolved,
+            json!({
+                "model": "gpt-image-2",
+                "prompt": "鞋子商业拍摄",
+                "images": ["http://img.example.com/demo.png"],
+                "response_format": "url"
+            }),
+            None,
+            RequestLogSnapshot::default(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let paths = mock_state.create_paths.lock().await.clone();
+        assert_eq!(paths.as_slice(), ["/v1/images/edits"]);
     }
 
     #[tokio::test]

@@ -31,6 +31,7 @@ const DEFAULT_BLOB_SPILL_DIR: &str = "/tmp/rust-sync-proxy-blobs";
 const DEFAULT_LEGACY_UGUU_UPLOAD_URL: &str = "https://uguu.se/upload";
 const DEFAULT_LEGACY_KEFAN_UPLOAD_URL: &str = "https://ai.kefan.cn/api/upload/local";
 const DEFAULT_IMAGE_COMPRESSION_JPEG_QUALITY: u8 = 97;
+const DEFAULT_OPENAI_IMAGE_EDITS_UPSTREAM_DOMAINS: [&str; 2] = ["happyapi.org", "www.happyapi.org"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BlobBudgetDefaults {
@@ -67,6 +68,7 @@ pub struct Config {
     pub image_fetch_insecure_skip_verify: bool,
     pub image_fetch_external_proxy_domains: Vec<String>,
     pub openai_image_b64_json_upstream_domains: Vec<String>,
+    pub openai_image_edits_upstream_domains: Vec<String>,
     pub inline_data_url_cache_dir: String,
     pub inline_data_url_cache_ttl: Duration,
     pub inline_data_url_cache_max_bytes: u64,
@@ -225,6 +227,14 @@ impl Config {
                 .into_iter()
                 .map(|domain| domain.to_ascii_lowercase())
                 .collect(),
+            openai_image_edits_upstream_domains: env_map
+                .get("OPENAI_IMAGE_EDITS_UPSTREAM_DOMAINS")
+                .map(String::as_str)
+                .map(parse_csv)
+                .unwrap_or_else(default_openai_image_edits_upstream_domains)
+                .into_iter()
+                .map(|domain| domain.to_ascii_lowercase())
+                .collect(),
             inline_data_url_cache_dir: env_map
                 .get("INLINE_DATA_URL_CACHE_DIR")
                 .map(String::as_str)
@@ -345,6 +355,19 @@ impl Config {
         };
 
         self.openai_image_b64_json_upstream_domains
+            .iter()
+            .any(|pattern| upstream_domain_pattern_matches_host(pattern, &host))
+    }
+
+    pub fn should_use_openai_image_edits_for_upstream(&self, base_url: &str) -> bool {
+        let host = Url::parse(base_url)
+            .ok()
+            .and_then(|parsed| parsed.host_str().map(|host| host.to_ascii_lowercase()));
+        let Some(host) = host else {
+            return false;
+        };
+
+        self.openai_image_edits_upstream_domains
             .iter()
             .any(|pattern| upstream_domain_pattern_matches_host(pattern, &host))
     }
@@ -536,6 +559,13 @@ fn default_allowed_proxy_domains() -> Vec<String> {
         ".uguu.se".to_string(),
         ".aitohumanize.com".to_string(),
     ]
+}
+
+fn default_openai_image_edits_upstream_domains() -> Vec<String> {
+    DEFAULT_OPENAI_IMAGE_EDITS_UPSTREAM_DOMAINS
+        .into_iter()
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 fn upstream_domain_pattern_matches_host(pattern: &str, host: &str) -> bool {

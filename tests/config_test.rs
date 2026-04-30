@@ -45,6 +45,10 @@ fn defaults_match_runtime_expectations() {
         "https://ai.kefan.cn/api/upload/local"
     );
     assert!(cfg.openai_image_b64_json_upstream_domains.is_empty());
+    assert_eq!(
+        cfg.openai_image_edits_upstream_domains,
+        vec!["happyapi.org".to_string(), "www.happyapi.org".to_string()]
+    );
     assert!(cfg.openai_image_upstream_url_proxy_prefix.is_empty());
 }
 
@@ -305,4 +309,32 @@ fn openai_image_b64_json_upstream_domains_match_exact_and_suffix_hosts() {
     assert!(cfg.should_force_openai_image_b64_json_for_upstream("https://img.example.org"));
     assert!(!cfg.should_force_openai_image_b64_json_for_upstream("https://example.org"));
     assert!(!cfg.should_force_openai_image_b64_json_for_upstream("https://example.net"));
+}
+
+#[test]
+fn openai_image_edits_upstream_domains_can_be_loaded_from_env() {
+    let env = HashMap::from([(
+        "OPENAI_IMAGE_EDITS_UPSTREAM_DOMAINS".to_string(),
+        "api.example.com,.example.org".to_string(),
+    )]);
+
+    let cfg = rust_sync_proxy::config::Config::from_env_map(&env).unwrap();
+
+    assert_eq!(
+        cfg.openai_image_edits_upstream_domains,
+        vec!["api.example.com".to_string(), ".example.org".to_string()]
+    );
+}
+
+#[test]
+fn openai_image_edits_upstream_domains_match_exact_and_suffix_hosts() {
+    let mut cfg = rust_sync_proxy::test_config();
+    cfg.openai_image_edits_upstream_domains =
+        vec!["api.example.com".to_string(), ".example.org".to_string()];
+
+    assert!(cfg.should_use_openai_image_edits_for_upstream("https://api.example.com"));
+    assert!(!cfg.should_use_openai_image_edits_for_upstream("https://foo.api.example.com"));
+    assert!(cfg.should_use_openai_image_edits_for_upstream("https://img.example.org"));
+    assert!(!cfg.should_use_openai_image_edits_for_upstream("https://example.org"));
+    assert!(!cfg.should_use_openai_image_edits_for_upstream("https://example.net"));
 }
