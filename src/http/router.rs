@@ -1800,12 +1800,61 @@ async fn poll_aiapidev_openai_image_task(
         };
 
         if !response.status().is_success() {
-            if !is_aiapidev_retryable_poll_status(response.status()) {
-                return Err(raw_reqwest_response(response, block_cache, block_cache_key).await);
+            let status = response.status();
+            let content_type = response
+                .headers()
+                .get(CONTENT_TYPE)
+                .cloned()
+                .unwrap_or_else(|| HeaderValue::from_static("application/json"));
+            let body_bytes = match response.bytes().await {
+                Ok(body) => body,
+                Err(err) => {
+                    return Err((
+                        StatusCode::BAD_GATEWAY,
+                        Json(json!({"error": {"code": 502, "message": err.to_string()}})),
+                    )
+                        .into_response());
+                }
+            };
+            let response_status =
+                StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            if maybe_store_upstream_block_error(
+                block_cache,
+                block_cache_key,
+                response_status,
+                content_type.clone(),
+                &body_bytes,
+            )
+            .await
+            {
+                return Err(raw_response_with_body(
+                    response_status,
+                    content_type,
+                    body_bytes.to_vec(),
+                ));
+            }
+            if !is_aiapidev_retryable_poll_status(response_status) {
+                return Err(raw_response_with_body(
+                    response_status,
+                    content_type,
+                    body_bytes.to_vec(),
+                ));
             }
             consecutive_failures += 1;
             if consecutive_failures >= AIAPIDEV_MAX_CONSECUTIVE_POLL_FAILURES {
-                return Err(raw_reqwest_response(response, block_cache, block_cache_key).await);
+                maybe_store_upstream_block_error(
+                    block_cache,
+                    block_cache_key,
+                    response_status,
+                    content_type.clone(),
+                    &body_bytes,
+                )
+                .await;
+                return Err(raw_response_with_body(
+                    response_status,
+                    content_type,
+                    body_bytes.to_vec(),
+                ));
             }
             if Instant::now() >= deadline {
                 return Err(proxy_error_response(
@@ -2059,12 +2108,61 @@ async fn poll_aiapidev_task(
         };
 
         if !response.status().is_success() {
-            if !is_aiapidev_retryable_poll_status(response.status()) {
-                return Err(raw_reqwest_response(response, block_cache, block_cache_key).await);
+            let status = response.status();
+            let content_type = response
+                .headers()
+                .get(CONTENT_TYPE)
+                .cloned()
+                .unwrap_or_else(|| HeaderValue::from_static("application/json"));
+            let body_bytes = match response.bytes().await {
+                Ok(body) => body,
+                Err(err) => {
+                    return Err((
+                        StatusCode::BAD_GATEWAY,
+                        Json(json!({"error": {"code": 502, "message": err.to_string()}})),
+                    )
+                        .into_response());
+                }
+            };
+            let response_status =
+                StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            if maybe_store_upstream_block_error(
+                block_cache,
+                block_cache_key,
+                response_status,
+                content_type.clone(),
+                &body_bytes,
+            )
+            .await
+            {
+                return Err(raw_response_with_body(
+                    response_status,
+                    content_type,
+                    body_bytes.to_vec(),
+                ));
+            }
+            if !is_aiapidev_retryable_poll_status(response_status) {
+                return Err(raw_response_with_body(
+                    response_status,
+                    content_type,
+                    body_bytes.to_vec(),
+                ));
             }
             consecutive_failures += 1;
             if consecutive_failures >= AIAPIDEV_MAX_CONSECUTIVE_POLL_FAILURES {
-                return Err(raw_reqwest_response(response, block_cache, block_cache_key).await);
+                maybe_store_upstream_block_error(
+                    block_cache,
+                    block_cache_key,
+                    response_status,
+                    content_type.clone(),
+                    &body_bytes,
+                )
+                .await;
+                return Err(raw_response_with_body(
+                    response_status,
+                    content_type,
+                    body_bytes.to_vec(),
+                ));
             }
             if Instant::now() >= deadline {
                 return Err(proxy_error_response(
@@ -2170,9 +2268,17 @@ fn raw_reqwest_response_with_body(
     content_type: HeaderValue,
     body_bytes: Vec<u8>,
 ) -> Response {
+    let response_status = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    raw_response_with_body(response_status, content_type, body_bytes)
+}
+
+fn raw_response_with_body(
+    status: StatusCode,
+    content_type: HeaderValue,
+    body_bytes: Vec<u8>,
+) -> Response {
     let mut response = Response::new(Body::from(body_bytes));
-    *response.status_mut() =
-        StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    *response.status_mut() = status;
     response.headers_mut().insert(CONTENT_TYPE, content_type);
     response
 }
@@ -2206,18 +2312,18 @@ async fn maybe_store_upstream_block_error(
     status: StatusCode,
     content_type: HeaderValue,
     body: &[u8],
-) {
+) -> bool {
     let Some(cache) = cache else {
-        return;
+        return false;
     };
     let Some(key) = key else {
-        return;
+        return false;
     };
     if body.len() > MAX_UPSTREAM_BLOCK_CACHE_BODY_BYTES {
-        return;
+        return false;
     }
     let Some(reason) = classify_blockable_upstream_error(status, body) else {
-        return;
+        return false;
     };
     cache
         .insert(
@@ -2230,6 +2336,7 @@ async fn maybe_store_upstream_block_error(
             },
         )
         .await;
+    true
 }
 
 async fn admin_root(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -3684,6 +3791,114 @@ mod tests {
         assert_eq!(state.poll_headers.lock().await.len(), 5);
     }
 
+    #[tokio::test]
+    async fn aiapidev_gemini_poll_blockable_502_is_cached_without_retry() {
+        let mock_state = AiapidevMockState {
+            poll_responses: Arc::new(Mutex::new(VecDeque::from(vec![MockPollResponse::Error(
+                StatusCode::BAD_GATEWAY,
+                json!({"error": {"message": "content blocked: image_unsafe"}}),
+            )]))),
+            ..Default::default()
+        };
+        let state = spawn_aiapidev_proxy_app_state(mock_state.clone()).await;
+        let body = json!({
+            "contents": [{
+                "role": "user",
+                "parts": [{"text": "blocked image"}]
+            }]
+        })
+        .to_string();
+
+        let first = model_action(
+            State(state.clone()),
+            Path("gemini-3-pro-image-preview:generateContent".to_string()),
+            Request::builder()
+                .method("POST")
+                .uri("/v1beta/models/gemini-3-pro-image-preview:generateContent?output=url")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body.clone()))
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(first.status(), StatusCode::BAD_GATEWAY);
+        let first_body = to_bytes(first.into_body(), usize::MAX).await.unwrap();
+        assert!(String::from_utf8_lossy(&first_body).contains("image_unsafe"));
+        assert_eq!(mock_state.create_paths.lock().await.len(), 1);
+        assert_eq!(mock_state.poll_headers.lock().await.len(), 1);
+
+        let second = model_action(
+            State(state),
+            Path("gemini-3-pro-image-preview:generateContent".to_string()),
+            Request::builder()
+                .method("POST")
+                .uri("/v1beta/models/gemini-3-pro-image-preview:generateContent?output=url")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(second.status(), StatusCode::BAD_GATEWAY);
+        let second_body = to_bytes(second.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(second_body, first_body);
+        assert_eq!(mock_state.create_paths.lock().await.len(), 1);
+        assert_eq!(mock_state.poll_headers.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn aiapidev_openai_image_poll_blockable_502_is_cached_without_retry() {
+        let mock_state = AiapidevMockState {
+            poll_responses: Arc::new(Mutex::new(VecDeque::from(vec![MockPollResponse::Error(
+                StatusCode::BAD_GATEWAY,
+                json!({"error": {"message": "content blocked: image_unsafe"}}),
+            )]))),
+            ..Default::default()
+        };
+        let state = spawn_aiapidev_proxy_app_state(mock_state.clone()).await;
+        let body = json!({
+            "model": "gpt-image-2",
+            "prompt": "blocked image",
+            "image": ["https://img.example.com/demo.png"],
+            "response_format": "url"
+        })
+        .to_string();
+
+        let first = image_generations_action(
+            State(state.clone()),
+            Request::builder()
+                .method("POST")
+                .uri("/v1/images/generations")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body.clone()))
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(first.status(), StatusCode::BAD_GATEWAY);
+        let first_body = to_bytes(first.into_body(), usize::MAX).await.unwrap();
+        assert!(String::from_utf8_lossy(&first_body).contains("image_unsafe"));
+        assert_eq!(mock_state.create_paths.lock().await.len(), 1);
+        assert_eq!(mock_state.poll_headers.lock().await.len(), 1);
+
+        let second = image_generations_action(
+            State(state),
+            Request::builder()
+                .method("POST")
+                .uri("/v1/images/generations")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(second.status(), StatusCode::BAD_GATEWAY);
+        let second_body = to_bytes(second.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(second_body, first_body);
+        assert_eq!(mock_state.create_paths.lock().await.len(), 1);
+        assert_eq!(mock_state.poll_headers.lock().await.len(), 1);
+    }
+
     async fn mock_aiapidev_create(
         AxumState(state): AxumState<AiapidevMockState>,
         headers: HeaderMap,
@@ -3833,6 +4048,82 @@ mod tests {
                 "createTime": "2026-04-23 15:52:08"
             }))
             .into_response();
+        }
+
+        StatusCode::NOT_FOUND.into_response()
+    }
+
+    async fn spawn_aiapidev_proxy_app_state(mock_state: AiapidevMockState) -> AppState {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let service = service_fn(move |request| {
+                let state = mock_state.clone();
+                async move {
+                    Ok::<_, Infallible>(mock_aiapidev_proxy_from_sequence(state, request).await)
+                }
+            });
+            axum::serve(listener, Shared::new(service)).await.unwrap();
+        });
+
+        let mut config = crate::test_config();
+        config.upstream_base_url = "http://www.aiapidev.com".to_string();
+        config.upstream_api_key = "special-key".to_string();
+        config.public_base_url = "https://proxy.example.com/base/".to_string();
+        config.proxy_special_upstream_urls = true;
+        let uploader_config = config.clone();
+        AppState {
+            upstream_client: reqwest::Client::builder()
+                .proxy(
+                    reqwest::Proxy::http(format!("http://127.0.0.1:{}", address.port())).unwrap(),
+                )
+                .build()
+                .unwrap(),
+            image_client: reqwest::Client::new(),
+            uploader: Arc::new(Uploader::new(reqwest::Client::new(), uploader_config)),
+            admin: None,
+            request_inline_data_fetch_service: None,
+            response_inline_data_fetch_service: None,
+            blob_runtime: Arc::new(crate::test_blob_runtime(8 * 1024 * 1024)),
+            upstream_block_cache: UpstreamBlockCache::new(Duration::from_secs(60), 8).map(Arc::new),
+            config: Arc::new(config),
+        }
+    }
+
+    async fn mock_aiapidev_proxy_from_sequence(
+        state: AiapidevMockState,
+        request: Request,
+    ) -> Response {
+        let path = extract_proxy_path(request.uri());
+        let headers = request.headers().clone();
+
+        if path == "/v1beta/models/nanobananapro:generateContent"
+            || path == "/v1/images/generations"
+        {
+            let body = to_bytes(request.into_body(), usize::MAX).await.unwrap();
+            let parsed: Value = serde_json::from_slice(&body).unwrap();
+            state.create_paths.lock().await.push(path);
+            state.create_headers.lock().await.push(headers);
+            state.create_bodies.lock().await.push(parsed);
+            return Json(json!({
+                "requestId": "req_demo",
+                "status": "created"
+            }))
+            .into_response();
+        }
+
+        if path == "/v1beta/tasks/req_demo" || path == "/v1/tasks/req_demo" {
+            state.poll_headers.lock().await.push(headers);
+            let next = state
+                .poll_responses
+                .lock()
+                .await
+                .pop_front()
+                .unwrap_or_default();
+            return match next {
+                MockPollResponse::Success(body) => Json(body).into_response(),
+                MockPollResponse::Error(status, body) => (status, Json(body)).into_response(),
+            };
         }
 
         StatusCode::NOT_FOUND.into_response()
