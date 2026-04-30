@@ -306,6 +306,24 @@ curl -sS \
 
 ## 错误返回与排障
 
+### 上游违规错误短期拦截缓存
+
+代理会短期缓存明确的上游违规错误，避免下游重试机制反复请求同一违规内容。
+
+默认行为：
+
+- `UPSTREAM_BLOCK_CACHE_TTL_MS=300000`，即 5 分钟。
+- `UPSTREAM_BLOCK_CACHE_MAX_ENTRIES=1024`。
+- 设置任一值为 `0` 会关闭该机制。
+- 缓存 key 为请求路径、上游 base URL 和规范化请求体摘要，不包含 API key。
+- 只缓存 `400` 或 `502` 中包含以下关键词的错误：
+  - `content blocked`
+  - `image_unsafe`
+  - `Upstream moderation triggered`
+
+缓存命中时，代理返回首次错误的 status、content-type 和 body，不再请求上游。
+admin 日志的 `errorDetail` 会包含 `upstream_block_cache_hit:<reason>`。
+
 - **标准链路的上游 JSON 错误会补齐元信息**
   - 对**标准链路**（非 `aiapidev` 分支），如果上游返回非 `2xx` 且响应体是 JSON，
     并且包含 `error` 对象，代理会尽量保留上游 `error.message` 等原始语义。
