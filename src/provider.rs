@@ -7,28 +7,44 @@ pub enum ProviderKind {
     Transparent,
 }
 
+impl ProviderKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Grsai => "grsai",
+            Self::Aiapidev => "aiapidev",
+            Self::Transparent => "transparent",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Provider {
-    pub kind: ProviderKind,
-    pub name: &'static str,
+    kind: ProviderKind,
+}
+
+impl Provider {
+    pub fn kind(self) -> ProviderKind {
+        self.kind
+    }
+
+    pub fn name(self) -> &'static str {
+        self.kind.name()
+    }
 }
 
 pub fn resolve_provider(base_url: &str) -> Provider {
     if is_grsai_base_url(base_url) {
         return Provider {
             kind: ProviderKind::Grsai,
-            name: "grsai",
         };
     }
     if is_aiapidev_base_url(base_url) {
         return Provider {
             kind: ProviderKind::Aiapidev,
-            name: "aiapidev",
         };
     }
     Provider {
         kind: ProviderKind::Transparent,
-        name: "transparent",
     }
 }
 
