@@ -4179,6 +4179,104 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn forward_gemini_request_grsai_accepts_sse_final_payload() {
+        let state = spawn_grsai_proxy_app_state_with_text_response(
+            "data: {\"code\":0,\"msg\":\"success\",\"data\":{\"status\":\"succeeded\",\"results\":[{\"url\":\"http://api.grsai.com/img/sse.png\"}]}}\n\ndata: [DONE]\n",
+        )
+        .await;
+        let resolved = ResolvedUpstream {
+            base_url: "http://api.grsai.com".to_string(),
+            api_key: "override-key".to_string(),
+        };
+        let request_body = json!({
+            "contents": [{
+                "role": "user",
+                "parts": [{"text": "draw"}]
+            }]
+        });
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1beta/models/gemini-3-pro-image-preview:generateContent?output=url")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(request_body.to_string()))
+            .unwrap();
+        let (parts, _) = request.into_parts();
+
+        let (response, _admin_entry) = forward_gemini_request(
+            state,
+            resolved,
+            "/v1beta/models/gemini-3-pro-image-preview:generateContent".to_string(),
+            parts,
+            request_body,
+            RequestLogSnapshot::default(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json_body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            json_body["candidates"][0]["content"]["parts"][0]["inlineData"]["data"],
+            "http://api.grsai.com/img/sse.png"
+        );
+    }
+
+    #[tokio::test]
+    async fn forward_gemini_request_grsai_business_error_keeps_rust_error_shape() {
+        let state = spawn_grsai_proxy_app_state_with_response(json!({
+            "code": 401,
+            "msg": "invalid api key",
+            "data": {"failure_reason": "auth"}
+        }))
+        .await;
+        let resolved = ResolvedUpstream {
+            base_url: "http://api.grsai.com".to_string(),
+            api_key: "override-key".to_string(),
+        };
+        let request_body = json!({
+            "contents": [{
+                "role": "user",
+                "parts": [{"text": "draw"}]
+            }]
+        });
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1beta/models/gemini-3-pro-image-preview:generateContent")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(request_body.to_string()))
+            .unwrap();
+        let (parts, _) = request.into_parts();
+
+        let (response, _admin_entry) = forward_gemini_request(
+            state,
+            resolved,
+            "/v1beta/models/gemini-3-pro-image-preview:generateContent".to_string(),
+            parts,
+            request_body,
+            RequestLogSnapshot::default(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json_body: Value = serde_json::from_slice(&body).unwrap();
+        assert!(json_body.get("code").is_none());
+        assert!(json_body.get("msg").is_none());
+        assert_eq!(json_body["error"]["code"], 401);
+        assert_eq!(
+            json_body["error"]["message"],
+            "上游服务鉴权失败，请检查密钥后再试"
+        );
+        assert_eq!(json_body["error"]["source"], "proxy");
+        assert_eq!(json_body["error"]["stage"], "parse_upstream_response");
+        assert_eq!(json_body["error"]["kind"], "upstream_auth_failed");
+    }
+
+    #[tokio::test]
     async fn forward_openai_image_request_grsai_missing_image_url_returns_current_proxy_error_shape()
      {
         let mock_state = GrsaiMockState::default();
@@ -5593,6 +5691,79 @@ mod tests {
         }
 
         StatusCode::NOT_FOUND.into_response()
+    }
+
+    async fn spawn_grsai_proxy_app_state_with_response(response_body: Value) -> AppState {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let service = service_fn(move |request: Request| {
+                let response_body = response_body.clone();
+                async move {
+                    let path = extract_proxy_path(request.uri());
+                    if path == "/v1/draw/nano-banana" {
+                        return Ok::<_, Infallible>(Json(response_body).into_response());
+                    }
+                    Ok::<_, Infallible>(StatusCode::NOT_FOUND.into_response())
+                }
+            });
+            axum::serve(listener, Shared::new(service)).await.unwrap();
+        });
+
+        let config = crate::test_config();
+        AppState {
+            upstream_client: reqwest::Client::builder()
+                .proxy(
+                    reqwest::Proxy::http(format!("http://127.0.0.1:{}", address.port())).unwrap(),
+                )
+                .build()
+                .unwrap(),
+            image_client: reqwest::Client::new(),
+            uploader: Arc::new(Uploader::new(reqwest::Client::new(), config.clone())),
+            admin: None,
+            request_inline_data_fetch_service: None,
+            response_inline_data_fetch_service: None,
+            blob_runtime: Arc::new(crate::test_blob_runtime(8 * 1024 * 1024)),
+            upstream_block_cache: None,
+            config: Arc::new(config),
+        }
+    }
+
+    async fn spawn_grsai_proxy_app_state_with_text_response(
+        response_body: &'static str,
+    ) -> AppState {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let service = service_fn(move |request: Request| async move {
+                let path = extract_proxy_path(request.uri());
+                if path == "/v1/draw/nano-banana" {
+                    return Ok::<_, Infallible>(
+                        ([(CONTENT_TYPE, "text/event-stream")], response_body).into_response(),
+                    );
+                }
+                Ok::<_, Infallible>(StatusCode::NOT_FOUND.into_response())
+            });
+            axum::serve(listener, Shared::new(service)).await.unwrap();
+        });
+
+        let config = crate::test_config();
+        AppState {
+            upstream_client: reqwest::Client::builder()
+                .proxy(
+                    reqwest::Proxy::http(format!("http://127.0.0.1:{}", address.port())).unwrap(),
+                )
+                .build()
+                .unwrap(),
+            image_client: reqwest::Client::new(),
+            uploader: Arc::new(Uploader::new(reqwest::Client::new(), config.clone())),
+            admin: None,
+            request_inline_data_fetch_service: None,
+            response_inline_data_fetch_service: None,
+            blob_runtime: Arc::new(crate::test_blob_runtime(8 * 1024 * 1024)),
+            upstream_block_cache: None,
+            config: Arc::new(config),
+        }
     }
 
     fn extract_proxy_path(uri: &Uri) -> String {
