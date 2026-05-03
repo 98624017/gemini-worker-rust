@@ -35,8 +35,7 @@ use crate::response_rewrite::{
 };
 use crate::upload::{Uploader, wrap_external_proxy_url};
 use crate::upstream::{
-    ResolvedUpstream, is_aiapidev_base_url, resolve_upstream_for_request_from_header_map,
-    rewrite_aiapidev_model_path,
+    ResolvedUpstream, resolve_upstream_for_request_from_header_map, rewrite_aiapidev_model_path,
 };
 use crate::upstream_block_cache::{
     CachedBlockResponse, UpstreamBlockCache, UpstreamBlockCacheKey,
@@ -1453,6 +1452,7 @@ async fn forward_openai_image_request(
     admin_entry.output_mode = "url".to_string();
     let cache_tracking =
         build_request_cache_tracking(state.admin.as_ref().map(|admin| admin.stats()));
+    let provider = resolve_provider(&resolved.base_url);
 
     if openai_image_reference_image_count(&request_body) > MAX_OPENAI_REFERENCE_IMAGES {
         admin_entry.status_code = StatusCode::BAD_REQUEST.as_u16();
@@ -1479,30 +1479,43 @@ async fn forward_openai_image_request(
         None
     };
 
-    let upstream_build_started = Instant::now();
-    if is_aiapidev_base_url(&resolved.base_url) {
-        let response = handle_aiapidev_openai_image_response(
-            &resolved,
-            request_query.as_deref(),
-            request_body,
-            &state.upstream_client,
-            state.config.as_ref(),
-            state.upstream_block_cache.as_ref(),
-            block_cache_key.as_ref(),
-        )
-        .await;
+    match provider.kind() {
+        ProviderKind::Grsai => {
+            return forward_grsai_openai_image_request(
+                state,
+                resolved,
+                request_body,
+                request_query,
+                admin_entry,
+            )
+            .await;
+        }
+        ProviderKind::Aiapidev => {
+            let upstream_build_started = Instant::now();
+            let response = handle_aiapidev_openai_image_response(
+                &resolved,
+                request_query.as_deref(),
+                request_body,
+                &state.upstream_client,
+                state.config.as_ref(),
+                state.upstream_block_cache.as_ref(),
+                block_cache_key.as_ref(),
+            )
+            .await;
 
-        admin_entry.upstream_build_ms = upstream_build_started.elapsed().as_millis() as i64;
-        admin_entry.request_upstream = request_upstream
-            .as_ref()
-            .map(|value| value.pretty.clone())
-            .unwrap_or_default();
-        admin_entry.request_upstream_images = request_upstream
-            .as_ref()
-            .map(|value| value.image_urls.clone())
-            .unwrap_or_default();
-        admin_entry.status_code = response.status().as_u16();
-        return Ok((response, admin_entry));
+            admin_entry.upstream_build_ms = upstream_build_started.elapsed().as_millis() as i64;
+            admin_entry.request_upstream = request_upstream
+                .as_ref()
+                .map(|value| value.pretty.clone())
+                .unwrap_or_default();
+            admin_entry.request_upstream_images = request_upstream
+                .as_ref()
+                .map(|value| value.image_urls.clone())
+                .unwrap_or_default();
+            admin_entry.status_code = response.status().as_u16();
+            return Ok((response, admin_entry));
+        }
+        ProviderKind::Transparent => {}
     }
 
     if state
@@ -1510,6 +1523,7 @@ async fn forward_openai_image_request(
         .should_use_openai_image_edits_for_upstream(&resolved.base_url)
         && openai_image_request_has_images(&request_body)
     {
+        let upstream_build_started = Instant::now();
         let upstream_url = build_upstream_url(
             &resolved.base_url,
             "/v1/images/edits",
@@ -1559,6 +1573,7 @@ async fn forward_openai_image_request(
         return Ok((response, admin_entry));
     }
 
+    let upstream_build_started = Instant::now();
     let upstream_url = build_upstream_url(
         &resolved.base_url,
         "/v1/images/generations",
@@ -1597,6 +1612,170 @@ async fn forward_openai_image_request(
     admin_entry.status_code = response.status().as_u16();
     admin_entry.response_process_ms = response_durations.response_process_ms;
     admin_entry.upload_ms = response_durations.upload_ms;
+    Ok((response, admin_entry))
+}
+
+async fn forward_grsai_openai_image_request(
+    state: AppState,
+    resolved: ResolvedUpstream,
+    request_body: Value,
+    request_query: Option<String>,
+    mut admin_entry: AdminLogEntry,
+) -> Result<(Response, AdminLogEntry), ForwardRequestFailure> {
+    let params = match crate::grsai::extract_openai_params(&request_body) {
+        Ok(params) => params,
+        Err(err) => {
+            let detail = err.message.clone();
+            let (status, message, kind): (StatusCode, String, &'static str) =
+                if err.http_status == StatusCode::BAD_REQUEST {
+                    (StatusCode::BAD_REQUEST, detail.clone(), "invalid_request")
+                } else {
+                    (
+                        err.http_status,
+                        downstream_grsai_error_message(&err).to_string(),
+                        "invalid_request",
+                    )
+                };
+            return Ok(grsai_proxy_error_response(
+                admin_entry,
+                status,
+                &message,
+                "validate_request",
+                kind,
+                detail,
+            ));
+        }
+    };
+    if params.prompt.trim().is_empty() {
+        return Ok(grsai_proxy_error_response(
+            admin_entry,
+            StatusCode::BAD_REQUEST,
+            "请求内容不能为空，请检查后再试",
+            "validate_request",
+            "invalid_request",
+            "OpenAI prompt is empty",
+        ));
+    }
+
+    let request_body = crate::grsai::build_grsai_request_body(&params);
+    let upstream_url = build_upstream_url(
+        &resolved.base_url,
+        crate::grsai::IMAGE_GENERATION_PATH,
+        request_query.as_deref(),
+    )
+    .map_err(|err| ForwardRequestFailure::new(err, admin_entry.clone()))?;
+
+    let request_upstream = if state.admin.is_some() {
+        let request_upstream_bytes = serde_json::to_vec(&request_body)
+            .map_err(|err| ForwardRequestFailure::new(err, admin_entry.clone()))?;
+        admin::maybe_sanitize_json_for_log(&request_upstream_bytes, true)
+    } else {
+        None
+    };
+
+    let upstream_build_started = Instant::now();
+    let upstream_response = state
+        .upstream_client
+        .post(upstream_url)
+        .header(AUTHORIZATION, format!("Bearer {}", resolved.api_key))
+        .header(CONTENT_TYPE, "application/json")
+        .json(&request_body)
+        .send()
+        .await
+        .map_err(|err| ForwardRequestFailure::new(err, admin_entry.clone()))?;
+    admin_entry.upstream_build_ms = upstream_build_started.elapsed().as_millis() as i64;
+    admin_entry.request_upstream = request_upstream
+        .as_ref()
+        .map(|value| value.pretty.clone())
+        .unwrap_or_default();
+    admin_entry.request_upstream_images = request_upstream
+        .as_ref()
+        .map(|value| value.image_urls.clone())
+        .unwrap_or_default();
+
+    let response_started = Instant::now();
+    let status = upstream_response.status();
+    let body_bytes = upstream_response.bytes().await.map_err(|err| {
+        ForwardRequestFailure::new(
+            StructuredProxyError::new(
+                MSG_READ_UPSTREAM_BODY_FAILED,
+                "read_upstream_body",
+                "body_truncated",
+                err.to_string(),
+            ),
+            admin_entry.clone(),
+        )
+    })?;
+
+    let parsed = match crate::grsai::parse_grsai_response(status, &body_bytes) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            let kind = if err.message.contains("解析上游服务响应失败") {
+                "invalid_json"
+            } else if err.http_status == StatusCode::UNAUTHORIZED {
+                "upstream_auth_failed"
+            } else if err.http_status == StatusCode::TOO_MANY_REQUESTS {
+                "upstream_rate_limited"
+            } else {
+                "upstream_request_failed"
+            };
+            return Ok(grsai_proxy_error_response(
+                admin_entry,
+                err.http_status,
+                downstream_grsai_error_message(&err),
+                "parse_upstream_response",
+                kind,
+                err.message,
+            ));
+        }
+    };
+
+    if !parsed.status.eq_ignore_ascii_case("succeeded") {
+        return Ok(grsai_proxy_error_response(
+            admin_entry,
+            StatusCode::BAD_GATEWAY,
+            MSG_UPSTREAM_REQUEST_FAILED,
+            "parse_upstream_response",
+            "upstream_status_not_succeeded",
+            format!(
+                "grsai status not succeeded: status={}, failure_reason={:?}, error_detail={:?}",
+                parsed.status, parsed.failure_reason, parsed.error_detail
+            ),
+        ));
+    }
+    let image_url = match parsed.image_urls.first().cloned() {
+        Some(image_url) => image_url,
+        None => {
+            return Ok(grsai_proxy_error_response(
+                admin_entry,
+                StatusCode::BAD_GATEWAY,
+                MSG_UPSTREAM_REQUEST_FAILED,
+                "parse_upstream_response",
+                "missing_image_url",
+                "grsai response missing image url",
+            ));
+        }
+    };
+
+    let final_url = build_openai_image_output_url(state.config.as_ref(), "grsai", &image_url);
+    let uploaded = vec![crate::openai_image::UploadedImage { url: final_url }];
+    let created = parsed.end_time.or(parsed.start_time).unwrap_or_else(|| {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64
+    });
+    let final_json = crate::openai_image::build_response_payload_from_uploaded(&uploaded, created);
+    let final_body = serde_json::to_vec(&final_json)
+        .map_err(|err| ForwardRequestFailure::new(err, admin_entry.clone()))?;
+    let mut response = Response::new(Body::from(final_body));
+    *response.status_mut() = StatusCode::OK;
+    response
+        .headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+
+    admin_entry.status_code = response.status().as_u16();
+    admin_entry.response_process_ms = response_started.elapsed().as_millis() as i64;
     Ok((response, admin_entry))
 }
 
@@ -3425,6 +3604,109 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn forward_openai_image_request_uses_grsai_sync_provider() {
+        let mock_state = GrsaiMockState::default();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let proxy_state = mock_state.clone();
+        tokio::spawn(async move {
+            let service = service_fn(move |request| {
+                let state = proxy_state.clone();
+                async move { Ok::<_, Infallible>(mock_grsai_proxy(state, request).await) }
+            });
+            axum::serve(listener, Shared::new(service)).await.unwrap();
+        });
+
+        let resolved = ResolvedUpstream {
+            base_url: "http://api.grsai.com".to_string(),
+            api_key: "grsai-key".to_string(),
+        };
+        let upstream_client = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::http(format!("http://127.0.0.1:{}", address.port())).unwrap())
+            .build()
+            .unwrap();
+        let mut config = crate::test_config();
+        config.external_image_proxy_prefix =
+            "https://proxy.example.com/base/proxy/image?url=".to_string();
+        config.proxy_standard_output_urls = true;
+        config.openai_image_upstream_url_proxy_prefix =
+            "https://proxy.example.com/upstream/image".to_string();
+        let state = AppState {
+            config: Arc::new(config.clone()),
+            upstream_client,
+            image_client: reqwest::Client::new(),
+            uploader: Arc::new(Uploader::new(reqwest::Client::new(), config)),
+            admin: None,
+            request_inline_data_fetch_service: None,
+            response_inline_data_fetch_service: None,
+            blob_runtime: Arc::new(crate::test_blob_runtime(8 * 1024 * 1024)),
+            upstream_block_cache: None,
+        };
+
+        let (response, admin_entry) = forward_openai_image_request(
+            state,
+            resolved,
+            json!({
+                "model": "",
+                "prompt": "两张图片合并",
+                "images": [
+                    "https://img.example.com/ref-1.png",
+                    "https://img.example.com/ref-2.png"
+                ],
+                "aspect_ratio": "16:9",
+                "imageSize": "2K",
+                "response_format": "url"
+            }),
+            Some("unused=1".to_string()),
+            RequestLogSnapshot::default(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(admin_entry.output_mode, "url");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json_body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            json_body["data"][0]["url"],
+            "https://proxy.example.com/base/proxy/image?url=http%3A%2F%2Fpub.example.com%2Fgrsai-result.png"
+        );
+
+        let create_paths = mock_state.create_paths.lock().await.clone();
+        assert_eq!(create_paths.as_slice(), ["/v1/draw/nano-banana"]);
+
+        let create_headers = mock_state.create_headers.lock().await;
+        assert_eq!(
+            create_headers[0]
+                .get(AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer grsai-key")
+        );
+        assert_eq!(
+            create_headers[0]
+                .get(CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("application/json")
+        );
+        drop(create_headers);
+
+        let create_bodies = mock_state.create_bodies.lock().await;
+        assert_eq!(create_bodies[0]["model"], "nano-banana-fast");
+        assert_eq!(create_bodies[0]["prompt"], "两张图片合并");
+        assert_eq!(
+            create_bodies[0]["urls"],
+            json!([
+                "https://img.example.com/ref-1.png",
+                "https://img.example.com/ref-2.png"
+            ])
+        );
+        assert_eq!(create_bodies[0]["aspectRatio"], "16:9");
+        assert_eq!(create_bodies[0]["imageSize"], "2K");
+        assert_eq!(create_bodies[0]["shutProgress"], true);
+    }
+
+    #[tokio::test]
     async fn forward_gemini_request_uses_grsai_sync_provider_for_output_url() {
         let mock_state = GrsaiMockState::default();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -3749,7 +4031,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(admin_entry.status_code, StatusCode::TOO_MANY_REQUESTS.as_u16());
+        assert_eq!(
+            admin_entry.status_code,
+            StatusCode::TOO_MANY_REQUESTS.as_u16()
+        );
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let json_body: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json_body["error"]["code"], 429);
@@ -3891,6 +4176,179 @@ mod tests {
         assert_eq!(json_body["error"]["source"], "proxy");
         assert_eq!(json_body["error"]["stage"], "parse_upstream_response");
         assert_eq!(json_body["error"]["kind"], "missing_image_url");
+    }
+
+    #[tokio::test]
+    async fn forward_openai_image_request_grsai_missing_image_url_returns_current_proxy_error_shape()
+     {
+        let mock_state = GrsaiMockState::default();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let proxy_state = mock_state.clone();
+        tokio::spawn(async move {
+            let service = service_fn(move |request| {
+                let state = proxy_state.clone();
+                async move { Ok::<_, Infallible>(mock_grsai_proxy(state, request).await) }
+            });
+            axum::serve(listener, Shared::new(service)).await.unwrap();
+        });
+
+        let resolved = ResolvedUpstream {
+            base_url: "http://api.grsai.com".to_string(),
+            api_key: "grsai-key".to_string(),
+        };
+        let upstream_client = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::http(format!("http://127.0.0.1:{}", address.port())).unwrap())
+            .build()
+            .unwrap();
+        let state = AppState {
+            config: Arc::new(crate::test_config()),
+            upstream_client,
+            image_client: reqwest::Client::new(),
+            uploader: Arc::new(Uploader::new(reqwest::Client::new(), crate::test_config())),
+            admin: None,
+            request_inline_data_fetch_service: None,
+            response_inline_data_fetch_service: None,
+            blob_runtime: Arc::new(crate::test_blob_runtime(8 * 1024 * 1024)),
+            upstream_block_cache: None,
+        };
+
+        let (response, _admin_entry) = forward_openai_image_request(
+            state,
+            resolved,
+            json!({
+                "prompt": "empty-results"
+            }),
+            None,
+            RequestLogSnapshot::default(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json_body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json_body["error"]["source"], "proxy");
+        assert_eq!(json_body["error"]["stage"], "parse_upstream_response");
+        assert_eq!(json_body["error"]["kind"], "missing_image_url");
+    }
+
+    #[tokio::test]
+    async fn forward_openai_image_request_grsai_auth_failure_preserves_401_status() {
+        let mock_state = GrsaiMockState::default();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let proxy_state = mock_state.clone();
+        tokio::spawn(async move {
+            let service = service_fn(move |request| {
+                let state = proxy_state.clone();
+                async move { Ok::<_, Infallible>(mock_grsai_proxy(state, request).await) }
+            });
+            axum::serve(listener, Shared::new(service)).await.unwrap();
+        });
+
+        let resolved = ResolvedUpstream {
+            base_url: "http://api.grsai.com".to_string(),
+            api_key: "bad-key".to_string(),
+        };
+        let upstream_client = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::http(format!("http://127.0.0.1:{}", address.port())).unwrap())
+            .build()
+            .unwrap();
+        let state = AppState {
+            config: Arc::new(crate::test_config()),
+            upstream_client,
+            image_client: reqwest::Client::new(),
+            uploader: Arc::new(Uploader::new(reqwest::Client::new(), crate::test_config())),
+            admin: None,
+            request_inline_data_fetch_service: None,
+            response_inline_data_fetch_service: None,
+            blob_runtime: Arc::new(crate::test_blob_runtime(8 * 1024 * 1024)),
+            upstream_block_cache: None,
+        };
+
+        let (response, admin_entry) = forward_openai_image_request(
+            state,
+            resolved,
+            json!({
+                "prompt": "auth-fail"
+            }),
+            None,
+            RequestLogSnapshot::default(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(admin_entry.status_code, StatusCode::UNAUTHORIZED.as_u16());
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json_body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json_body["error"]["code"], 401);
+        assert_eq!(json_body["error"]["source"], "proxy");
+        assert_eq!(json_body["error"]["stage"], "parse_upstream_response");
+        assert_eq!(json_body["error"]["kind"], "upstream_auth_failed");
+    }
+
+    #[tokio::test]
+    async fn forward_openai_image_request_grsai_rate_limit_preserves_429_status() {
+        let mock_state = GrsaiMockState::default();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let proxy_state = mock_state.clone();
+        tokio::spawn(async move {
+            let service = service_fn(move |request| {
+                let state = proxy_state.clone();
+                async move { Ok::<_, Infallible>(mock_grsai_proxy(state, request).await) }
+            });
+            axum::serve(listener, Shared::new(service)).await.unwrap();
+        });
+
+        let resolved = ResolvedUpstream {
+            base_url: "http://api.grsai.com".to_string(),
+            api_key: "limited-key".to_string(),
+        };
+        let upstream_client = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::http(format!("http://127.0.0.1:{}", address.port())).unwrap())
+            .build()
+            .unwrap();
+        let state = AppState {
+            config: Arc::new(crate::test_config()),
+            upstream_client,
+            image_client: reqwest::Client::new(),
+            uploader: Arc::new(Uploader::new(reqwest::Client::new(), crate::test_config())),
+            admin: None,
+            request_inline_data_fetch_service: None,
+            response_inline_data_fetch_service: None,
+            blob_runtime: Arc::new(crate::test_blob_runtime(8 * 1024 * 1024)),
+            upstream_block_cache: None,
+        };
+
+        let (response, admin_entry) = forward_openai_image_request(
+            state,
+            resolved,
+            json!({
+                "prompt": "rate-limit"
+            }),
+            None,
+            RequestLogSnapshot::default(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            admin_entry.status_code,
+            StatusCode::TOO_MANY_REQUESTS.as_u16()
+        );
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json_body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json_body["error"]["code"], 429);
+        assert_eq!(json_body["error"]["source"], "proxy");
+        assert_eq!(json_body["error"]["stage"], "parse_upstream_response");
+        assert_eq!(json_body["error"]["kind"], "upstream_rate_limited");
     }
 
     #[tokio::test]
