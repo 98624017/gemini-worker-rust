@@ -1194,44 +1194,35 @@ async fn forward_grsai_gemini_request(
     let params = match crate::grsai::extract_gemini_params(&body, raw_model, request_query) {
         Ok(params) => params,
         Err(err) if err.http_status == StatusCode::BAD_REQUEST => {
-            admin_entry.status_code = StatusCode::BAD_REQUEST.as_u16();
-            admin_entry.error_source = "proxy".to_string();
-            admin_entry.error_stage = "validate_request".to_string();
-            admin_entry.error_kind = "invalid_request".to_string();
-            admin_entry.error_message = err.message.clone();
-            admin_entry.error_detail = err.body_text.clone();
-            let response = proxy_error_response(
+            return Ok(grsai_proxy_error_response(
+                admin_entry,
                 StatusCode::BAD_REQUEST,
                 &err.message,
                 "validate_request",
                 "invalid_request",
-            );
-            return Ok((response, admin_entry));
+                err.body_text,
+            ));
         }
         Err(err) => {
-            let structured = StructuredProxyError::new(
+            return Ok(grsai_proxy_error_response(
+                admin_entry,
+                err.http_status,
                 downstream_grsai_error_message(&err),
                 "parse_upstream_response",
                 "invalid_request",
                 err.message,
-            );
-            return Err(ForwardRequestFailure::new(structured, admin_entry));
+            ));
         }
     };
     if params.prompt.trim().is_empty() {
-        admin_entry.status_code = StatusCode::BAD_REQUEST.as_u16();
-        admin_entry.error_source = "proxy".to_string();
-        admin_entry.error_stage = "validate_request".to_string();
-        admin_entry.error_kind = "invalid_request".to_string();
-        admin_entry.error_message = "请求内容不能为空，请检查后再试".to_string();
-        admin_entry.error_detail = "Gemini prompt is empty".to_string();
-        let response = proxy_error_response(
+        return Ok(grsai_proxy_error_response(
+            admin_entry,
             StatusCode::BAD_REQUEST,
             "请求内容不能为空，请检查后再试",
             "validate_request",
             "invalid_request",
-        );
-        return Ok((response, admin_entry));
+            "Gemini prompt is empty",
+        ));
     }
 
     let request_body = crate::grsai::build_grsai_request_body(&params);
@@ -1283,48 +1274,55 @@ async fn forward_grsai_gemini_request(
         )
     })?;
 
-    let parsed = crate::grsai::parse_grsai_response(status, &body_bytes).map_err(|err| {
-        let message = downstream_grsai_error_message(&err);
-        let kind = if err.message.contains("解析上游服务响应失败") {
-            "invalid_json"
-        } else if err.http_status == StatusCode::UNAUTHORIZED {
-            "upstream_auth_failed"
-        } else if err.http_status == StatusCode::TOO_MANY_REQUESTS {
-            "upstream_rate_limited"
-        } else {
-            "upstream_request_failed"
-        };
-        ForwardRequestFailure::new(
-            StructuredProxyError::new(message, "parse_upstream_response", kind, err.message),
-            admin_entry.clone(),
-        )
-    })?;
+    let parsed = match crate::grsai::parse_grsai_response(status, &body_bytes) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            let kind = if err.message.contains("解析上游服务响应失败") {
+                "invalid_json"
+            } else if err.http_status == StatusCode::UNAUTHORIZED {
+                "upstream_auth_failed"
+            } else if err.http_status == StatusCode::TOO_MANY_REQUESTS {
+                "upstream_rate_limited"
+            } else {
+                "upstream_request_failed"
+            };
+            return Ok(grsai_proxy_error_response(
+                admin_entry,
+                err.http_status,
+                downstream_grsai_error_message(&err),
+                "parse_upstream_response",
+                kind,
+                err.message,
+            ));
+        }
+    };
 
     if !parsed.status.eq_ignore_ascii_case("succeeded") {
-        return Err(ForwardRequestFailure::new(
-            StructuredProxyError::new(
-                MSG_UPSTREAM_REQUEST_FAILED,
-                "parse_upstream_response",
-                "missing_image_url",
-                format!(
-                    "grsai status not succeeded: status={}, failure_reason={:?}, error_detail={:?}",
-                    parsed.status, parsed.failure_reason, parsed.error_detail
-                ),
-            ),
+        return Ok(grsai_proxy_error_response(
             admin_entry,
+            StatusCode::BAD_GATEWAY,
+            MSG_UPSTREAM_REQUEST_FAILED,
+            "parse_upstream_response",
+            "upstream_status_not_succeeded",
+            format!(
+                "grsai status not succeeded: status={}, failure_reason={:?}, error_detail={:?}",
+                parsed.status, parsed.failure_reason, parsed.error_detail
+            ),
         ));
     }
-    let image_url = parsed.image_urls.first().cloned().ok_or_else(|| {
-        ForwardRequestFailure::new(
-            StructuredProxyError::new(
+    let image_url = match parsed.image_urls.first().cloned() {
+        Some(image_url) => image_url,
+        None => {
+            return Ok(grsai_proxy_error_response(
+                admin_entry,
+                StatusCode::BAD_GATEWAY,
                 MSG_UPSTREAM_REQUEST_FAILED,
                 "parse_upstream_response",
                 "missing_image_url",
                 "grsai response missing image url",
-            ),
-            admin_entry.clone(),
-        )
-    })?;
+            ));
+        }
+    };
 
     let response = build_grsai_gemini_response(
         &state.image_client,
@@ -1420,6 +1418,26 @@ fn downstream_grsai_error_message(err: &crate::grsai::GrsaiError) -> &'static st
         return MSG_PARSE_UPSTREAM_JSON_FAILED;
     }
     MSG_UPSTREAM_REQUEST_FAILED
+}
+
+fn grsai_proxy_error_response(
+    mut admin_entry: AdminLogEntry,
+    status: StatusCode,
+    message: &str,
+    stage: &'static str,
+    kind: &'static str,
+    detail: impl Into<String>,
+) -> (Response, AdminLogEntry) {
+    admin_entry.status_code = status.as_u16();
+    admin_entry.error_source = "proxy".to_string();
+    admin_entry.error_stage = stage.to_string();
+    admin_entry.error_kind = kind.to_string();
+    admin_entry.error_message = message.to_string();
+    admin_entry.error_detail = detail.into();
+    (
+        proxy_error_response(status, message, stage, kind),
+        admin_entry,
+    )
 }
 
 async fn forward_openai_image_request(
@@ -3603,6 +3621,210 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn forward_gemini_request_grsai_auth_failure_preserves_401_status() {
+        let mock_state = GrsaiMockState::default();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let proxy_state = mock_state.clone();
+        tokio::spawn(async move {
+            let service = service_fn(move |request| {
+                let state = proxy_state.clone();
+                async move { Ok::<_, Infallible>(mock_grsai_proxy(state, request).await) }
+            });
+            axum::serve(listener, Shared::new(service)).await.unwrap();
+        });
+
+        let resolved = ResolvedUpstream {
+            base_url: "http://api.grsai.com".to_string(),
+            api_key: "bad-key".to_string(),
+        };
+        let upstream_client = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::http(format!("http://127.0.0.1:{}", address.port())).unwrap())
+            .build()
+            .unwrap();
+        let state = AppState {
+            config: Arc::new(crate::test_config()),
+            upstream_client,
+            image_client: reqwest::Client::new(),
+            uploader: Arc::new(Uploader::new(reqwest::Client::new(), crate::test_config())),
+            admin: None,
+            request_inline_data_fetch_service: None,
+            response_inline_data_fetch_service: None,
+            blob_runtime: Arc::new(crate::test_blob_runtime(8 * 1024 * 1024)),
+            upstream_block_cache: None,
+        };
+        let request_body = json!({
+            "contents": [{
+                "role": "user",
+                "parts": [{"text": "auth-fail"}]
+            }]
+        });
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1beta/models/gemini-2.5-flash-image:generateContent")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(request_body.to_string()))
+            .unwrap();
+        let (parts, _) = request.into_parts();
+
+        let (response, admin_entry) = forward_gemini_request(
+            state,
+            resolved,
+            "/v1beta/models/gemini-2.5-flash-image:generateContent".to_string(),
+            parts,
+            request_body,
+            RequestLogSnapshot::default(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(admin_entry.status_code, StatusCode::UNAUTHORIZED.as_u16());
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json_body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json_body["error"]["code"], 401);
+        assert_eq!(json_body["error"]["source"], "proxy");
+        assert_eq!(json_body["error"]["stage"], "parse_upstream_response");
+        assert_eq!(json_body["error"]["kind"], "upstream_auth_failed");
+    }
+
+    #[tokio::test]
+    async fn forward_gemini_request_grsai_failed_status_uses_business_error_kind() {
+        let mock_state = GrsaiMockState::default();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let proxy_state = mock_state.clone();
+        tokio::spawn(async move {
+            let service = service_fn(move |request| {
+                let state = proxy_state.clone();
+                async move { Ok::<_, Infallible>(mock_grsai_proxy(state, request).await) }
+            });
+            axum::serve(listener, Shared::new(service)).await.unwrap();
+        });
+
+        let resolved = ResolvedUpstream {
+            base_url: "http://api.grsai.com".to_string(),
+            api_key: "grsai-key".to_string(),
+        };
+        let upstream_client = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::http(format!("http://127.0.0.1:{}", address.port())).unwrap())
+            .build()
+            .unwrap();
+        let state = AppState {
+            config: Arc::new(crate::test_config()),
+            upstream_client,
+            image_client: reqwest::Client::new(),
+            uploader: Arc::new(Uploader::new(reqwest::Client::new(), crate::test_config())),
+            admin: None,
+            request_inline_data_fetch_service: None,
+            response_inline_data_fetch_service: None,
+            blob_runtime: Arc::new(crate::test_blob_runtime(8 * 1024 * 1024)),
+            upstream_block_cache: None,
+        };
+        let request_body = json!({
+            "contents": [{
+                "role": "user",
+                "parts": [{"text": "failed-status"}]
+            }]
+        });
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1beta/models/gemini-2.5-flash-image:generateContent")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(request_body.to_string()))
+            .unwrap();
+        let (parts, _) = request.into_parts();
+
+        let (response, _admin_entry) = forward_gemini_request(
+            state,
+            resolved,
+            "/v1beta/models/gemini-2.5-flash-image:generateContent".to_string(),
+            parts,
+            request_body,
+            RequestLogSnapshot::default(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json_body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json_body["error"]["source"], "proxy");
+        assert_eq!(json_body["error"]["stage"], "parse_upstream_response");
+        assert_eq!(json_body["error"]["kind"], "upstream_status_not_succeeded");
+        assert_ne!(json_body["error"]["kind"], "missing_image_url");
+    }
+
+    #[tokio::test]
+    async fn forward_gemini_request_grsai_succeeded_without_results_uses_missing_image_url() {
+        let mock_state = GrsaiMockState::default();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let proxy_state = mock_state.clone();
+        tokio::spawn(async move {
+            let service = service_fn(move |request| {
+                let state = proxy_state.clone();
+                async move { Ok::<_, Infallible>(mock_grsai_proxy(state, request).await) }
+            });
+            axum::serve(listener, Shared::new(service)).await.unwrap();
+        });
+
+        let resolved = ResolvedUpstream {
+            base_url: "http://api.grsai.com".to_string(),
+            api_key: "grsai-key".to_string(),
+        };
+        let upstream_client = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::http(format!("http://127.0.0.1:{}", address.port())).unwrap())
+            .build()
+            .unwrap();
+        let state = AppState {
+            config: Arc::new(crate::test_config()),
+            upstream_client,
+            image_client: reqwest::Client::new(),
+            uploader: Arc::new(Uploader::new(reqwest::Client::new(), crate::test_config())),
+            admin: None,
+            request_inline_data_fetch_service: None,
+            response_inline_data_fetch_service: None,
+            blob_runtime: Arc::new(crate::test_blob_runtime(8 * 1024 * 1024)),
+            upstream_block_cache: None,
+        };
+        let request_body = json!({
+            "contents": [{
+                "role": "user",
+                "parts": [{"text": "empty-results"}]
+            }]
+        });
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1beta/models/gemini-2.5-flash-image:generateContent")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(request_body.to_string()))
+            .unwrap();
+        let (parts, _) = request.into_parts();
+
+        let (response, _admin_entry) = forward_gemini_request(
+            state,
+            resolved,
+            "/v1beta/models/gemini-2.5-flash-image:generateContent".to_string(),
+            parts,
+            request_body,
+            RequestLogSnapshot::default(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json_body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json_body["error"]["source"], "proxy");
+        assert_eq!(json_body["error"]["stage"], "parse_upstream_response");
+        assert_eq!(json_body["error"]["kind"], "missing_image_url");
+    }
+
+    #[tokio::test]
     async fn forward_openai_image_request_uses_happyapi_edits_multipart_when_images_exist() {
         let image_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let image_address = image_listener.local_addr().unwrap();
@@ -4765,9 +4987,47 @@ mod tests {
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string();
+            let prompt = parsed
+                .get("prompt")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
             state.create_paths.lock().await.push(path);
             state.create_headers.lock().await.push(headers);
             state.create_bodies.lock().await.push(parsed);
+            if prompt == "auth-fail" {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({
+                        "code": 40101,
+                        "msg": "unauthorized"
+                    })),
+                )
+                    .into_response();
+            }
+            if prompt == "failed-status" {
+                return Json(json!({
+                    "code": 0,
+                    "msg": "success",
+                    "data": {
+                        "status": "failed",
+                        "failure_reason": "unsafe_prompt",
+                        "error_detail": "blocked by provider"
+                    }
+                }))
+                .into_response();
+            }
+            if prompt == "empty-results" {
+                return Json(json!({
+                    "code": 0,
+                    "msg": "success",
+                    "data": {
+                        "status": "succeeded",
+                        "results": []
+                    }
+                }))
+                .into_response();
+            }
             let result_url = if model == "nano-banana-fast" {
                 "http://pub.example.com/grsai-result.png"
             } else {
