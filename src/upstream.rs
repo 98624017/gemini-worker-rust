@@ -27,7 +27,7 @@ impl ResolveUpstreamError {
     fn missing_api_key() -> Self {
         Self {
             kind: ResolveUpstreamErrorKind::MissingApiKey,
-            message: "Missing upstream apiKey".to_string(),
+            message: "缺少上游服务 API Key，请检查请求头或服务配置".to_string(),
         }
     }
 
@@ -225,7 +225,7 @@ fn parse_dual_upstream_token(
 
     if parts.len() != 2 {
         return Err(ResolveUpstreamError::invalid_override(
-            "invalid dual upstream token: expected exactly two <baseUrl>|<apiKey> groups",
+            "上游配置格式不正确：需要提供两组 <baseUrl>|<apiKey>",
         ));
     }
 
@@ -241,14 +241,14 @@ fn parse_dual_upstream_token(
 fn parse_strict_upstream_pair(token: &str) -> Result<UpstreamOverride, ResolveUpstreamError> {
     let Some((custom_base, custom_key)) = token.split_once('|') else {
         return Err(ResolveUpstreamError::invalid_override(
-            "invalid dual upstream token: each group must be <baseUrl>|<apiKey>",
+            "上游配置格式不正确：每组都必须是 <baseUrl>|<apiKey>",
         ));
     };
     let custom_base = custom_base.trim();
     let custom_key = custom_key.trim();
     if custom_base.is_empty() || custom_key.is_empty() {
         return Err(ResolveUpstreamError::invalid_override(
-            "invalid dual upstream token: baseUrl and apiKey must both be non-empty",
+            "上游配置格式不正确：baseUrl 和 apiKey 都不能为空",
         ));
     }
     validate_http_base_url(custom_base)?;
@@ -268,16 +268,16 @@ fn request_targets_4k(request_body: &Value) -> bool {
 }
 
 fn validate_http_base_url(raw: &str) -> Result<(), ResolveUpstreamError> {
-    let parsed =
-        Url::parse(raw).map_err(|err| ResolveUpstreamError::invalid_override(err.to_string()))?;
+    let parsed = Url::parse(raw)
+        .map_err(|_| ResolveUpstreamError::invalid_override("上游地址格式不正确，请检查后再试"))?;
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err(ResolveUpstreamError::invalid_override(
-            "custom baseUrl must use http or https",
+            "上游地址必须使用 http 或 https",
         ));
     }
     if parsed.host_str().unwrap_or_default().is_empty() {
         return Err(ResolveUpstreamError::invalid_override(
-            "custom baseUrl host is empty",
+            "上游地址缺少主机名，请检查后再试",
         ));
     }
     Ok(())

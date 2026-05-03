@@ -89,9 +89,7 @@ pub async fn normalize_aiapidev_task_response(
     let external_proxy_prefix = config.resolved_external_image_proxy_prefix();
     let image_urls = extract_aiapidev_image_urls(&body);
     if image_urls.is_empty() {
-        return Err(anyhow::anyhow!(
-            "aiapidev task result did not contain image urls"
-        ));
+        return Err(anyhow::anyhow!("任务结果里没有可用的图片地址，请稍后再试"));
     }
 
     let mut parts = Vec::with_capacity(image_urls.len());

@@ -175,7 +175,10 @@ async fn invalid_request_json_returns_structured_proxy_error() {
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let json_body: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json_body["error"]["code"], 400);
-    assert_eq!(json_body["error"]["message"], "invalid request json body");
+    assert_eq!(
+        json_body["error"]["message"],
+        "请求内容不是有效的 JSON，请检查后再试"
+    );
     assert_eq!(json_body["error"]["source"], "proxy");
     assert_eq!(json_body["error"]["stage"], "parse_request_json");
     assert_eq!(json_body["error"]["kind"], "invalid_json");
@@ -225,7 +228,10 @@ async fn generate_content_invalid_json_is_recorded_once_in_admin_logs() {
     assert_eq!(item["statusCode"], 400);
     assert_eq!(item["errorStage"], "parse_request_json");
     assert_eq!(item["errorKind"], "invalid_json");
-    assert_eq!(item["errorMessage"], "invalid request json body");
+    assert_eq!(
+        item["errorMessage"],
+        "请求内容不是有效的 JSON，请检查后再试"
+    );
     assert!(item["requestParseMs"].as_i64().unwrap_or_default() >= 0);
 }
 
@@ -249,7 +255,10 @@ async fn image_generations_invalid_json_returns_bad_request() {
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let json_body: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json_body["error"]["code"], 400);
-    assert_eq!(json_body["error"]["message"], "invalid request json body");
+    assert_eq!(
+        json_body["error"]["message"],
+        "请求内容不是有效的 JSON，请检查后再试"
+    );
     assert_eq!(json_body["error"]["source"], "proxy");
     assert_eq!(json_body["error"]["stage"], "parse_request_json");
     assert_eq!(json_body["error"]["kind"], "invalid_json");
@@ -275,7 +284,7 @@ async fn generate_content_oversized_body_returns_payload_too_large() {
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let json_body: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json_body["error"]["code"], 413);
-    assert_eq!(json_body["error"]["message"], "request body too large");
+    assert_eq!(json_body["error"]["message"], "请求内容太大，请缩小后再试");
     assert_eq!(json_body["error"]["source"], "proxy");
     assert_eq!(json_body["error"]["stage"], "read_request_body");
     assert_eq!(json_body["error"]["kind"], "request_body_too_large");
@@ -301,7 +310,7 @@ async fn image_generations_oversized_body_returns_payload_too_large() {
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let json_body: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json_body["error"]["code"], 413);
-    assert_eq!(json_body["error"]["message"], "request body too large");
+    assert_eq!(json_body["error"]["message"], "请求内容太大，请缩小后再试");
     assert_eq!(json_body["error"]["source"], "proxy");
     assert_eq!(json_body["error"]["stage"], "read_request_body");
     assert_eq!(json_body["error"]["kind"], "request_body_too_large");
@@ -343,7 +352,7 @@ async fn truncated_upstream_body_returns_structured_proxy_error() {
     assert_eq!(json_body["error"]["code"], 502);
     assert_eq!(
         json_body["error"]["message"],
-        "failed to read upstream response body"
+        "读取上游服务响应失败，请稍后再试"
     );
     assert_eq!(json_body["error"]["source"], "proxy");
     assert_eq!(json_body["error"]["stage"], "read_upstream_body");
@@ -837,7 +846,7 @@ async fn malformed_dual_upstream_header_returns_bad_request() {
         json_body["error"]["message"]
             .as_str()
             .unwrap_or_default()
-            .contains("dual upstream")
+            .contains("上游配置")
     );
 }
 
@@ -1128,7 +1137,7 @@ async fn image_generations_returns_bad_gateway_when_upstream_data_is_empty() {
     let json_body: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(
         json_body["error"]["message"],
-        "upstream response missing data"
+        "上游服务没有返回可用的图片数据，请稍后再试"
     );
     assert_eq!(*state.upload_count.lock().await, 0);
 }

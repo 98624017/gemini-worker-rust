@@ -50,6 +50,42 @@ const AIAPIDEV_MAX_POLL_TIME: Duration = Duration::from_secs(450);
 const AIAPIDEV_MAX_CONSECUTIVE_POLL_FAILURES: usize = 5;
 const MAX_OPENAI_REFERENCE_IMAGES: usize = 6;
 const OPENAI_IMAGE_REFERENCE_FIELDS: [&str; 3] = ["image", "images", "reference_images"];
+const MSG_INVALID_REQUEST_JSON: &str = "请求内容不是有效的 JSON，请检查后再试";
+const MSG_REQUEST_BODY_TOO_LARGE: &str = "请求内容太大，请缩小后再试";
+const MSG_READ_REQUEST_BODY_FAILED: &str = "读取请求内容失败，请重试";
+const MSG_UPSTREAM_TIMEOUT: &str = "上游服务响应超时，请稍后再试";
+const MSG_UPSTREAM_CONNECT_FAILED: &str = "连接上游服务失败，请稍后再试";
+const MSG_UPSTREAM_REQUEST_BODY_FAILED: &str = "发送请求内容到上游服务时失败，请稍后再试";
+const MSG_UPSTREAM_REQUEST_FAILED: &str = "请求上游服务失败，请稍后再试";
+const MSG_UPSTREAM_TRANSPORT_ERROR: &str = "上游服务通信异常，请稍后再试";
+const MSG_READ_UPSTREAM_BODY_FAILED: &str = "读取上游服务响应失败，请稍后再试";
+const MSG_PARSE_UPSTREAM_JSON_FAILED: &str = "解析上游服务响应失败，请稍后再试";
+const MSG_DECODE_UPSTREAM_B64_FAILED: &str = "解码上游图片数据失败，请稍后再试";
+const MSG_REFERENCE_IMAGES_TOO_MANY: &str = "参考图片最多支持 6 张，请减少后再试";
+const MSG_AIAPIDEV_CREATE_PARSE_FAILED: &str = "解析任务创建响应失败，请稍后再试";
+const MSG_AIAPIDEV_MISSING_REQUEST_ID: &str = "任务创建响应缺少请求 ID，请稍后再试";
+const MSG_AIAPIDEV_MISSING_IMAGE_URLS: &str = "任务结果里没有可用的图片地址，请稍后再试";
+const MSG_AIAPIDEV_TASK_FAILED: &str = "上游任务处理失败，请稍后再试";
+const MSG_AIAPIDEV_POLL_TIMEOUT: &str = "等待上游任务完成超时，请稍后再试";
+const MSG_AIAPIDEV_POLL_PARSE_FAILED: &str = "解析任务轮询响应失败，请稍后再试";
+const MSG_OPENAI_IMAGE_MISSING_DATA: &str = "上游服务没有返回可用的图片数据，请稍后再试";
+const MSG_OPENAI_IMAGE_MISSING_PAYLOAD: &str = "上游服务返回的图片数据不完整，请稍后再试";
+const MSG_PROXY_INTERNAL_ERROR: &str = "代理处理请求时遇到问题，请稍后再试";
+const MSG_UPSTREAM_URL_INVALID: &str = "上游服务地址配置有误，请检查后再试";
+
+fn contains_cjk(text: &str) -> bool {
+    text.chars()
+        .any(|ch| ('\u{4e00}'..='\u{9fff}').contains(&ch))
+}
+
+fn downstream_anyhow_message(err: &anyhow::Error) -> String {
+    let message = err.to_string();
+    if contains_cjk(&message) {
+        message
+    } else {
+        MSG_PROXY_INTERNAL_ERROR.to_string()
+    }
+}
 
 #[cfg_attr(not(test), allow(dead_code))]
 fn proxy_error_json(code: u16, message: &str, source: &str, stage: &str, kind: &str) -> Value {
@@ -85,7 +121,7 @@ async fn upstream_block_cache_json_error_response(
     block_cache_key: Option<&UpstreamBlockCacheKey>,
 ) -> Response {
     let body = serde_json::to_vec(&value).unwrap_or_else(|_| {
-        json!({"error": {"code": status.as_u16(), "message": "failed to encode error response"}})
+        json!({"error": {"code": status.as_u16(), "message": "生成错误响应失败，请稍后再试"}})
             .to_string()
             .into_bytes()
     });
@@ -110,7 +146,7 @@ fn request_body_read_error_response(err: &axum::Error) -> (StatusCode, &'static 
         if err.is::<LengthLimitError>() {
             return (
                 StatusCode::PAYLOAD_TOO_LARGE,
-                "request body too large",
+                MSG_REQUEST_BODY_TOO_LARGE,
                 "request_body_too_large",
             );
         }
@@ -119,7 +155,7 @@ fn request_body_read_error_response(err: &axum::Error) -> (StatusCode, &'static 
 
     (
         StatusCode::BAD_GATEWAY,
-        "failed to read request body",
+        MSG_READ_REQUEST_BODY_FAILED,
         "request_body_read_failed",
     )
 }
@@ -127,7 +163,7 @@ fn request_body_read_error_response(err: &axum::Error) -> (StatusCode, &'static 
 fn invalid_json_response() -> Response {
     proxy_error_response(
         StatusCode::BAD_REQUEST,
-        "invalid request json body",
+        MSG_INVALID_REQUEST_JSON,
         "parse_request_json",
         "invalid_json",
     )
@@ -177,18 +213,18 @@ fn classify_standard_proxy_error_detail(err: &anyhow::Error) -> Option<Structure
 
     let reqwest_error = err.downcast_ref::<reqwest::Error>()?;
     let (message, kind) = if reqwest_error.is_timeout() {
-        ("upstream request timed out", "upstream_timeout")
+        (MSG_UPSTREAM_TIMEOUT, "upstream_timeout")
     } else if reqwest_error.is_connect() {
-        ("failed to connect to upstream", "upstream_connect_failed")
+        (MSG_UPSTREAM_CONNECT_FAILED, "upstream_connect_failed")
     } else if reqwest_error.is_body() {
         (
-            "failed while sending upstream request body",
+            MSG_UPSTREAM_REQUEST_BODY_FAILED,
             "upstream_request_body_failed",
         )
     } else if reqwest_error.is_request() {
-        ("failed to send upstream request", "upstream_request_failed")
+        (MSG_UPSTREAM_REQUEST_FAILED, "upstream_request_failed")
     } else {
-        ("upstream transport error", "upstream_transport_error")
+        (MSG_UPSTREAM_TRANSPORT_ERROR, "upstream_transport_error")
     };
 
     Some(StructuredProxyError::new(
@@ -197,6 +233,20 @@ fn classify_standard_proxy_error_detail(err: &anyhow::Error) -> Option<Structure
         kind,
         reqwest_error.to_string(),
     ))
+}
+
+fn classify_reqwest_proxy_message(err: &reqwest::Error) -> &'static str {
+    if err.is_timeout() {
+        MSG_UPSTREAM_TIMEOUT
+    } else if err.is_connect() {
+        MSG_UPSTREAM_CONNECT_FAILED
+    } else if err.is_body() {
+        MSG_UPSTREAM_REQUEST_BODY_FAILED
+    } else if err.is_request() {
+        MSG_UPSTREAM_REQUEST_FAILED
+    } else {
+        MSG_UPSTREAM_TRANSPORT_ERROR
+    }
 }
 
 fn classify_standard_proxy_error(err: &anyhow::Error) -> Option<Value> {
@@ -524,8 +574,8 @@ async fn image_generations_action(State(state): State<AppState>, request: Reques
                 error_source: "proxy".to_string(),
                 error_stage: "parse_request_json".to_string(),
                 error_kind: "invalid_json".to_string(),
-                error_message: "invalid request json body".to_string(),
-                error_detail: format!("invalid request json body: {err}"),
+                error_message: MSG_INVALID_REQUEST_JSON.to_string(),
+                error_detail: format!("{MSG_INVALID_REQUEST_JSON}: {err}"),
                 ..Default::default()
             };
             request_log.apply_to_entry(&mut admin_entry);
@@ -592,7 +642,9 @@ async fn image_generations_action(State(state): State<AppState>, request: Reques
                 request_log.apply_to_entry(&mut admin_entry);
                 let response = (
                     StatusCode::BAD_REQUEST,
-                    Json(json!({"error": {"code": 400, "message": err.to_string()}})),
+                    Json(
+                        json!({"error": {"code": 400, "message": downstream_anyhow_message(&err)}}),
+                    ),
                 )
                     .into_response();
                 return finalize_admin_response(&state, response, admin_entry).await;
@@ -663,7 +715,7 @@ async fn image_generations_action(State(state): State<AppState>, request: Reques
             } else {
                 (
                     StatusCode::BAD_GATEWAY,
-                    Json(json!({"error": {"code": 502, "message": failure.error.to_string()}})),
+                    Json(json!({"error": {"code": 502, "message": MSG_PROXY_INTERNAL_ERROR}})),
                 )
                     .into_response()
             };
@@ -692,7 +744,7 @@ async fn model_action(
     if !rest.ends_with(":generateContent") {
         let response = (
             StatusCode::NOT_FOUND,
-            Json(json!({"error": {"code": 404, "message": "Not Found"}})),
+            Json(json!({"error": {"code": 404, "message": "接口不存在，请检查请求路径"}})),
         )
             .into_response();
         return finalize_admin_response(
@@ -762,8 +814,8 @@ async fn model_action(
                 error_source: "proxy".to_string(),
                 error_stage: "parse_request_json".to_string(),
                 error_kind: "invalid_json".to_string(),
-                error_message: "invalid request json body".to_string(),
-                error_detail: format!("invalid request json body: {err}"),
+                error_message: MSG_INVALID_REQUEST_JSON.to_string(),
+                error_detail: format!("{MSG_INVALID_REQUEST_JSON}: {err}"),
                 ..Default::default()
             };
             request_log.apply_to_entry(&mut admin_entry);
@@ -866,14 +918,14 @@ async fn model_action(
                 } else {
                     (
                         StatusCode::BAD_GATEWAY,
-                        Json(json!({"error": {"code": 502, "message": failure.error.to_string()}})),
+                        Json(json!({"error": {"code": 502, "message": MSG_PROXY_INTERNAL_ERROR}})),
                     )
                         .into_response()
                 }
             } else {
                 (
                     StatusCode::BAD_GATEWAY,
-                    Json(json!({"error": {"code": 502, "message": failure.error.to_string()}})),
+                    Json(json!({"error": {"code": 502, "message": MSG_PROXY_INTERNAL_ERROR}})),
                 )
                     .into_response()
             };
@@ -1129,12 +1181,12 @@ async fn forward_openai_image_request(
         admin_entry.error_source = "proxy".to_string();
         admin_entry.error_stage = "validate_request".to_string();
         admin_entry.error_kind = "too_many_reference_images".to_string();
-        admin_entry.error_message = "reference images cannot exceed 6".to_string();
+        admin_entry.error_message = MSG_REFERENCE_IMAGES_TOO_MANY.to_string();
         admin_entry.error_detail =
             format!("reference image count exceeds limit: max={MAX_OPENAI_REFERENCE_IMAGES}");
         let response = proxy_error_response(
             StatusCode::BAD_REQUEST,
-            "reference images cannot exceed 6",
+            MSG_REFERENCE_IMAGES_TOO_MANY,
             "validate_request",
             "too_many_reference_images",
         );
@@ -1290,7 +1342,7 @@ async fn build_happyapi_image_edit_form(
 ) -> Result<reqwest::multipart::Form> {
     let object = request_body
         .as_object()
-        .ok_or_else(|| anyhow!("request body must be a json object"))?;
+        .ok_or_else(|| anyhow!("请求内容必须是 JSON 对象，请检查后再试"))?;
     let mut image_urls = Vec::new();
     for field in OPENAI_IMAGE_REFERENCE_FIELDS {
         let Some(value) = object.get(field) else {
@@ -1298,11 +1350,11 @@ async fn build_happyapi_image_edit_form(
         };
         let array = value
             .as_array()
-            .ok_or_else(|| anyhow!("{field} must be an array"))?;
+            .ok_or_else(|| anyhow!("{field} 必须是数组，请检查后再试"))?;
         image_urls.extend(array);
     }
     if image_urls.is_empty() {
-        return Err(anyhow!("image must be an array"));
+        return Err(anyhow!("image 必须是数组，请检查后再试"));
     }
 
     let mut form = reqwest::multipart::Form::new();
@@ -1317,7 +1369,7 @@ async fn build_happyapi_image_edit_form(
     for image_url in image_urls {
         let image_url = image_url
             .as_str()
-            .ok_or_else(|| anyhow!("image items must be strings"))?;
+            .ok_or_else(|| anyhow!("image 中的图片地址必须是字符串"))?;
         let fetched =
             fetch_happyapi_edit_image(image_client, fetch_service, cache_observer, image_url)
                 .await?;
@@ -1395,7 +1447,7 @@ async fn handle_non_stream_response(
         .unwrap_or_else(|| HeaderValue::from_static("application/json"));
     let body_bytes = upstream_response.bytes().await.map_err(|err| {
         StructuredProxyError::new(
-            "failed to read upstream response body",
+            MSG_READ_UPSTREAM_BODY_FAILED,
             "read_upstream_body",
             "body_truncated",
             err.to_string(),
@@ -1489,7 +1541,7 @@ async fn handle_openai_image_response(
         .unwrap_or_else(|| HeaderValue::from_static("application/json"));
     let body_bytes = upstream_response.bytes().await.map_err(|err| {
         StructuredProxyError::new(
-            "failed to read upstream response body",
+            MSG_READ_UPSTREAM_BODY_FAILED,
             "read_upstream_body",
             "body_truncated",
             err.to_string(),
@@ -1518,7 +1570,7 @@ async fn handle_openai_image_response(
 
     let upstream_body: Value = serde_json::from_slice(&body_bytes).map_err(|err| {
         StructuredProxyError::new(
-            "failed to parse upstream response json",
+            MSG_PARSE_UPSTREAM_JSON_FAILED,
             "parse_upstream_response",
             "invalid_json",
             err.to_string(),
@@ -1535,7 +1587,7 @@ async fn handle_openai_image_response(
                     .decode(base64_image.as_bytes())
                     .map_err(|err| {
                         StructuredProxyError::new(
-                            "failed to decode upstream b64_json",
+                            MSG_DECODE_UPSTREAM_B64_FAILED,
                             "decode_b64_json",
                             "invalid_base64",
                             err.to_string(),
@@ -1561,7 +1613,7 @@ async fn handle_openai_image_response(
                     .decode(data_base64.as_bytes())
                     .map_err(|err| {
                         StructuredProxyError::new(
-                            "failed to decode upstream data url",
+                            MSG_DECODE_UPSTREAM_B64_FAILED,
                             "decode_data_url",
                             "invalid_base64",
                             err.to_string(),
@@ -1621,10 +1673,10 @@ async fn handle_aiapidev_openai_image_response(
     let upstream_url =
         match build_upstream_url(&resolved.base_url, "/v1/images/generations", request_query) {
             Ok(url) => url,
-            Err(err) => {
+            Err(_err) => {
                 return (
                     StatusCode::BAD_GATEWAY,
-                    Json(json!({"error": {"code": 502, "message": err.to_string()}})),
+                    Json(json!({"error": {"code": 502, "message": MSG_UPSTREAM_URL_INVALID}})),
                 )
                     .into_response();
             }
@@ -1642,7 +1694,7 @@ async fn handle_aiapidev_openai_image_response(
         Err(err) => {
             return (
                 StatusCode::BAD_GATEWAY,
-                Json(json!({"error": {"code": 502, "message": err.to_string()}})),
+                Json(json!({"error": {"code": 502, "message": classify_reqwest_proxy_message(&err)}})),
             )
                 .into_response();
         }
@@ -1657,7 +1709,7 @@ async fn handle_aiapidev_openai_image_response(
         Err(_) => {
             return proxy_error_response(
                 StatusCode::BAD_GATEWAY,
-                "failed to parse aiapidev create response",
+                MSG_AIAPIDEV_CREATE_PARSE_FAILED,
                 "aiapidev_create_task",
                 "invalid_json",
             );
@@ -1671,7 +1723,7 @@ async fn handle_aiapidev_openai_image_response(
     let Some(request_id) = request_id else {
         return (
             StatusCode::BAD_GATEWAY,
-            Json(json!({"error": {"code": 502, "message": "aiapidev task create response missing requestId"}})),
+            Json(json!({"error": {"code": 502, "message": MSG_AIAPIDEV_MISSING_REQUEST_ID}})),
         )
             .into_response();
     };
@@ -1705,7 +1757,7 @@ async fn handle_aiapidev_openai_image_response(
                     .and_then(Value::as_str)
                     .filter(|value| !value.trim().is_empty())
             })
-            .unwrap_or("aiapidev task failed");
+            .unwrap_or(MSG_AIAPIDEV_TASK_FAILED);
         return upstream_block_cache_json_error_response(
             StatusCode::BAD_GATEWAY,
             json!({"error": {"code": 502, "message": message}}),
@@ -1719,7 +1771,7 @@ async fn handle_aiapidev_openai_image_response(
     if image_urls.is_empty() {
         return (
             StatusCode::BAD_GATEWAY,
-            Json(json!({"error": {"code": 502, "message": "aiapidev task result did not contain image urls"}})),
+            Json(json!({"error": {"code": 502, "message": MSG_AIAPIDEV_MISSING_IMAGE_URLS}})),
         )
             .into_response();
     }
@@ -1752,9 +1804,9 @@ async fn handle_aiapidev_openai_image_response(
                 .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
             response
         }
-        Err(err) => (
+        Err(_err) => (
             StatusCode::BAD_GATEWAY,
-            Json(json!({"error": {"code": 502, "message": err.to_string()}})),
+            Json(json!({"error": {"code": 502, "message": MSG_PROXY_INTERNAL_ERROR}})),
         )
             .into_response(),
     }
@@ -1773,10 +1825,10 @@ async fn poll_aiapidev_openai_image_task(
         let task_path = format!("/v1/tasks/{request_id}");
         let task_url = match build_upstream_url(&resolved.base_url, &task_path, None) {
             Ok(url) => url,
-            Err(err) => {
+            Err(_err) => {
                 return Err((
                     StatusCode::BAD_GATEWAY,
-                    Json(json!({"error": {"code": 502, "message": err.to_string()}})),
+                    Json(json!({"error": {"code": 502, "message": MSG_UPSTREAM_URL_INVALID}})),
                 )
                     .into_response());
             }
@@ -1794,14 +1846,14 @@ async fn poll_aiapidev_openai_image_task(
                 if consecutive_failures >= AIAPIDEV_MAX_CONSECUTIVE_POLL_FAILURES {
                     return Err((
                         StatusCode::BAD_GATEWAY,
-                        Json(json!({"error": {"code": 502, "message": err.to_string()}})),
+                        Json(json!({"error": {"code": 502, "message": classify_reqwest_proxy_message(&err)}})),
                     )
                         .into_response());
                 }
                 if Instant::now() >= deadline {
                     return Err(proxy_error_response(
                         StatusCode::BAD_GATEWAY,
-                        "aiapidev task poll timed out",
+                        MSG_AIAPIDEV_POLL_TIMEOUT,
                         "aiapidev_poll_task",
                         "timeout",
                     ));
@@ -1820,10 +1872,10 @@ async fn poll_aiapidev_openai_image_task(
                 .unwrap_or_else(|| HeaderValue::from_static("application/json"));
             let body_bytes = match response.bytes().await {
                 Ok(body) => body,
-                Err(err) => {
+                Err(_err) => {
                     return Err((
                         StatusCode::BAD_GATEWAY,
-                        Json(json!({"error": {"code": 502, "message": err.to_string()}})),
+                        Json(json!({"error": {"code": 502, "message": MSG_READ_UPSTREAM_BODY_FAILED}})),
                     )
                         .into_response());
                 }
@@ -1871,7 +1923,7 @@ async fn poll_aiapidev_openai_image_task(
             if Instant::now() >= deadline {
                 return Err(proxy_error_response(
                     StatusCode::BAD_GATEWAY,
-                    "aiapidev task poll timed out",
+                    MSG_AIAPIDEV_POLL_TIMEOUT,
                     "aiapidev_poll_task",
                     "timeout",
                 ));
@@ -1886,7 +1938,7 @@ async fn poll_aiapidev_openai_image_task(
             Err(_) => {
                 return Err(proxy_error_response(
                     StatusCode::BAD_GATEWAY,
-                    "failed to parse aiapidev poll response",
+                    MSG_AIAPIDEV_POLL_PARSE_FAILED,
                     "aiapidev_parse_task_response",
                     "invalid_json",
                 ));
@@ -1903,7 +1955,7 @@ async fn poll_aiapidev_openai_image_task(
         if Instant::now() >= deadline {
             return Err(proxy_error_response(
                 StatusCode::BAD_GATEWAY,
-                "aiapidev task poll timed out",
+                MSG_AIAPIDEV_POLL_TIMEOUT,
                 "aiapidev_poll_task",
                 "timeout",
             ));
@@ -1927,10 +1979,10 @@ async fn handle_aiapidev_response(
 ) -> Response {
     let upstream_url = match build_upstream_url(&resolved.base_url, target_path, request_query) {
         Ok(url) => url,
-        Err(err) => {
+        Err(_err) => {
             return (
                 StatusCode::BAD_GATEWAY,
-                Json(json!({"error": {"code": 502, "message": err.to_string()}})),
+                Json(json!({"error": {"code": 502, "message": MSG_UPSTREAM_URL_INVALID}})),
             )
                 .into_response();
         }
@@ -1948,7 +2000,7 @@ async fn handle_aiapidev_response(
         Err(err) => {
             return (
                 StatusCode::BAD_GATEWAY,
-                Json(json!({"error": {"code": 502, "message": err.to_string()}})),
+                Json(json!({"error": {"code": 502, "message": classify_reqwest_proxy_message(&err)}})),
             )
                 .into_response();
         }
@@ -1963,7 +2015,7 @@ async fn handle_aiapidev_response(
         Err(_) => {
             return proxy_error_response(
                 StatusCode::BAD_GATEWAY,
-                "failed to parse aiapidev create response",
+                MSG_AIAPIDEV_CREATE_PARSE_FAILED,
                 "aiapidev_create_task",
                 "invalid_json",
             );
@@ -1977,7 +2029,7 @@ async fn handle_aiapidev_response(
     let Some(request_id) = request_id else {
         return (
             StatusCode::BAD_GATEWAY,
-            Json(json!({"error": {"code": 502, "message": "aiapidev task create response missing requestId"}})),
+            Json(json!({"error": {"code": 502, "message": MSG_AIAPIDEV_MISSING_REQUEST_ID}})),
         )
             .into_response();
     };
@@ -2012,7 +2064,7 @@ async fn handle_aiapidev_response(
                     .and_then(Value::as_str)
                     .filter(|value| !value.trim().is_empty())
             })
-            .unwrap_or("aiapidev task failed");
+            .unwrap_or(MSG_AIAPIDEV_TASK_FAILED);
         return upstream_block_cache_json_error_response(
             StatusCode::BAD_GATEWAY,
             json!({"error": {"code": 502, "message": message}}),
@@ -2032,20 +2084,20 @@ async fn handle_aiapidev_response(
     .await;
     let mut final_json = match final_json {
         Ok(body) => body,
-        Err(err) => {
+        Err(_err) => {
             return (
                 StatusCode::BAD_GATEWAY,
-                Json(json!({"error": {"code": 502, "message": err.to_string()}})),
+                Json(json!({"error": {"code": 502, "message": MSG_READ_UPSTREAM_BODY_FAILED}})),
             )
                 .into_response();
         }
     };
     remove_thought_signatures(&mut final_json);
     final_json = keep_largest_inline_image(final_json);
-    if let Err(err) = optimize_inline_data_images(&mut final_json, config) {
+    if let Err(_err) = optimize_inline_data_images(&mut final_json, config) {
         return (
             StatusCode::BAD_GATEWAY,
-            Json(json!({"error": {"code": 502, "message": err.to_string()}})),
+            Json(json!({"error": {"code": 502, "message": MSG_PROXY_INTERNAL_ERROR}})),
         )
             .into_response();
     }
@@ -2059,9 +2111,9 @@ async fn handle_aiapidev_response(
                 .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
             response
         }
-        Err(err) => (
+        Err(_err) => (
             StatusCode::BAD_GATEWAY,
-            Json(json!({"error": {"code": 502, "message": err.to_string()}})),
+            Json(json!({"error": {"code": 502, "message": MSG_PROXY_INTERNAL_ERROR}})),
         )
             .into_response(),
     }
@@ -2081,10 +2133,10 @@ async fn poll_aiapidev_task(
         let task_path = format!("/v1beta/tasks/{request_id}");
         let task_url = match build_upstream_url(&resolved.base_url, &task_path, None) {
             Ok(url) => url,
-            Err(err) => {
+            Err(_err) => {
                 return Err((
                     StatusCode::BAD_GATEWAY,
-                    Json(json!({"error": {"code": 502, "message": err.to_string()}})),
+                    Json(json!({"error": {"code": 502, "message": MSG_UPSTREAM_URL_INVALID}})),
                 )
                     .into_response());
             }
@@ -2102,14 +2154,14 @@ async fn poll_aiapidev_task(
                 if consecutive_failures >= AIAPIDEV_MAX_CONSECUTIVE_POLL_FAILURES {
                     return Err((
                         StatusCode::BAD_GATEWAY,
-                        Json(json!({"error": {"code": 502, "message": err.to_string()}})),
+                        Json(json!({"error": {"code": 502, "message": classify_reqwest_proxy_message(&err)}})),
                     )
                         .into_response());
                 }
                 if Instant::now() >= deadline {
                     return Err(proxy_error_response(
                         StatusCode::BAD_GATEWAY,
-                        "aiapidev task poll timed out",
+                        MSG_AIAPIDEV_POLL_TIMEOUT,
                         "aiapidev_poll_task",
                         "timeout",
                     ));
@@ -2128,10 +2180,10 @@ async fn poll_aiapidev_task(
                 .unwrap_or_else(|| HeaderValue::from_static("application/json"));
             let body_bytes = match response.bytes().await {
                 Ok(body) => body,
-                Err(err) => {
+                Err(_err) => {
                     return Err((
                         StatusCode::BAD_GATEWAY,
-                        Json(json!({"error": {"code": 502, "message": err.to_string()}})),
+                        Json(json!({"error": {"code": 502, "message": MSG_READ_UPSTREAM_BODY_FAILED}})),
                     )
                         .into_response());
                 }
@@ -2179,7 +2231,7 @@ async fn poll_aiapidev_task(
             if Instant::now() >= deadline {
                 return Err(proxy_error_response(
                     StatusCode::BAD_GATEWAY,
-                    "aiapidev task poll timed out",
+                    MSG_AIAPIDEV_POLL_TIMEOUT,
                     "aiapidev_poll_task",
                     "timeout",
                 ));
@@ -2194,7 +2246,7 @@ async fn poll_aiapidev_task(
             Err(_) => {
                 return Err(proxy_error_response(
                     StatusCode::BAD_GATEWAY,
-                    "failed to parse aiapidev poll response",
+                    MSG_AIAPIDEV_POLL_PARSE_FAILED,
                     "aiapidev_parse_task_response",
                     "invalid_json",
                 ));
@@ -2211,7 +2263,7 @@ async fn poll_aiapidev_task(
         if Instant::now() >= deadline {
             return Err(proxy_error_response(
                 StatusCode::BAD_GATEWAY,
-                "aiapidev task poll timed out",
+                MSG_AIAPIDEV_POLL_TIMEOUT,
                 "aiapidev_poll_task",
                 "timeout",
             ));
@@ -2253,10 +2305,10 @@ async fn raw_reqwest_response(
         .unwrap_or_else(|| HeaderValue::from_static("application/json"));
     let body_bytes = match upstream_response.bytes().await {
         Ok(body) => body,
-        Err(err) => {
+        Err(_err) => {
             return (
                 StatusCode::BAD_GATEWAY,
-                Json(json!({"error": {"code": 502, "message": err.to_string()}})),
+                Json(json!({"error": {"code": 502, "message": MSG_READ_UPSTREAM_BODY_FAILED}})),
             )
                 .into_response();
         }
@@ -2542,18 +2594,18 @@ enum OpenAiImageItem {
 fn extract_openai_image_items(body: &Value) -> Result<Vec<OpenAiImageItem>> {
     let data = body.get("data").and_then(Value::as_array).ok_or_else(|| {
         StructuredProxyError::new(
-            "upstream response missing data",
+            MSG_OPENAI_IMAGE_MISSING_DATA,
             "rewrite_openai_image_response",
             "missing_data",
-            "upstream response missing data array",
+            "上游响应缺少 data 数组",
         )
     })?;
     if data.is_empty() {
         return Err(StructuredProxyError::new(
-            "upstream response missing data",
+            MSG_OPENAI_IMAGE_MISSING_DATA,
             "rewrite_openai_image_response",
             "missing_data",
-            "upstream response data array is empty",
+            "上游响应 data 数组为空",
         )
         .into());
     }
@@ -2581,10 +2633,10 @@ fn extract_openai_image_items(body: &Value) -> Result<Vec<OpenAiImageItem>> {
                 })
                 .ok_or_else(|| {
                     StructuredProxyError::new(
-                        "upstream response missing image payload",
+                        MSG_OPENAI_IMAGE_MISSING_PAYLOAD,
                         "rewrite_openai_image_response",
                         "missing_image_payload",
-                        "upstream response missing data[].b64_json or data[].url",
+                        "上游响应缺少 data[].b64_json 或 data[].url",
                     )
                     .into()
                 })
@@ -2727,17 +2779,14 @@ mod tests {
     fn proxy_error_json_contains_structured_fields() {
         let body = proxy_error_json(
             502,
-            "failed to decode upstream response body",
+            "解码上游服务响应失败，请稍后再试",
             "proxy",
             "decode_upstream_body",
             "body_decode_failed",
         );
 
         assert_eq!(body["error"]["code"], 502);
-        assert_eq!(
-            body["error"]["message"],
-            "failed to decode upstream response body"
-        );
+        assert_eq!(body["error"]["message"], "解码上游服务响应失败，请稍后再试");
         assert_eq!(body["error"]["source"], "proxy");
         assert_eq!(body["error"]["stage"], "decode_upstream_body");
         assert_eq!(body["error"]["kind"], "body_decode_failed");
@@ -3322,10 +3371,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let json_body: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(
-            json_body["error"]["message"],
-            "reference images cannot exceed 6"
-        );
+        assert_eq!(json_body["error"]["message"], MSG_REFERENCE_IMAGES_TOO_MANY);
         assert_eq!(json_body["error"]["source"], "proxy");
         assert_eq!(json_body["error"]["kind"], "too_many_reference_images");
     }
@@ -3699,7 +3745,7 @@ mod tests {
         let json_body: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(
             json_body["error"]["message"],
-            "failed to parse aiapidev create response"
+            "解析任务创建响应失败，请稍后再试"
         );
         assert_eq!(json_body["error"]["source"], "proxy");
         assert_eq!(json_body["error"]["stage"], "aiapidev_create_task");
@@ -3749,7 +3795,7 @@ mod tests {
         let json_body: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(
             json_body["error"]["message"],
-            "failed to parse aiapidev poll response"
+            "解析任务轮询响应失败，请稍后再试"
         );
         assert_eq!(json_body["error"]["source"], "proxy");
         assert_eq!(json_body["error"]["stage"], "aiapidev_parse_task_response");
@@ -4376,7 +4422,7 @@ mod tests {
         assert_eq!(structured.kind, "missing_image_payload");
         assert_eq!(
             structured.detail,
-            "upstream response missing data[].b64_json or data[].url"
+            "上游响应缺少 data[].b64_json 或 data[].url"
         );
     }
 }

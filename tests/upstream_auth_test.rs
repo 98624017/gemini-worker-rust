@@ -82,7 +82,7 @@ fn malformed_dual_upstream_token_returns_error() {
     .unwrap_err();
 
     assert!(
-        err.to_string().contains("dual upstream"),
+        err.to_string().contains("上游配置"),
         "unexpected error: {err}"
     );
 }

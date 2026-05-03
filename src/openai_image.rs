@@ -16,7 +16,7 @@ pub struct UploadedImage {
 pub fn normalize_request_body(body: Value, force_b64_json: bool) -> Result<Value> {
     let mut object = match body {
         Value::Object(map) => map,
-        _ => return Err(anyhow!("request body must be a json object")),
+        _ => return Err(anyhow!("请求内容必须是 JSON 对象，请检查后再试")),
     };
 
     let response_format = object
@@ -24,7 +24,7 @@ pub fn normalize_request_body(body: Value, force_b64_json: bool) -> Result<Value
         .and_then(Value::as_str)
         .unwrap_or("url");
     if !response_format.eq_ignore_ascii_case("url") {
-        return Err(anyhow!("response_format must be url when provided"));
+        return Err(anyhow!("response_format 只支持 url，请调整后再试"));
     }
 
     let image_field = collect_reference_images(&mut object)?;
@@ -118,11 +118,11 @@ fn collect_reference_images(
 
         let array = value
             .as_array()
-            .ok_or_else(|| anyhow!("{alias} must be an array"))?;
+            .ok_or_else(|| anyhow!("{alias} 必须是数组，请检查后再试"))?;
         for item in array {
             let raw = item
                 .as_str()
-                .ok_or_else(|| anyhow!("{alias} items must be strings"))?;
+                .ok_or_else(|| anyhow!("{alias} 中的图片地址必须是字符串"))?;
             validate_reference_image_url(raw)?;
             images.push(raw.to_string());
         }
@@ -132,12 +132,12 @@ fn collect_reference_images(
 }
 
 fn validate_reference_image_url(raw: &str) -> Result<()> {
-    let parsed = Url::parse(raw).map_err(|_| anyhow!("reference image must be an absolute url"))?;
+    let parsed = Url::parse(raw).map_err(|_| anyhow!("参考图片必须是完整 URL"))?;
     if !matches!(parsed.scheme(), "http" | "https") {
-        return Err(anyhow!("reference image must use http or https"));
+        return Err(anyhow!("参考图片 URL 必须使用 http 或 https"));
     }
     if parsed.host_str().unwrap_or_default().trim().is_empty() {
-        return Err(anyhow!("reference image host is required"));
+        return Err(anyhow!("参考图片 URL 缺少主机名，请检查后再试"));
     }
     Ok(())
 }

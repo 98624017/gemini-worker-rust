@@ -315,12 +315,15 @@ async fn admin_logs_capture_structured_proxy_error_fields() {
     assert_eq!(item["errorSource"], "proxy");
     assert_eq!(item["errorStage"], "parse_request_json");
     assert_eq!(item["errorKind"], "invalid_json");
-    assert_eq!(item["errorMessage"], "invalid request json body");
+    assert_eq!(
+        item["errorMessage"],
+        "请求内容不是有效的 JSON，请检查后再试"
+    );
     assert!(
         item["errorDetail"]
             .as_str()
             .unwrap_or_default()
-            .contains("invalid request json body")
+            .contains("请求内容不是有效的 JSON，请检查后再试")
     );
 }
 
@@ -450,7 +453,7 @@ async fn admin_logs_capture_structured_upstream_connect_failures() {
     assert_eq!(item["errorSource"], "proxy");
     assert_eq!(item["errorStage"], "send_upstream_request");
     assert_eq!(item["errorKind"], "upstream_connect_failed");
-    assert_eq!(item["errorMessage"], "failed to connect to upstream");
+    assert_eq!(item["errorMessage"], "连接上游服务失败，请稍后再试");
     let error_detail = item["errorDetail"].as_str().unwrap_or_default();
     assert!(!error_detail.is_empty());
     assert!(error_detail.contains(&addr.to_string()));
