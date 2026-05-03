@@ -3,6 +3,7 @@ pub mod allocator;
 pub mod blob_runtime;
 pub mod cache;
 pub mod config;
+pub mod grsai;
 pub mod http;
 pub mod image_io;
 pub mod openai_image;
