@@ -3690,6 +3690,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn forward_gemini_request_grsai_rate_limit_preserves_429_status() {
+        let mock_state = GrsaiMockState::default();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let proxy_state = mock_state.clone();
+        tokio::spawn(async move {
+            let service = service_fn(move |request| {
+                let state = proxy_state.clone();
+                async move { Ok::<_, Infallible>(mock_grsai_proxy(state, request).await) }
+            });
+            axum::serve(listener, Shared::new(service)).await.unwrap();
+        });
+
+        let resolved = ResolvedUpstream {
+            base_url: "http://api.grsai.com".to_string(),
+            api_key: "limited-key".to_string(),
+        };
+        let upstream_client = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::http(format!("http://127.0.0.1:{}", address.port())).unwrap())
+            .build()
+            .unwrap();
+        let state = AppState {
+            config: Arc::new(crate::test_config()),
+            upstream_client,
+            image_client: reqwest::Client::new(),
+            uploader: Arc::new(Uploader::new(reqwest::Client::new(), crate::test_config())),
+            admin: None,
+            request_inline_data_fetch_service: None,
+            response_inline_data_fetch_service: None,
+            blob_runtime: Arc::new(crate::test_blob_runtime(8 * 1024 * 1024)),
+            upstream_block_cache: None,
+        };
+        let request_body = json!({
+            "contents": [{
+                "role": "user",
+                "parts": [{"text": "rate-limit"}]
+            }]
+        });
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1beta/models/gemini-2.5-flash-image:generateContent")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(request_body.to_string()))
+            .unwrap();
+        let (parts, _) = request.into_parts();
+
+        let (response, admin_entry) = forward_gemini_request(
+            state,
+            resolved,
+            "/v1beta/models/gemini-2.5-flash-image:generateContent".to_string(),
+            parts,
+            request_body,
+            RequestLogSnapshot::default(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(admin_entry.status_code, StatusCode::TOO_MANY_REQUESTS.as_u16());
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json_body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json_body["error"]["code"], 429);
+        assert_eq!(json_body["error"]["source"], "proxy");
+        assert_eq!(json_body["error"]["stage"], "parse_upstream_response");
+        assert_eq!(json_body["error"]["kind"], "upstream_rate_limited");
+    }
+
+    #[tokio::test]
     async fn forward_gemini_request_grsai_failed_status_uses_business_error_kind() {
         let mock_state = GrsaiMockState::default();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -5016,6 +5085,16 @@ mod tests {
                     }
                 }))
                 .into_response();
+            }
+            if prompt == "rate-limit" {
+                return (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(json!({
+                        "code": 42901,
+                        "msg": "rate limited"
+                    })),
+                )
+                    .into_response();
             }
             if prompt == "empty-results" {
                 return Json(json!({
