@@ -24,6 +24,25 @@
 - 已有 Rust 集成测试
 - 已有可选的 Go/Rust 对照脚本
 
+## 支持的上游 Provider
+
+请求会先根据解析出的 `UPSTREAM_BASE_URL` 或请求头覆盖地址选择 provider：
+
+| Provider | 匹配域名 | 行为 |
+| --- | --- | --- |
+| `grsai` | `grsai.com`、`*.grsai.com` | 同步单次请求到 `/v1/draw/nano-banana` |
+| `aiapidev` | `aiapidev.com`、`www.aiapidev.com` | 创建任务并轮询结果 |
+| `transparent` | 其他上游 | 保持现有 Gemini/OpenAI 透明转发 |
+
+`grsai` 支持 Gemini `generateContent` 和 OpenAI `/v1/images/generations`。
+Gemini 模型映射：
+
+| Gemini 模型名 | grsai 模型名 |
+| --- | --- |
+| `gemini-3-pro-image-preview` | `nano-banana-pro` |
+| `gemini-2.5-flash-image` | `nano-banana-fast` |
+| `gemini-3.1-flash-image-preview` | `nano-banana-2` |
+
 ## 路由
 
 - `POST /v1beta/models/{model}:generateContent`
