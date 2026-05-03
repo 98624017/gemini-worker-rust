@@ -21,6 +21,7 @@ use crate::admin::{self, AdminLogEntry, AdminState, SanitizedAdminLog};
 use crate::blob_runtime::{BlobRuntime, BlobRuntimeConfig};
 use crate::cache::InlineDataUrlFetchService;
 use crate::config::Config;
+use crate::provider::{ProviderKind, resolve_provider};
 use crate::request_encode::encode_request_body;
 use crate::request_materialize::{
     RequestMaterializeServices, materialize_request_images_with_services,
@@ -874,7 +875,7 @@ async fn model_action(
 
     let request_parse_ms = request_parse_started.elapsed().as_millis() as i64;
     let target_path = format!("/v1beta/models/{rest}");
-    let is_aiapidev_upstream = is_aiapidev_base_url(&resolved.base_url);
+    let provider = resolve_provider(&resolved.base_url);
     match forward_gemini_request(
         state.clone(),
         resolved,
@@ -908,7 +909,7 @@ async fn model_action(
             admin_entry.status_code = StatusCode::BAD_GATEWAY.as_u16();
             admin_entry.request_parse_ms = request_parse_ms;
             admin_entry.duration_ms = started_at.elapsed().as_millis() as i64;
-            let response = if !is_aiapidev_upstream {
+            let response = if provider.kind() != ProviderKind::Aiapidev {
                 if let Some(structured) = classify_standard_proxy_error_detail(&failure.error) {
                     apply_structured_proxy_error(&mut admin_entry, &structured);
                     build_structured_proxy_error_response(&structured)
@@ -953,54 +954,69 @@ async fn forward_gemini_request(
         OutputMode::Base64 => "base64".to_string(),
         OutputMode::Url => "url".to_string(),
     };
-    let is_aiapidev = is_aiapidev_base_url(&resolved.base_url);
+    let provider = resolve_provider(&resolved.base_url);
 
     let admin_stats = state.admin.as_ref().map(|admin| admin.stats());
     let cache_tracking = build_request_cache_tracking(admin_stats);
 
-    if is_aiapidev {
-        let external_proxy_prefix = state.config.resolved_external_image_proxy_prefix();
-        let rewritten_body = rewrite_aiapidev_request_body(
-            body,
-            &external_proxy_prefix,
-            &state.config.image_fetch_external_proxy_domains,
-        );
-        let target_path = rewrite_aiapidev_model_path(&target_path);
-        let request_upstream = if admin_enabled {
-            let request_upstream_bytes = serde_json::to_vec(&rewritten_body)
-                .map_err(|err| ForwardRequestFailure::new(err, admin_entry.clone()))?;
-            admin::maybe_sanitize_json_for_log(&request_upstream_bytes, true)
-        } else {
-            None
-        };
-        let upstream_build_started = Instant::now();
-        let response = handle_aiapidev_response(
-            &resolved,
-            &target_path,
-            request_query.as_deref(),
-            rewritten_body,
-            output_mode,
-            &state.upstream_client,
-            &state.image_client,
-            state.response_inline_data_fetch_service.as_ref(),
-            state.config.as_ref(),
-            state.upstream_block_cache.as_ref(),
-            block_cache_key.as_ref(),
-        )
-        .await;
-        let upstream_build_ms = upstream_build_started.elapsed().as_millis() as i64;
+    match provider.kind() {
+        ProviderKind::Grsai => {
+            return forward_grsai_gemini_request(
+                state,
+                &resolved,
+                request_query.as_deref(),
+                &target_path,
+                body,
+                output_mode,
+                admin_entry,
+            )
+            .await;
+        }
+        ProviderKind::Aiapidev => {
+            let external_proxy_prefix = state.config.resolved_external_image_proxy_prefix();
+            let rewritten_body = rewrite_aiapidev_request_body(
+                body,
+                &external_proxy_prefix,
+                &state.config.image_fetch_external_proxy_domains,
+            );
+            let target_path = rewrite_aiapidev_model_path(&target_path);
+            let request_upstream = if admin_enabled {
+                let request_upstream_bytes = serde_json::to_vec(&rewritten_body)
+                    .map_err(|err| ForwardRequestFailure::new(err, admin_entry.clone()))?;
+                admin::maybe_sanitize_json_for_log(&request_upstream_bytes, true)
+            } else {
+                None
+            };
+            let upstream_build_started = Instant::now();
+            let response = handle_aiapidev_response(
+                &resolved,
+                &target_path,
+                request_query.as_deref(),
+                rewritten_body,
+                output_mode,
+                &state.upstream_client,
+                &state.image_client,
+                state.response_inline_data_fetch_service.as_ref(),
+                state.config.as_ref(),
+                state.upstream_block_cache.as_ref(),
+                block_cache_key.as_ref(),
+            )
+            .await;
+            let upstream_build_ms = upstream_build_started.elapsed().as_millis() as i64;
 
-        admin_entry.upstream_build_ms = upstream_build_ms;
-        admin_entry.request_upstream = request_upstream
-            .as_ref()
-            .map(|value| value.pretty.clone())
-            .unwrap_or_default();
-        admin_entry.request_upstream_images = request_upstream
-            .as_ref()
-            .map(|value| value.image_urls.clone())
-            .unwrap_or_default();
-        admin_entry.status_code = response.status().as_u16();
-        return Ok((response, admin_entry));
+            admin_entry.upstream_build_ms = upstream_build_ms;
+            admin_entry.request_upstream = request_upstream
+                .as_ref()
+                .map(|value| value.pretty.clone())
+                .unwrap_or_default();
+            admin_entry.request_upstream_images = request_upstream
+                .as_ref()
+                .map(|value| value.image_urls.clone())
+                .unwrap_or_default();
+            admin_entry.status_code = response.status().as_u16();
+            return Ok((response, admin_entry));
+        }
+        ProviderKind::Transparent => {}
     }
 
     let request_image_prepare_started = Instant::now();
@@ -1160,6 +1176,250 @@ async fn forward_gemini_request(
     admin_entry.response_process_ms = response_durations.response_process_ms;
     admin_entry.upload_ms = response_durations.upload_ms;
     Ok((response, admin_entry))
+}
+
+async fn forward_grsai_gemini_request(
+    state: AppState,
+    resolved: &ResolvedUpstream,
+    request_query: Option<&str>,
+    target_path: &str,
+    body: Value,
+    output_mode: OutputMode,
+    mut admin_entry: AdminLogEntry,
+) -> Result<(Response, AdminLogEntry), ForwardRequestFailure> {
+    let raw_model = target_path
+        .strip_prefix("/v1beta/models/")
+        .and_then(|value| value.strip_suffix(":generateContent"))
+        .unwrap_or_default();
+    let params = match crate::grsai::extract_gemini_params(&body, raw_model, request_query) {
+        Ok(params) => params,
+        Err(err) if err.http_status == StatusCode::BAD_REQUEST => {
+            admin_entry.status_code = StatusCode::BAD_REQUEST.as_u16();
+            admin_entry.error_source = "proxy".to_string();
+            admin_entry.error_stage = "validate_request".to_string();
+            admin_entry.error_kind = "invalid_request".to_string();
+            admin_entry.error_message = err.message.clone();
+            admin_entry.error_detail = err.body_text.clone();
+            let response = proxy_error_response(
+                StatusCode::BAD_REQUEST,
+                &err.message,
+                "validate_request",
+                "invalid_request",
+            );
+            return Ok((response, admin_entry));
+        }
+        Err(err) => {
+            let structured = StructuredProxyError::new(
+                downstream_grsai_error_message(&err),
+                "parse_upstream_response",
+                "invalid_request",
+                err.message,
+            );
+            return Err(ForwardRequestFailure::new(structured, admin_entry));
+        }
+    };
+    if params.prompt.trim().is_empty() {
+        admin_entry.status_code = StatusCode::BAD_REQUEST.as_u16();
+        admin_entry.error_source = "proxy".to_string();
+        admin_entry.error_stage = "validate_request".to_string();
+        admin_entry.error_kind = "invalid_request".to_string();
+        admin_entry.error_message = "请求内容不能为空，请检查后再试".to_string();
+        admin_entry.error_detail = "Gemini prompt is empty".to_string();
+        let response = proxy_error_response(
+            StatusCode::BAD_REQUEST,
+            "请求内容不能为空，请检查后再试",
+            "validate_request",
+            "invalid_request",
+        );
+        return Ok((response, admin_entry));
+    }
+
+    let request_body = crate::grsai::build_grsai_request_body(&params);
+    let request_upstream = if state.admin.is_some() {
+        let request_upstream_bytes = serde_json::to_vec(&request_body)
+            .map_err(|err| ForwardRequestFailure::new(err, admin_entry.clone()))?;
+        admin::maybe_sanitize_json_for_log(&request_upstream_bytes, true)
+    } else {
+        None
+    };
+    let upstream_url = build_upstream_url(
+        &resolved.base_url,
+        crate::grsai::IMAGE_GENERATION_PATH,
+        None,
+    )
+    .map_err(|err| ForwardRequestFailure::new(err, admin_entry.clone()))?;
+
+    let upstream_build_started = Instant::now();
+    let upstream_response = state
+        .upstream_client
+        .post(upstream_url)
+        .header(CONTENT_TYPE, "application/json")
+        .header(AUTHORIZATION, format!("Bearer {}", resolved.api_key))
+        .json(&request_body)
+        .send()
+        .await
+        .map_err(|err| ForwardRequestFailure::new(err, admin_entry.clone()))?;
+    admin_entry.upstream_build_ms = upstream_build_started.elapsed().as_millis() as i64;
+    admin_entry.request_upstream = request_upstream
+        .as_ref()
+        .map(|value| value.pretty.clone())
+        .unwrap_or_default();
+    admin_entry.request_upstream_images = request_upstream
+        .as_ref()
+        .map(|value| value.image_urls.clone())
+        .unwrap_or_default();
+
+    let response_started = Instant::now();
+    let status = upstream_response.status();
+    let body_bytes = upstream_response.bytes().await.map_err(|err| {
+        ForwardRequestFailure::new(
+            StructuredProxyError::new(
+                MSG_READ_UPSTREAM_BODY_FAILED,
+                "read_upstream_body",
+                "body_truncated",
+                err.to_string(),
+            ),
+            admin_entry.clone(),
+        )
+    })?;
+
+    let parsed = crate::grsai::parse_grsai_response(status, &body_bytes).map_err(|err| {
+        let message = downstream_grsai_error_message(&err);
+        let kind = if err.message.contains("解析上游服务响应失败") {
+            "invalid_json"
+        } else if err.http_status == StatusCode::UNAUTHORIZED {
+            "upstream_auth_failed"
+        } else if err.http_status == StatusCode::TOO_MANY_REQUESTS {
+            "upstream_rate_limited"
+        } else {
+            "upstream_request_failed"
+        };
+        ForwardRequestFailure::new(
+            StructuredProxyError::new(message, "parse_upstream_response", kind, err.message),
+            admin_entry.clone(),
+        )
+    })?;
+
+    if !parsed.status.eq_ignore_ascii_case("succeeded") {
+        return Err(ForwardRequestFailure::new(
+            StructuredProxyError::new(
+                MSG_UPSTREAM_REQUEST_FAILED,
+                "parse_upstream_response",
+                "missing_image_url",
+                format!(
+                    "grsai status not succeeded: status={}, failure_reason={:?}, error_detail={:?}",
+                    parsed.status, parsed.failure_reason, parsed.error_detail
+                ),
+            ),
+            admin_entry,
+        ));
+    }
+    let image_url = parsed.image_urls.first().cloned().ok_or_else(|| {
+        ForwardRequestFailure::new(
+            StructuredProxyError::new(
+                MSG_UPSTREAM_REQUEST_FAILED,
+                "parse_upstream_response",
+                "missing_image_url",
+                "grsai response missing image url",
+            ),
+            admin_entry.clone(),
+        )
+    })?;
+
+    let response = build_grsai_gemini_response(
+        &state.image_client,
+        state.response_inline_data_fetch_service.as_ref(),
+        state.config.as_ref(),
+        output_mode,
+        &image_url,
+    )
+    .await
+    .map_err(|err| ForwardRequestFailure::new(err, admin_entry.clone()))?;
+    admin_entry.status_code = response.status().as_u16();
+    admin_entry.response_process_ms = response_started.elapsed().as_millis() as i64;
+    Ok((response, admin_entry))
+}
+
+async fn build_grsai_gemini_response(
+    image_client: &reqwest::Client,
+    fetch_service: Option<&Arc<InlineDataUrlFetchService>>,
+    config: &Config,
+    output_mode: OutputMode,
+    image_url: &str,
+) -> Result<Response> {
+    let (data, mime_type) = match output_mode {
+        OutputMode::Url => {
+            let external_proxy_prefix = config.resolved_external_image_proxy_prefix();
+            let final_url =
+                if config.proxy_special_upstream_urls && !external_proxy_prefix.is_empty() {
+                    wrap_external_proxy_url(&external_proxy_prefix, image_url)
+                } else {
+                    image_url.to_string()
+                };
+            let mime_type = crate::image_io::normalize_image_mime_type(None, image_url);
+            (final_url, mime_type)
+        }
+        OutputMode::Base64 => {
+            let fetched = if let Some(fetch_service) = fetch_service {
+                let fetched = fetch_service.fetch(image_url).await?;
+                crate::image_io::FetchedInlineData {
+                    mime_type: fetched.mime_type,
+                    bytes: fetched.bytes,
+                }
+            } else {
+                crate::image_io::fetch_image_as_inline_data(
+                    image_client,
+                    image_url,
+                    crate::image_io::DEFAULT_MAX_IMAGE_BYTES,
+                )
+                .await?
+            };
+            (
+                base64::engine::general_purpose::STANDARD.encode(fetched.bytes),
+                fetched.mime_type,
+            )
+        }
+    };
+
+    let payload = json!({
+        "candidates": [{
+            "content": {
+                "role": "model",
+                "parts": [{
+                    "inlineData": {
+                        "mimeType": mime_type,
+                        "data": data
+                    }
+                }]
+            },
+            "finishReason": "STOP",
+            "safetyRatings": []
+        }],
+        "usageMetadata": {
+            "promptTokenCount": 1,
+            "candidatesTokenCount": 1,
+            "totalTokenCount": 2
+        }
+    });
+    let mut response = Response::new(Body::from(serde_json::to_vec(&payload)?));
+    *response.status_mut() = StatusCode::OK;
+    response
+        .headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    Ok(response)
+}
+
+fn downstream_grsai_error_message(err: &crate::grsai::GrsaiError) -> &'static str {
+    if err.http_status == StatusCode::UNAUTHORIZED {
+        return "上游服务鉴权失败，请检查密钥后再试";
+    }
+    if err.http_status == StatusCode::TOO_MANY_REQUESTS {
+        return "上游服务限流，请稍后再试";
+    }
+    if err.message.contains("解析上游服务响应失败") {
+        return MSG_PARSE_UPSTREAM_JSON_FAILED;
+    }
+    MSG_UPSTREAM_REQUEST_FAILED
 }
 
 async fn forward_openai_image_request(
@@ -2744,6 +3004,13 @@ mod tests {
         create_bodies: Arc<Mutex<Vec<Vec<u8>>>>,
     }
 
+    #[derive(Clone, Default)]
+    struct GrsaiMockState {
+        create_paths: Arc<Mutex<Vec<String>>>,
+        create_headers: Arc<Mutex<Vec<HeaderMap>>>,
+        create_bodies: Arc<Mutex<Vec<Value>>>,
+    }
+
     #[derive(Clone)]
     enum MockPollResponse {
         Success(Value),
@@ -3137,6 +3404,202 @@ mod tests {
         let create_bodies = mock_state.create_bodies.lock().await;
         assert_eq!(create_bodies[0]["model"], "gpt-image-2");
         assert_eq!(create_bodies[0]["response_format"], "url");
+    }
+
+    #[tokio::test]
+    async fn forward_gemini_request_uses_grsai_sync_provider_for_output_url() {
+        let mock_state = GrsaiMockState::default();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let proxy_state = mock_state.clone();
+        tokio::spawn(async move {
+            let service = service_fn(move |request| {
+                let state = proxy_state.clone();
+                async move { Ok::<_, Infallible>(mock_grsai_proxy(state, request).await) }
+            });
+            axum::serve(listener, Shared::new(service)).await.unwrap();
+        });
+
+        let resolved = ResolvedUpstream {
+            base_url: "http://api.grsai.com".to_string(),
+            api_key: "grsai-key".to_string(),
+        };
+        let upstream_client = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::http(format!("http://127.0.0.1:{}", address.port())).unwrap())
+            .build()
+            .unwrap();
+        let mut config = crate::test_config();
+        config.public_base_url = "https://proxy.example.com/base/".to_string();
+        config.proxy_special_upstream_urls = true;
+        let state = AppState {
+            config: Arc::new(config.clone()),
+            upstream_client,
+            image_client: reqwest::Client::new(),
+            uploader: Arc::new(Uploader::new(reqwest::Client::new(), config)),
+            admin: None,
+            request_inline_data_fetch_service: None,
+            response_inline_data_fetch_service: None,
+            blob_runtime: Arc::new(crate::test_blob_runtime(8 * 1024 * 1024)),
+            upstream_block_cache: None,
+        };
+        let request_body = json!({
+            "contents": [{
+                "role": "user",
+                "parts": [
+                    {"text": "两张图片合并"},
+                    {"inlineData": {"data": "https://img.example.com/ref-1.png"}},
+                    {"inlineData": {"data": "https://img.example.com/ref-2.png"}}
+                ]
+            }],
+            "generationConfig": {
+                "imageConfig": {
+                    "aspectRatio": "16:9",
+                    "imageSize": "2K"
+                }
+            }
+        });
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1beta/models/gemini-3-pro-image-preview:generateContent?output=url")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(request_body.to_string()))
+            .unwrap();
+        let (parts, _) = request.into_parts();
+
+        let (response, admin_entry) = forward_gemini_request(
+            state,
+            resolved,
+            "/v1beta/models/gemini-3-pro-image-preview:generateContent".to_string(),
+            parts,
+            request_body,
+            RequestLogSnapshot::default(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(admin_entry.output_mode, "url");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json_body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            json_body["candidates"][0]["content"]["parts"][0]["inlineData"]["data"],
+            "https://proxy.example.com/base/proxy/image?url=https%3A%2F%2Fpub.example.com%2Fgrsai-result.png"
+        );
+
+        let create_paths = mock_state.create_paths.lock().await.clone();
+        assert_eq!(create_paths.as_slice(), ["/v1/draw/nano-banana"]);
+
+        let create_headers = mock_state.create_headers.lock().await;
+        assert_eq!(
+            create_headers[0]
+                .get(AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer grsai-key")
+        );
+        assert_eq!(
+            create_headers[0]
+                .get(CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("application/json")
+        );
+        drop(create_headers);
+
+        let create_bodies = mock_state.create_bodies.lock().await;
+        assert_eq!(create_bodies[0]["model"], "nano-banana-pro");
+        assert_eq!(create_bodies[0]["prompt"], "两张图片合并");
+        assert_eq!(
+            create_bodies[0]["urls"],
+            json!([
+                "https://img.example.com/ref-1.png",
+                "https://img.example.com/ref-2.png"
+            ])
+        );
+        assert_eq!(create_bodies[0]["aspectRatio"], "16:9");
+        assert_eq!(create_bodies[0]["imageSize"], "2K");
+        assert_eq!(create_bodies[0]["shutProgress"], true);
+    }
+
+    #[tokio::test]
+    async fn forward_gemini_request_uses_grsai_sync_provider_for_base64() {
+        let mock_state = GrsaiMockState::default();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let proxy_state = mock_state.clone();
+        tokio::spawn(async move {
+            let service = service_fn(move |request| {
+                let state = proxy_state.clone();
+                async move { Ok::<_, Infallible>(mock_grsai_proxy(state, request).await) }
+            });
+            axum::serve(listener, Shared::new(service)).await.unwrap();
+        });
+
+        let resolved = ResolvedUpstream {
+            base_url: "http://api.grsai.com".to_string(),
+            api_key: "grsai-key".to_string(),
+        };
+        let upstream_client = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::http(format!("http://127.0.0.1:{}", address.port())).unwrap())
+            .build()
+            .unwrap();
+        let image_client = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::http(format!("http://127.0.0.1:{}", address.port())).unwrap())
+            .build()
+            .unwrap();
+        let config = crate::test_config();
+        let state = AppState {
+            config: Arc::new(config.clone()),
+            upstream_client,
+            image_client,
+            uploader: Arc::new(Uploader::new(reqwest::Client::new(), config)),
+            admin: None,
+            request_inline_data_fetch_service: None,
+            response_inline_data_fetch_service: None,
+            blob_runtime: Arc::new(crate::test_blob_runtime(8 * 1024 * 1024)),
+            upstream_block_cache: None,
+        };
+        let request_body = json!({
+            "contents": [{
+                "role": "user",
+                "parts": [{"text": "生成香蕉海报"}]
+            }]
+        });
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1beta/models/gemini-2.5-flash-image:generateContent")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(request_body.to_string()))
+            .unwrap();
+        let (parts, _) = request.into_parts();
+
+        let (response, admin_entry) = forward_gemini_request(
+            state,
+            resolved,
+            "/v1beta/models/gemini-2.5-flash-image:generateContent".to_string(),
+            parts,
+            request_body,
+            RequestLogSnapshot::default(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(admin_entry.output_mode, "base64");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json_body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            json_body["candidates"][0]["content"]["parts"][0]["inlineData"]["data"],
+            base64::engine::general_purpose::STANDARD.encode([137_u8, 80, 78, 71, 13, 10, 26, 10])
+        );
+        assert_eq!(
+            json_body["candidates"][0]["content"]["parts"][0]["inlineData"]["mimeType"],
+            "image/png"
+        );
+
+        let create_bodies = mock_state.create_bodies.lock().await;
+        assert_eq!(create_bodies[0]["model"], "nano-banana-fast");
+        assert_eq!(create_bodies[0]["prompt"], "生成香蕉海报");
     }
 
     #[tokio::test]
@@ -4288,6 +4751,51 @@ mod tests {
             }]
         }))
         .into_response()
+    }
+
+    async fn mock_grsai_proxy(state: GrsaiMockState, request: Request) -> Response {
+        let path = extract_proxy_path(request.uri());
+        let headers = request.headers().clone();
+
+        if path == "/v1/draw/nano-banana" {
+            let body = to_bytes(request.into_body(), usize::MAX).await.unwrap();
+            let parsed: Value = serde_json::from_slice(&body).unwrap();
+            let model = parsed
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            state.create_paths.lock().await.push(path);
+            state.create_headers.lock().await.push(headers);
+            state.create_bodies.lock().await.push(parsed);
+            let result_url = if model == "nano-banana-fast" {
+                "http://pub.example.com/grsai-result.png"
+            } else {
+                "https://pub.example.com/grsai-result.png"
+            };
+            return Json(json!({
+                "code": 0,
+                "msg": "success",
+                "data": {
+                    "status": "succeeded",
+                    "results": [{
+                        "url": result_url
+                    }]
+                }
+            }))
+            .into_response();
+        }
+
+        if path == "/grsai-result.png" {
+            return (
+                StatusCode::OK,
+                [(CONTENT_TYPE, HeaderValue::from_static("image/png"))],
+                vec![137, 80, 78, 71, 13, 10, 26, 10],
+            )
+                .into_response();
+        }
+
+        StatusCode::NOT_FOUND.into_response()
     }
 
     fn extract_proxy_path(uri: &Uri) -> String {
