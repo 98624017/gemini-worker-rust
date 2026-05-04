@@ -215,27 +215,27 @@ impl InlineDataUrlFetchService {
     }
 
     pub async fn fetch(self: &Arc<Self>, raw_url: &str) -> Result<FetchResult> {
-        if let Some(cache) = &self.memory_cache {
-            if let Some(hit) = cache.get(raw_url).await {
-                return Ok(FetchResult {
-                    mime_type: hit.mime_type.to_string(),
-                    bytes: hit.bytes,
-                    from_cache: true,
-                });
-            }
+        if let Some(cache) = &self.memory_cache
+            && let Some(hit) = cache.get(raw_url).await
+        {
+            return Ok(FetchResult {
+                mime_type: hit.mime_type.to_string(),
+                bytes: hit.bytes,
+                from_cache: true,
+            });
         }
 
-        if let Some(cache) = &self.disk_cache {
-            if let Some(hit) = cache.get(raw_url).await? {
-                if let Some(memory) = &self.memory_cache {
-                    memory.set(raw_url, &hit).await;
-                }
-                return Ok(FetchResult {
-                    mime_type: hit.mime_type.to_string(),
-                    bytes: hit.bytes,
-                    from_cache: true,
-                });
+        if let Some(cache) = &self.disk_cache
+            && let Some(hit) = cache.get(raw_url).await?
+        {
+            if let Some(memory) = &self.memory_cache {
+                memory.set(raw_url, &hit).await;
             }
+            return Ok(FetchResult {
+                mime_type: hit.mime_type.to_string(),
+                bytes: hit.bytes,
+                from_cache: true,
+            });
         }
 
         let existing = {

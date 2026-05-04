@@ -748,7 +748,7 @@ fn decoded_base64_len(data_base64: &str) -> Result<u64> {
     if data_base64.is_empty() {
         return Ok(0);
     }
-    if data_base64.len() % 4 != 0 {
+    if !data_base64.len().is_multiple_of(4) {
         return Err(anyhow!("invalid base64 length"));
     }
 
@@ -862,6 +862,7 @@ async fn sha256_hex_blob(blob: &BlobHandle, runtime: &BlobRuntime) -> Result<Str
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn put_object_stream<R>(
     client: &reqwest::Client,
     object_url: String,

@@ -73,6 +73,8 @@ const MSG_OPENAI_IMAGE_MISSING_PAYLOAD: &str = "上游服务返回的图片数�
 const MSG_PROXY_INTERNAL_ERROR: &str = "代理处理请求时遇到问题，请稍后再试";
 const MSG_UPSTREAM_URL_INVALID: &str = "上游服务地址配置有误，请检查后再试";
 
+type CacheObserver = Arc<dyn Fn(&str, bool) + Send + Sync>;
+
 fn contains_cjk(text: &str) -> bool {
     text.chars()
         .any(|ch| ('\u{4e00}'..='\u{9fff}').contains(&ch))
@@ -110,6 +112,34 @@ fn proxy_error_response(status: StatusCode, message: &str, stage: &str, kind: &s
             stage,
             kind,
         )),
+    )
+        .into_response()
+}
+
+fn openai_upstream_error_response(
+    status: StatusCode,
+    message: &str,
+    stage: &str,
+    kind: &str,
+) -> Response {
+    let code = if kind == "upstream_auth_failed" {
+        "auth_error".to_string()
+    } else {
+        format!("upstream_http_{}", status.as_u16())
+    };
+    (
+        status,
+        Json(json!({
+            "error": {
+                "code": code,
+                "message": message,
+                "type": "banana_error",
+                "param": Value::Null,
+                "source": "proxy",
+                "stage": stage,
+                "kind": kind
+            }
+        })),
     )
         .into_response()
 }
@@ -279,7 +309,7 @@ fn build_structured_proxy_error_response(structured: &StructuredProxyError) -> R
 }
 
 struct RequestCacheTracking {
-    observer: Option<Arc<dyn Fn(&str, bool) + Send + Sync>>,
+    observer: Option<CacheObserver>,
     hit_urls: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
@@ -652,20 +682,20 @@ async fn image_generations_action(State(state): State<AppState>, request: Reques
         };
     let block_cache_key =
         UpstreamBlockCacheKey::new(&request_path, &resolved.base_url, &normalized_body);
-    if let Some(cache) = state.upstream_block_cache.as_ref() {
-        if let Some(hit) = cache.get(&block_cache_key).await {
-            let mut admin_entry = block_cache_hit_entry(&request_log, &hit);
-            admin_entry.created_at = created_at;
-            admin_entry.method = request_method;
-            admin_entry.path = request_path;
-            admin_entry.query = request_query;
-            admin_entry.remote_addr = remote_addr;
-            admin_entry.is_stream = false;
-            admin_entry.request_parse_ms = request_parse_started.elapsed().as_millis() as i64;
-            admin_entry.duration_ms = started_at.elapsed().as_millis() as i64;
-            let response = response_from_block_cache_hit(hit);
-            return finalize_admin_response(&state, response, admin_entry).await;
-        }
+    if let Some(cache) = state.upstream_block_cache.as_ref()
+        && let Some(hit) = cache.get(&block_cache_key).await
+    {
+        let mut admin_entry = block_cache_hit_entry(&request_log, &hit);
+        admin_entry.created_at = created_at;
+        admin_entry.method = request_method;
+        admin_entry.path = request_path;
+        admin_entry.query = request_query;
+        admin_entry.remote_addr = remote_addr;
+        admin_entry.is_stream = false;
+        admin_entry.request_parse_ms = request_parse_started.elapsed().as_millis() as i64;
+        admin_entry.duration_ms = started_at.elapsed().as_millis() as i64;
+        let response = response_from_block_cache_hit(hit);
+        return finalize_admin_response(&state, response, admin_entry).await;
     }
     let request_parse_ms = request_parse_started.elapsed().as_millis() as i64;
 
@@ -856,20 +886,20 @@ async fn model_action(
     };
     let block_cache_key =
         UpstreamBlockCacheKey::new(&request_path, &resolved.base_url, &parsed_body);
-    if let Some(cache) = state.upstream_block_cache.as_ref() {
-        if let Some(hit) = cache.get(&block_cache_key).await {
-            let mut admin_entry = block_cache_hit_entry(&request_log, &hit);
-            admin_entry.created_at = created_at;
-            admin_entry.method = request_method;
-            admin_entry.path = request_path;
-            admin_entry.query = request_query;
-            admin_entry.remote_addr = remote_addr;
-            admin_entry.is_stream = false;
-            admin_entry.request_parse_ms = request_parse_started.elapsed().as_millis() as i64;
-            admin_entry.duration_ms = started_at.elapsed().as_millis() as i64;
-            let response = response_from_block_cache_hit(hit);
-            return finalize_admin_response(&state, response, admin_entry).await;
-        }
+    if let Some(cache) = state.upstream_block_cache.as_ref()
+        && let Some(hit) = cache.get(&block_cache_key).await
+    {
+        let mut admin_entry = block_cache_hit_entry(&request_log, &hit);
+        admin_entry.created_at = created_at;
+        admin_entry.method = request_method;
+        admin_entry.path = request_path;
+        admin_entry.query = request_query;
+        admin_entry.remote_addr = remote_addr;
+        admin_entry.is_stream = false;
+        admin_entry.request_parse_ms = request_parse_started.elapsed().as_millis() as i64;
+        admin_entry.duration_ms = started_at.elapsed().as_millis() as i64;
+        let response = response_from_block_cache_hit(hit);
+        return finalize_admin_response(&state, response, admin_entry).await;
     }
 
     let request_parse_ms = request_parse_started.elapsed().as_millis() as i64;
@@ -1439,6 +1469,32 @@ fn grsai_proxy_error_response(
     )
 }
 
+fn grsai_openai_proxy_error_response(
+    mut admin_entry: AdminLogEntry,
+    status: StatusCode,
+    message: &str,
+    stage: &'static str,
+    kind: &'static str,
+    detail: impl Into<String>,
+) -> (Response, AdminLogEntry) {
+    admin_entry.status_code = status.as_u16();
+    admin_entry.error_source = "proxy".to_string();
+    admin_entry.error_stage = stage.to_string();
+    admin_entry.error_kind = kind.to_string();
+    admin_entry.error_message = message.to_string();
+    admin_entry.error_detail = detail.into();
+    let response = if stage == "parse_upstream_response"
+        && matches!(
+            kind,
+            "upstream_auth_failed" | "upstream_rate_limited" | "upstream_request_failed"
+        ) {
+        openai_upstream_error_response(status, message, stage, kind)
+    } else {
+        proxy_error_response(status, message, stage, kind)
+    };
+    (response, admin_entry)
+}
+
 async fn forward_openai_image_request(
     state: AppState,
     resolved: ResolvedUpstream,
@@ -1636,7 +1692,7 @@ async fn forward_grsai_openai_image_request(
                         "invalid_request",
                     )
                 };
-            return Ok(grsai_proxy_error_response(
+            return Ok(grsai_openai_proxy_error_response(
                 admin_entry,
                 status,
                 &message,
@@ -1647,7 +1703,7 @@ async fn forward_grsai_openai_image_request(
         }
     };
     if params.prompt.trim().is_empty() {
-        return Ok(grsai_proxy_error_response(
+        return Ok(grsai_openai_proxy_error_response(
             admin_entry,
             StatusCode::BAD_REQUEST,
             "请求内容不能为空，请检查后再试",
@@ -1719,7 +1775,7 @@ async fn forward_grsai_openai_image_request(
             } else {
                 "upstream_request_failed"
             };
-            return Ok(grsai_proxy_error_response(
+            return Ok(grsai_openai_proxy_error_response(
                 admin_entry,
                 err.http_status,
                 downstream_grsai_error_message(&err),
@@ -1731,7 +1787,7 @@ async fn forward_grsai_openai_image_request(
     };
 
     if !parsed.status.eq_ignore_ascii_case("succeeded") {
-        return Ok(grsai_proxy_error_response(
+        return Ok(grsai_openai_proxy_error_response(
             admin_entry,
             StatusCode::BAD_GATEWAY,
             MSG_UPSTREAM_REQUEST_FAILED,
@@ -1746,7 +1802,7 @@ async fn forward_grsai_openai_image_request(
     let image_url = match parsed.image_urls.first().cloned() {
         Some(image_url) => image_url,
         None => {
-            return Ok(grsai_proxy_error_response(
+            return Ok(grsai_openai_proxy_error_response(
                 admin_entry,
                 StatusCode::BAD_GATEWAY,
                 MSG_UPSTREAM_REQUEST_FAILED,
@@ -1794,7 +1850,7 @@ fn openai_image_reference_image_count(request_body: &Value) -> usize {
 async fn build_happyapi_image_edit_form(
     image_client: &reqwest::Client,
     fetch_service: Option<&Arc<InlineDataUrlFetchService>>,
-    cache_observer: Option<&Arc<dyn Fn(&str, bool) + Send + Sync>>,
+    cache_observer: Option<&CacheObserver>,
     request_body: &Value,
 ) -> Result<reqwest::multipart::Form> {
     let object = request_body
@@ -1843,7 +1899,7 @@ async fn build_happyapi_image_edit_form(
 async fn fetch_happyapi_edit_image(
     image_client: &reqwest::Client,
     fetch_service: Option<&Arc<InlineDataUrlFetchService>>,
-    cache_observer: Option<&Arc<dyn Fn(&str, bool) + Send + Sync>>,
+    cache_observer: Option<&CacheObserver>,
     image_url: &str,
 ) -> Result<crate::image_io::FetchedInlineData> {
     if let Some(fetch_service) = fetch_service {
@@ -1884,6 +1940,7 @@ fn filename_from_url(raw_url: &str) -> Option<String> {
     Some(segment.to_string())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_non_stream_response(
     upstream_response: reqwest::Response,
     output_mode: OutputMode,
@@ -2421,6 +2478,7 @@ async fn poll_aiapidev_openai_image_task(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_aiapidev_response(
     resolved: &ResolvedUpstream,
     target_path: &str,
@@ -4383,7 +4441,7 @@ mod tests {
         assert_eq!(admin_entry.status_code, StatusCode::UNAUTHORIZED.as_u16());
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let json_body: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json_body["error"]["code"], 401);
+        assert_eq!(json_body["error"]["code"], "auth_error");
         assert_eq!(json_body["error"]["source"], "proxy");
         assert_eq!(json_body["error"]["stage"], "parse_upstream_response");
         assert_eq!(json_body["error"]["kind"], "upstream_auth_failed");
@@ -4443,7 +4501,7 @@ mod tests {
         );
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let json_body: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json_body["error"]["code"], 429);
+        assert_eq!(json_body["error"]["code"], "upstream_http_429");
         assert_eq!(json_body["error"]["source"], "proxy");
         assert_eq!(json_body["error"]["stage"], "parse_upstream_response");
         assert_eq!(json_body["error"]["kind"], "upstream_rate_limited");

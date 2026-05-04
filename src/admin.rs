@@ -1532,28 +1532,28 @@ fn redact_inline_data_and_collect_image_urls(root: &mut Value) -> Vec<String> {
         match node {
             Value::Object(map) => {
                 for key in ["inlineData", "inline_data"] {
-                    if let Some(Value::Object(inline)) = map.get_mut(key) {
-                        if let Some(Value::String(data)) = inline.get("data") {
-                            let trimmed = data.trim().to_string();
-                            if is_image_url(&trimmed) {
-                                if seen.insert(trimmed.clone()) {
-                                    urls.push(trimmed);
-                                }
-                            } else if !trimmed.is_empty() {
-                                inline.insert(
-                                    "data".to_string(),
-                                    Value::String(format!("[base64 omitted len={}]", data.len())),
-                                );
+                    if let Some(Value::Object(inline)) = map.get_mut(key)
+                        && let Some(Value::String(data)) = inline.get("data")
+                    {
+                        let trimmed = data.trim().to_string();
+                        if is_image_url(&trimmed) {
+                            if seen.insert(trimmed.clone()) {
+                                urls.push(trimmed);
                             }
+                        } else if !trimmed.is_empty() {
+                            inline.insert(
+                                "data".to_string(),
+                                Value::String(format!("[base64 omitted len={}]", data.len())),
+                            );
                         }
                     }
                 }
-                if let Some(Value::Object(file_data)) = map.get_mut("file_data") {
-                    if let Some(Value::String(file_uri)) = file_data.get("file_uri") {
-                        let trimmed = file_uri.trim().to_string();
-                        if is_image_url(&trimmed) && seen.insert(trimmed.clone()) {
-                            urls.push(trimmed);
-                        }
+                if let Some(Value::Object(file_data)) = map.get_mut("file_data")
+                    && let Some(Value::String(file_uri)) = file_data.get("file_uri")
+                {
+                    let trimmed = file_uri.trim().to_string();
+                    if is_image_url(&trimmed) && seen.insert(trimmed.clone()) {
+                        urls.push(trimmed);
                     }
                 }
 

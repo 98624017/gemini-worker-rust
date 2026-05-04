@@ -64,9 +64,7 @@ impl UpstreamBlockCache {
     pub async fn get(&self, key: &UpstreamBlockCacheKey) -> Option<BlockCacheHit> {
         let mut entries = self.entries.lock().await;
         let now = Instant::now();
-        let Some(entry) = entries.get(key) else {
-            return None;
-        };
+        let entry = entries.get(key)?;
         if entry.expires_at <= now {
             entries.pop(key);
             return None;
@@ -132,7 +130,8 @@ fn prune_expired_entries(
 ) {
     let expired_keys: Vec<_> = entries
         .iter()
-        .filter_map(|(key, entry)| (entry.expires_at <= now).then(|| key.clone()))
+        .filter(|(_, entry)| entry.expires_at <= now)
+        .map(|(key, _)| key.clone())
         .collect();
     for key in expired_keys {
         entries.pop(&key);

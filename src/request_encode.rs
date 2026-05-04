@@ -235,16 +235,16 @@ fn strip_output_from_value(body: &mut Value) {
         map.remove("output");
     }
 
-    if let Some(image_config) = body.pointer_mut("/generationConfig/imageConfig") {
-        if let Some(map) = image_config.as_object_mut() {
-            map.remove("output");
-        }
+    if let Some(image_config) = body.pointer_mut("/generationConfig/imageConfig")
+        && let Some(map) = image_config.as_object_mut()
+    {
+        map.remove("output");
     }
 
-    if let Some(image_config) = body.pointer_mut("/generation_config/image_config") {
-        if let Some(map) = image_config.as_object_mut() {
-            map.remove("output");
-        }
+    if let Some(image_config) = body.pointer_mut("/generation_config/image_config")
+        && let Some(map) = image_config.as_object_mut()
+    {
+        map.remove("output");
     }
 }
 

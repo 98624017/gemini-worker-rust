@@ -59,6 +59,7 @@ pub fn normalize_model(raw_model: &str, source: GrsaiSource) -> String {
     }
 }
 
+#[allow(clippy::result_large_err)]
 pub fn extract_gemini_params(
     body: &Value,
     raw_model: &str,
@@ -118,6 +119,7 @@ pub fn extract_gemini_params(
     })
 }
 
+#[allow(clippy::result_large_err)]
 pub fn extract_openai_params(body: &Value) -> Result<GrsaiImageParams, GrsaiError> {
     let object = body
         .as_object()
@@ -161,6 +163,7 @@ pub fn build_grsai_request_body(params: &GrsaiImageParams) -> Value {
     })
 }
 
+#[allow(clippy::result_large_err)]
 pub fn parse_grsai_response(status: StatusCode, body: &[u8]) -> Result<GrsaiResult, GrsaiError> {
     let body_text = String::from_utf8_lossy(body).into_owned();
     let payload_text = extract_payload_text(body, &body_text)?;
@@ -226,7 +229,7 @@ pub fn parse_grsai_response(status: StatusCode, body: &[u8]) -> Result<GrsaiResu
     })
 }
 
-fn pick_gemini_content<'a>(object: &'a Map<String, Value>) -> Option<&'a Value> {
+fn pick_gemini_content(object: &Map<String, Value>) -> Option<&Value> {
     let contents = object.get("contents")?.as_array()?;
     contents
         .iter()
@@ -289,6 +292,7 @@ fn pick_object_string(object: &Map<String, Value>, keys: &[&str], default: &str)
         .to_string()
 }
 
+#[allow(clippy::result_large_err)]
 fn extract_string_array(value: &Value) -> Result<Vec<String>, GrsaiError> {
     let array = value
         .as_array()
@@ -305,6 +309,7 @@ fn extract_string_array(value: &Value) -> Result<Vec<String>, GrsaiError> {
         .collect()
 }
 
+#[allow(clippy::result_large_err)]
 fn extract_payload_text(body: &[u8], body_text: &str) -> Result<String, GrsaiError> {
     if body.is_empty() || body_text.trim().is_empty() {
         return Err(parse_error("响应体为空", body_text, None));
@@ -318,12 +323,12 @@ fn extract_payload_text(body: &[u8], body_text: &str) -> Result<String, GrsaiErr
         .lines()
         .filter_map(|line| line.strip_prefix("data:"))
         .map(str::trim)
-        .filter(|line| !line.is_empty() && *line != "[DONE]")
-        .next_back()
+        .rfind(|line| !line.is_empty() && *line != "[DONE]")
         .map(ToString::to_string)
         .ok_or_else(|| parse_error("未找到可解析的数据段", body_text, None))
 }
 
+#[allow(clippy::result_large_err)]
 fn unwrap_payload(
     raw_json: Value,
     body_text: &str,

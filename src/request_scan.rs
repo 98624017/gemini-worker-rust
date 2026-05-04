@@ -18,17 +18,16 @@ pub fn scan_request_image_urls(body: &Value) -> Result<Vec<RequestImageRef>> {
 fn walk(node: &Value, path: &str, matches: &mut Vec<RequestImageRef>) -> Result<()> {
     match node {
         Value::Object(map) => {
-            if let Some(Value::Object(inline_data)) = map.get("inlineData") {
-                if let Some(Value::String(data)) = inline_data.get("data") {
-                    if is_http_url(data) {
-                        matches.push(RequestImageRef {
-                            json_pointer: format!("{path}/inlineData"),
-                            url: data.clone(),
-                        });
-                        if matches.len() > MAX_INLINE_DATA_URLS {
-                            return Err(anyhow!("too many inlineData URLs"));
-                        }
-                    }
+            if let Some(Value::Object(inline_data)) = map.get("inlineData")
+                && let Some(Value::String(data)) = inline_data.get("data")
+                && is_http_url(data)
+            {
+                matches.push(RequestImageRef {
+                    json_pointer: format!("{path}/inlineData"),
+                    url: data.clone(),
+                });
+                if matches.len() > MAX_INLINE_DATA_URLS {
+                    return Err(anyhow!("too many inlineData URLs"));
                 }
             }
 

@@ -16,6 +16,8 @@ use crate::request_materialize::{
 };
 use crate::request_scan::{MAX_INLINE_DATA_URLS, scan_request_image_urls};
 
+type CacheObserver = Arc<dyn Fn(&str, bool) + Send + Sync>;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InlineDataScan {
     pub unique_urls: Vec<String>,
@@ -28,7 +30,7 @@ pub struct RewriteServices {
     pub max_image_bytes: usize,
     pub allow_private_networks: bool,
     pub fetch_service: Option<Arc<InlineDataUrlFetchService>>,
-    pub cache_observer: Option<Arc<dyn Fn(&str, bool) + Send + Sync>>,
+    pub cache_observer: Option<CacheObserver>,
 }
 
 impl Default for RewriteServices {
@@ -251,10 +253,10 @@ fn strip_output_fields(body: &mut Value) {
         "/generationConfig/imageConfig",
         "/generation_config/image_config",
     ] {
-        if let Some(image_config) = body.pointer_mut(pointer) {
-            if let Some(map) = image_config.as_object_mut() {
-                map.remove("output");
-            }
+        if let Some(image_config) = body.pointer_mut(pointer)
+            && let Some(map) = image_config.as_object_mut()
+        {
+            map.remove("output");
         }
     }
 }

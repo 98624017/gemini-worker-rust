@@ -15,6 +15,7 @@ use crate::image_io::{
 use crate::request_scan::scan_request_image_urls;
 
 const MAX_CONCURRENT_REQUEST_IMAGE_FETCHES: usize = 4;
+type CacheObserver = Arc<dyn Fn(&str, bool) + Send + Sync>;
 
 #[derive(Clone, Debug)]
 pub struct RequestReplacement {
@@ -38,7 +39,7 @@ pub struct RequestMaterializeServices {
     pub allow_private_networks: bool,
     pub enable_webp_optimization: bool,
     pub fetch_service: Option<Arc<InlineDataUrlFetchService>>,
-    pub cache_observer: Option<Arc<dyn Fn(&str, bool) + Send + Sync>>,
+    pub cache_observer: Option<CacheObserver>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]

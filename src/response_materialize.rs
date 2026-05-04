@@ -133,19 +133,17 @@ fn scan_inline_data_base64_entries(node: &Value) -> Vec<InlineDataEntry> {
     fn walk(node: &Value, entries: &mut Vec<InlineDataEntry>) {
         match node {
             Value::Object(map) => {
-                if let Some(Value::Object(inline_data)) = map.get("inlineData") {
-                    if let (Some(Value::String(data)), Some(Value::String(mime_type))) =
+                if let Some(Value::Object(inline_data)) = map.get("inlineData")
+                    && let (Some(Value::String(data)), Some(Value::String(mime_type))) =
                         (inline_data.get("data"), inline_data.get("mimeType"))
-                    {
-                        if !is_url_like(data) {
-                            let entry = InlineDataEntry {
-                                mime_type: mime_type.clone(),
-                                data: Arc::from(data.as_str()),
-                            };
-                            if !entries.contains(&entry) {
-                                entries.push(entry);
-                            }
-                        }
+                    && !is_url_like(data)
+                {
+                    let entry = InlineDataEntry {
+                        mime_type: mime_type.clone(),
+                        data: Arc::from(data.as_str()),
+                    };
+                    if !entries.contains(&entry) {
+                        entries.push(entry);
                     }
                 }
 
@@ -169,17 +167,16 @@ fn scan_inline_data_base64_entries(node: &Value) -> Vec<InlineDataEntry> {
 fn patch_inline_data_urls(node: &mut Value, replacements: &HashMap<InlineDataEntry, String>) {
     match node {
         Value::Object(map) => {
-            if let Some(Value::Object(inline_data)) = map.get_mut("inlineData") {
-                if let (Some(Value::String(data)), Some(Value::String(mime_type))) =
+            if let Some(Value::Object(inline_data)) = map.get_mut("inlineData")
+                && let (Some(Value::String(data)), Some(Value::String(mime_type))) =
                     (inline_data.get("data"), inline_data.get("mimeType"))
-                {
-                    let entry = InlineDataEntry {
-                        mime_type: mime_type.clone(),
-                        data: Arc::from(data.as_str()),
-                    };
-                    if let Some(url) = replacements.get(&entry) {
-                        inline_data.insert("data".to_string(), Value::String(url.clone()));
-                    }
+            {
+                let entry = InlineDataEntry {
+                    mime_type: mime_type.clone(),
+                    data: Arc::from(data.as_str()),
+                };
+                if let Some(url) = replacements.get(&entry) {
+                    inline_data.insert("data".to_string(), Value::String(url.clone()));
                 }
             }
 
@@ -202,22 +199,21 @@ fn patch_inline_data_base64(
 ) {
     match node {
         Value::Object(map) => {
-            if let Some(Value::Object(inline_data)) = map.get_mut("inlineData") {
-                if let (Some(Value::String(data)), Some(Value::String(mime_type))) =
+            if let Some(Value::Object(inline_data)) = map.get_mut("inlineData")
+                && let (Some(Value::String(data)), Some(Value::String(mime_type))) =
                     (inline_data.get("data"), inline_data.get("mimeType"))
-                {
-                    let entry = InlineDataEntry {
-                        mime_type: mime_type.clone(),
-                        data: Arc::from(data.as_str()),
-                    };
-                    if let Some(replacement) = replacements.get(&entry) {
-                        inline_data.insert(
-                            "mimeType".to_string(),
-                            Value::String(replacement.mime_type.clone()),
-                        );
-                        if let Some(data) = &replacement.data {
-                            inline_data.insert("data".to_string(), Value::String(data.clone()));
-                        }
+            {
+                let entry = InlineDataEntry {
+                    mime_type: mime_type.clone(),
+                    data: Arc::from(data.as_str()),
+                };
+                if let Some(replacement) = replacements.get(&entry) {
+                    inline_data.insert(
+                        "mimeType".to_string(),
+                        Value::String(replacement.mime_type.clone()),
+                    );
+                    if let Some(data) = &replacement.data {
+                        inline_data.insert("data".to_string(), Value::String(data.clone()));
                     }
                 }
             }
