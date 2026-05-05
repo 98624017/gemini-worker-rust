@@ -57,6 +57,7 @@ pub struct Config {
     pub external_image_proxy_prefix: String,
     pub slow_log_threshold: Duration,
     pub proxy_standard_output_urls: bool,
+    pub proxy_r2_output_urls: bool,
     pub proxy_special_upstream_urls: bool,
     pub openai_image_upstream_url_proxy_prefix: String,
     pub enable_image_compression: bool,
@@ -140,6 +141,27 @@ impl Config {
             DEFAULT_IMAGE_FETCH_TIMEOUT_MS,
         );
 
+        let public_base_url = env_map
+            .get("PUBLIC_BASE_URL")
+            .map(String::as_str)
+            .map(normalize_optional_http_base_url)
+            .unwrap_or_default();
+        let external_image_proxy_prefix = env_map
+            .get("EXTERNAL_IMAGE_PROXY_PREFIX")
+            .map(String::as_str)
+            .map(parse_optional_string_with_disabled)
+            .unwrap_or_default();
+        let proxy_standard_output_urls =
+            parse_bool(env_map.get("PROXY_STANDARD_OUTPUT_URLS"), true);
+        let proxy_r2_output_urls = match env_map.get("PROXY_R2_OUTPUT_URLS") {
+            Some(value) => parse_bool(Some(value), false),
+            None => {
+                let external_prefix = external_image_proxy_prefix.trim();
+                proxy_standard_output_urls
+                    && (!external_prefix.is_empty() || !public_base_url.trim().is_empty())
+            }
+        };
+
         let config = Self {
             port,
             upstream_base_url,
@@ -167,21 +189,14 @@ impl Config {
             ),
             image_host_mode,
             allowed_proxy_domains,
-            public_base_url: env_map
-                .get("PUBLIC_BASE_URL")
-                .map(String::as_str)
-                .map(normalize_optional_http_base_url)
-                .unwrap_or_default(),
-            external_image_proxy_prefix: env_map
-                .get("EXTERNAL_IMAGE_PROXY_PREFIX")
-                .map(String::as_str)
-                .map(parse_optional_string_with_disabled)
-                .unwrap_or_default(),
+            public_base_url,
+            external_image_proxy_prefix,
             slow_log_threshold: Duration::from_millis(parse_non_negative_u64_with_default(
                 env_map.get("SLOW_LOG_THRESHOLD_MS"),
                 DEFAULT_SLOW_LOG_THRESHOLD_MS,
             )),
-            proxy_standard_output_urls: parse_bool(env_map.get("PROXY_STANDARD_OUTPUT_URLS"), true),
+            proxy_standard_output_urls,
+            proxy_r2_output_urls,
             proxy_special_upstream_urls: parse_bool(
                 env_map.get("PROXY_SPECIAL_UPSTREAM_URLS"),
                 true,
@@ -344,6 +359,14 @@ impl Config {
 
         // 兼容旧版容器配置，避免只保留 PUBLIC_BASE_URL 时忘记同步改环境变量名。
         format!("{public_base_url}/proxy/image?url=")
+    }
+
+    pub fn should_proxy_uploaded_output_url(&self, provider: &str) -> bool {
+        if provider.eq_ignore_ascii_case("r2") {
+            self.proxy_r2_output_urls
+        } else {
+            self.proxy_standard_output_urls
+        }
     }
 
     pub fn should_force_openai_image_b64_json_for_upstream(&self, base_url: &str) -> bool {

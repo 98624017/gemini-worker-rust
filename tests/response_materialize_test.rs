@@ -143,6 +143,101 @@ async fn output_url_response_keeps_custom_r2_public_url_without_proxy_prefix() {
 }
 
 #[tokio::test]
+async fn output_url_response_can_proxy_r2_public_url_when_enabled() {
+    let capture = UploadCapture::default();
+    let r2_server = Router::new()
+        .route("/{*path}", put(mock_r2_put))
+        .with_state(capture);
+    let r2_addr = spawn_server(r2_server).await;
+
+    let mut config = rust_sync_proxy::test_config();
+    config.image_host_mode = "r2".to_string();
+    config.proxy_r2_output_urls = true;
+    config.external_image_proxy_prefix = "https://external-proxy.example/fetch?url=".to_string();
+    config.r2_endpoint = format!("http://{r2_addr}");
+    config.r2_bucket = "images".to_string();
+    config.r2_access_key_id = "key".to_string();
+    config.r2_secret_access_key = "secret".to_string();
+    config.r2_public_base_url = "https://img.example.com".to_string();
+    let uploader = rust_sync_proxy::upload::Uploader::new(reqwest::Client::new(), config.clone());
+
+    let runtime = rust_sync_proxy::test_blob_runtime(8 * 1024 * 1024);
+    let mut body = json!({
+        "candidates": [{
+            "content": {
+                "parts": [{
+                    "inlineData": {
+                        "mimeType": "image/png",
+                        "data": "AQID"
+                    }
+                }]
+            }
+        }]
+    });
+
+    rust_sync_proxy::response_materialize::finalize_output_urls(
+        &mut body, &runtime, &uploader, &config,
+    )
+    .await
+    .unwrap();
+
+    let final_url = body["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
+        .as_str()
+        .unwrap();
+    assert!(final_url.starts_with(
+        "https://external-proxy.example/fetch?url=https%3A%2F%2Fimg.example.com%2Fimages%2F"
+    ));
+}
+
+#[tokio::test]
+async fn output_url_response_can_proxy_r2_even_when_standard_proxy_flag_is_disabled() {
+    let capture = UploadCapture::default();
+    let r2_server = Router::new()
+        .route("/{*path}", put(mock_r2_put))
+        .with_state(capture);
+    let r2_addr = spawn_server(r2_server).await;
+
+    let mut config = rust_sync_proxy::test_config();
+    config.image_host_mode = "r2".to_string();
+    config.proxy_standard_output_urls = false;
+    config.proxy_r2_output_urls = true;
+    config.external_image_proxy_prefix = "https://external-proxy.example/fetch?url=".to_string();
+    config.r2_endpoint = format!("http://{r2_addr}");
+    config.r2_bucket = "images".to_string();
+    config.r2_access_key_id = "key".to_string();
+    config.r2_secret_access_key = "secret".to_string();
+    config.r2_public_base_url = "https://img.example.com".to_string();
+    let uploader = rust_sync_proxy::upload::Uploader::new(reqwest::Client::new(), config.clone());
+
+    let runtime = rust_sync_proxy::test_blob_runtime(8 * 1024 * 1024);
+    let mut body = json!({
+        "candidates": [{
+            "content": {
+                "parts": [{
+                    "inlineData": {
+                        "mimeType": "image/png",
+                        "data": "AQID"
+                    }
+                }]
+            }
+        }]
+    });
+
+    rust_sync_proxy::response_materialize::finalize_output_urls(
+        &mut body, &runtime, &uploader, &config,
+    )
+    .await
+    .unwrap();
+
+    let final_url = body["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
+        .as_str()
+        .unwrap();
+    assert!(final_url.starts_with(
+        "https://external-proxy.example/fetch?url=https%3A%2F%2Fimg.example.com%2Fimages%2F"
+    ));
+}
+
+#[tokio::test]
 async fn output_url_response_streams_large_base64_without_runtime_spill() {
     let capture = UploadCapture::default();
     let upload_server = Router::new()

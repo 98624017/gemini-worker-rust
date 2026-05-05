@@ -238,7 +238,7 @@ fn is_url_like(value: &str) -> bool {
 }
 
 fn should_proxy_standard_output_url(config: &Config, provider: &str) -> bool {
-    config.proxy_standard_output_urls && !provider.eq_ignore_ascii_case("r2")
+    config.should_proxy_uploaded_output_url(provider)
 }
 
 #[cfg(test)]

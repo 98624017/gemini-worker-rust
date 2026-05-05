@@ -50,6 +50,7 @@ fn defaults_match_runtime_expectations() {
         vec!["happyapi.org".to_string(), "www.happyapi.org".to_string()]
     );
     assert!(cfg.openai_image_upstream_url_proxy_prefix.is_empty());
+    assert!(!cfg.proxy_r2_output_urls);
 }
 
 #[test]
@@ -242,6 +243,78 @@ fn openai_image_upstream_url_proxy_prefix_can_be_loaded_from_env() {
         cfg.openai_image_upstream_url_proxy_prefix,
         "https://openai-proxy.example.com/fetch?url="
     );
+}
+
+#[test]
+fn proxy_r2_output_urls_can_be_enabled_from_env() {
+    let env = HashMap::from([("PROXY_R2_OUTPUT_URLS".to_string(), "1".to_string())]);
+
+    let cfg = rust_sync_proxy::config::Config::from_env_map(&env).unwrap();
+
+    assert!(cfg.proxy_r2_output_urls);
+}
+
+#[test]
+fn proxy_r2_output_urls_can_be_disabled_from_env() {
+    let env = HashMap::from([("PROXY_R2_OUTPUT_URLS".to_string(), "0".to_string())]);
+
+    let cfg = rust_sync_proxy::config::Config::from_env_map(&env).unwrap();
+
+    assert!(!cfg.proxy_r2_output_urls);
+}
+
+#[test]
+fn proxy_r2_output_urls_defaults_to_enabled_when_public_base_url_exists() {
+    let env = HashMap::from([(
+        "PUBLIC_BASE_URL".to_string(),
+        "https://proxy.example.com".to_string(),
+    )]);
+
+    let cfg = rust_sync_proxy::config::Config::from_env_map(&env).unwrap();
+
+    assert!(cfg.proxy_r2_output_urls);
+}
+
+#[test]
+fn proxy_r2_output_urls_defaults_to_enabled_when_external_proxy_prefix_exists() {
+    let env = HashMap::from([(
+        "EXTERNAL_IMAGE_PROXY_PREFIX".to_string(),
+        "https://proxy.example.com/fetch?url=".to_string(),
+    )]);
+
+    let cfg = rust_sync_proxy::config::Config::from_env_map(&env).unwrap();
+
+    assert!(cfg.proxy_r2_output_urls);
+}
+
+#[test]
+fn proxy_r2_output_urls_explicit_zero_overrides_public_base_url_default() {
+    let env = HashMap::from([
+        (
+            "PUBLIC_BASE_URL".to_string(),
+            "https://proxy.example.com".to_string(),
+        ),
+        ("PROXY_R2_OUTPUT_URLS".to_string(), "0".to_string()),
+    ]);
+
+    let cfg = rust_sync_proxy::config::Config::from_env_map(&env).unwrap();
+
+    assert!(!cfg.proxy_r2_output_urls);
+}
+
+#[test]
+fn proxy_r2_output_urls_defaults_to_disabled_when_standard_proxy_flag_is_disabled() {
+    let env = HashMap::from([
+        (
+            "PUBLIC_BASE_URL".to_string(),
+            "https://proxy.example.com".to_string(),
+        ),
+        ("PROXY_STANDARD_OUTPUT_URLS".to_string(), "0".to_string()),
+    ]);
+
+    let cfg = rust_sync_proxy::config::Config::from_env_map(&env).unwrap();
+
+    assert!(!cfg.proxy_r2_output_urls);
 }
 
 #[test]

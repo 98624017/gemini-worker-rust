@@ -152,6 +152,12 @@ export MALLOC_CONF="background_thread:true,dirty_decay_ms:100,muzzy_decay_ms:100
 - `PROXY_STANDARD_OUTPUT_URLS`
   默认开启；控制标准链路里 `legacy` / `r2_then_legacy` 回退到 `legacy`
   时是否包装代理前缀
+- `PROXY_R2_OUTPUT_URLS`
+  支持 `0/1`；仅影响标准链路和 `POST /v1/images/generations`
+  里由 `r2` 上传成功后返回的 URL 是否包装代理前缀。
+  未显式设置时，如果 `EXTERNAL_IMAGE_PROXY_PREFIX` 非空，或 `PUBLIC_BASE_URL`
+  可推导出代理前缀，且 `PROXY_STANDARD_OUTPUT_URLS` 没被关闭，则默认开启；
+  否则默认关闭
 - `SLOW_LOG_THRESHOLD_MS`
   默认 `100000`；`0` 表示关闭慢请求日志
 - `PROXY_SPECIAL_UPSTREAM_URLS`
@@ -273,8 +279,10 @@ R2 模式还需要：
   并转为 multipart；参考图字段兼容 `image`、`images`、`reference_images`
 - 标准链路里，`legacy` 上传结果会在 `PROXY_STANDARD_OUTPUT_URLS=true` 时包装代理前缀
 - `r2` 成功后真实 URL 为 `R2_PUBLIC_BASE_URL/<objectKey>`
-- 标准链路里，`r2` 成功后永远直接返回
-  `R2_PUBLIC_BASE_URL/<objectKey>`，不会再套一层代理
+- 标准链路和 `POST /v1/images/generations` 里，`r2` 成功后是否包装代理前缀，
+  由 `PROXY_R2_OUTPUT_URLS` 控制；未显式设置时，会跟随
+  `EXTERNAL_IMAGE_PROXY_PREFIX` / `PUBLIC_BASE_URL` 是否能解析出代理前缀，
+  但仍会继承 `PROXY_STANDARD_OUTPUT_URLS=0` 的关闭态
 - `r2_then_legacy` 先尝试 R2，失败后回退 legacy
 - `aiapidev` / Markdown 特殊上游结果受 `PROXY_SPECIAL_UPSTREAM_URLS` 控制
 - 上传失败统一走 fail-open，保留原始 base64
@@ -311,6 +319,7 @@ export R2_BUCKET="images"
 export R2_ACCESS_KEY_ID="key"
 export R2_SECRET_ACCESS_KEY="secret"
 export R2_PUBLIC_BASE_URL="https://img.example.com"
+export PROXY_R2_OUTPUT_URLS="1"
 
 curl -sS \
   -H 'Content-Type: application/json' \
@@ -567,6 +576,7 @@ docker run --rm -p 8787:8787 \
   -e R2_ACCESS_KEY_ID="key" \
   -e R2_SECRET_ACCESS_KEY="secret" \
   -e R2_PUBLIC_BASE_URL="https://img.example.com" \
+  -e PROXY_R2_OUTPUT_URLS="1" \
   rust-sync-proxy:local
 ```
 

@@ -3214,9 +3214,7 @@ fn build_openai_image_output_url(config: &Config, provider: &str, target_url: &s
     }
 
     let external_proxy_prefix = config.resolved_external_image_proxy_prefix();
-    if config.proxy_standard_output_urls
-        && !provider.eq_ignore_ascii_case("r2")
-        && !external_proxy_prefix.trim().is_empty()
+    if config.should_proxy_uploaded_output_url(provider) && !external_proxy_prefix.trim().is_empty()
     {
         return wrap_external_proxy_url(&external_proxy_prefix, target_url);
     }
@@ -3762,6 +3760,67 @@ mod tests {
         assert_eq!(create_bodies[0]["aspectRatio"], "16:9");
         assert_eq!(create_bodies[0]["imageSize"], "2K");
         assert_eq!(create_bodies[0]["shutProgress"], true);
+    }
+
+    #[test]
+    fn build_openai_image_output_url_keeps_r2_url_without_proxy_prefix_by_default() {
+        let mut config = crate::test_config();
+        config.external_image_proxy_prefix =
+            "https://proxy.example.com/base/proxy/image?url=".to_string();
+        config.proxy_standard_output_urls = true;
+
+        let final_url =
+            build_openai_image_output_url(&config, "r2", "https://img.example.com/images/demo");
+
+        assert_eq!(final_url, "https://img.example.com/images/demo");
+    }
+
+    #[test]
+    fn build_openai_image_output_url_can_proxy_r2_url_when_enabled() {
+        let mut config = crate::test_config();
+        config.external_image_proxy_prefix =
+            "https://proxy.example.com/base/proxy/image?url=".to_string();
+        config.proxy_standard_output_urls = true;
+        config.proxy_r2_output_urls = true;
+
+        let final_url =
+            build_openai_image_output_url(&config, "r2", "https://img.example.com/images/demo");
+
+        assert_eq!(
+            final_url,
+            "https://proxy.example.com/base/proxy/image?url=https%3A%2F%2Fimg.example.com%2Fimages%2Fdemo"
+        );
+    }
+
+    #[test]
+    fn build_openai_image_output_url_can_proxy_r2_when_standard_proxy_flag_is_disabled() {
+        let mut config = crate::test_config();
+        config.external_image_proxy_prefix =
+            "https://proxy.example.com/base/proxy/image?url=".to_string();
+        config.proxy_standard_output_urls = false;
+        config.proxy_r2_output_urls = true;
+
+        let final_url =
+            build_openai_image_output_url(&config, "r2", "https://img.example.com/images/demo");
+
+        assert_eq!(
+            final_url,
+            "https://proxy.example.com/base/proxy/image?url=https%3A%2F%2Fimg.example.com%2Fimages%2Fdemo"
+        );
+    }
+
+    #[test]
+    fn build_openai_image_output_url_keeps_legacy_url_when_standard_proxy_flag_is_disabled() {
+        let mut config = crate::test_config();
+        config.external_image_proxy_prefix =
+            "https://proxy.example.com/base/proxy/image?url=".to_string();
+        config.proxy_standard_output_urls = false;
+        config.proxy_r2_output_urls = true;
+
+        let final_url =
+            build_openai_image_output_url(&config, "legacy", "https://img.example.com/images/demo");
+
+        assert_eq!(final_url, "https://img.example.com/images/demo");
     }
 
     #[tokio::test]
