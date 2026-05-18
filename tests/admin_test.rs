@@ -431,7 +431,11 @@ async fn admin_logs_capture_structured_upstream_connect_failures() {
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["error"]["source"], "proxy");
     assert_eq!(json["error"]["stage"], "send_upstream_request");
-    assert_eq!(json["error"]["kind"], "upstream_connect_failed");
+    assert_eq!(json["error"]["kind"], "upstream_connection_refused");
+    assert_eq!(
+        json["error"]["message"],
+        "上游服务拒绝连接，请检查地址、端口或服务状态"
+    );
 
     let auth = format!("Basic {}", STANDARD.encode("user:pw"));
     let logs_response = app
@@ -452,8 +456,11 @@ async fn admin_logs_capture_structured_upstream_connect_failures() {
     let item = &json["items"][0];
     assert_eq!(item["errorSource"], "proxy");
     assert_eq!(item["errorStage"], "send_upstream_request");
-    assert_eq!(item["errorKind"], "upstream_connect_failed");
-    assert_eq!(item["errorMessage"], "连接上游服务失败，请稍后再试");
+    assert_eq!(item["errorKind"], "upstream_connection_refused");
+    assert_eq!(
+        item["errorMessage"],
+        "上游服务拒绝连接，请检查地址、端口或服务状态"
+    );
     let error_detail = item["errorDetail"].as_str().unwrap_or_default();
     assert!(!error_detail.is_empty());
     assert!(error_detail.contains(&addr.to_string()));

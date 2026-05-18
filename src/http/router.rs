@@ -55,6 +55,10 @@ const MSG_REQUEST_BODY_TOO_LARGE: &str = "请求内容太大，请缩小后再�
 const MSG_READ_REQUEST_BODY_FAILED: &str = "读取请求内容失败，请重试";
 const MSG_UPSTREAM_TIMEOUT: &str = "上游服务响应超时，请稍后再试";
 const MSG_UPSTREAM_CONNECT_FAILED: &str = "连接上游服务失败，请稍后再试";
+const MSG_UPSTREAM_CONNECT_TIMEOUT: &str = "连接上游服务超时，请检查上游网络或地址配置";
+const MSG_UPSTREAM_DNS_FAILED: &str = "解析上游服务域名失败，请检查上游地址或 DNS 配置";
+const MSG_UPSTREAM_CONNECTION_REFUSED: &str = "上游服务拒绝连接，请检查地址、端口或服务状态";
+const MSG_UPSTREAM_TLS_FAILED: &str = "上游服务 TLS 握手失败，请检查证书或协议配置";
 const MSG_UPSTREAM_REQUEST_BODY_FAILED: &str = "发送请求内容到上游服务时失败，请稍后再试";
 const MSG_UPSTREAM_REQUEST_FAILED: &str = "请求上游服务失败，请稍后再试";
 const MSG_UPSTREAM_TRANSPORT_ERROR: &str = "上游服务通信异常，请稍后再试";
@@ -231,6 +235,12 @@ impl fmt::Display for StructuredProxyError {
 
 impl StdError for StructuredProxyError {}
 
+#[derive(Clone, Copy)]
+struct ReqwestProxyErrorClass {
+    message: &'static str,
+    kind: &'static str,
+}
+
 fn classify_standard_proxy_error_detail(err: &anyhow::Error) -> Option<StructuredProxyError> {
     if let Some(structured) = err.downcast_ref::<StructuredProxyError>() {
         return Some(StructuredProxyError::new(
@@ -242,41 +252,112 @@ fn classify_standard_proxy_error_detail(err: &anyhow::Error) -> Option<Structure
     }
 
     let reqwest_error = err.downcast_ref::<reqwest::Error>()?;
-    let (message, kind) = if reqwest_error.is_timeout() {
-        (MSG_UPSTREAM_TIMEOUT, "upstream_timeout")
-    } else if reqwest_error.is_connect() {
-        (MSG_UPSTREAM_CONNECT_FAILED, "upstream_connect_failed")
-    } else if reqwest_error.is_body() {
-        (
-            MSG_UPSTREAM_REQUEST_BODY_FAILED,
-            "upstream_request_body_failed",
-        )
-    } else if reqwest_error.is_request() {
-        (MSG_UPSTREAM_REQUEST_FAILED, "upstream_request_failed")
-    } else {
-        (MSG_UPSTREAM_TRANSPORT_ERROR, "upstream_transport_error")
-    };
+    let class = classify_reqwest_proxy_error(reqwest_error);
+    let detail = reqwest_error_detail(reqwest_error);
 
     Some(StructuredProxyError::new(
-        message,
+        class.message,
         "send_upstream_request",
-        kind,
-        reqwest_error.to_string(),
+        class.kind,
+        detail,
     ))
 }
 
-fn classify_reqwest_proxy_message(err: &reqwest::Error) -> &'static str {
-    if err.is_timeout() {
-        MSG_UPSTREAM_TIMEOUT
-    } else if err.is_connect() {
-        MSG_UPSTREAM_CONNECT_FAILED
-    } else if err.is_body() {
-        MSG_UPSTREAM_REQUEST_BODY_FAILED
-    } else if err.is_request() {
-        MSG_UPSTREAM_REQUEST_FAILED
-    } else {
-        MSG_UPSTREAM_TRANSPORT_ERROR
+fn classify_reqwest_proxy_error(err: &reqwest::Error) -> ReqwestProxyErrorClass {
+    if err.is_connect() {
+        let detail = reqwest_error_detail(err);
+        if let Some(class) = classify_reqwest_connect_error_detail(&detail) {
+            return class;
+        }
+        if err.is_timeout() {
+            return ReqwestProxyErrorClass {
+                message: MSG_UPSTREAM_CONNECT_TIMEOUT,
+                kind: "upstream_connect_timeout",
+            };
+        }
+        return ReqwestProxyErrorClass {
+            message: MSG_UPSTREAM_CONNECT_FAILED,
+            kind: "upstream_connect_failed",
+        };
     }
+    if err.is_timeout() {
+        return ReqwestProxyErrorClass {
+            message: MSG_UPSTREAM_TIMEOUT,
+            kind: "upstream_timeout",
+        };
+    }
+    if err.is_body() {
+        return ReqwestProxyErrorClass {
+            message: MSG_UPSTREAM_REQUEST_BODY_FAILED,
+            kind: "upstream_request_body_failed",
+        };
+    }
+    if err.is_request() {
+        return ReqwestProxyErrorClass {
+            message: MSG_UPSTREAM_REQUEST_FAILED,
+            kind: "upstream_request_failed",
+        };
+    }
+    ReqwestProxyErrorClass {
+        message: MSG_UPSTREAM_TRANSPORT_ERROR,
+        kind: "upstream_transport_error",
+    }
+}
+
+fn reqwest_error_detail(err: &reqwest::Error) -> String {
+    let mut detail = err.to_string();
+    let mut source = StdError::source(err);
+    while let Some(err) = source {
+        detail.push_str(": ");
+        detail.push_str(&err.to_string());
+        source = err.source();
+    }
+    detail
+}
+
+fn classify_reqwest_connect_error_detail(detail: &str) -> Option<ReqwestProxyErrorClass> {
+    let lower = detail.to_ascii_lowercase();
+    if lower.contains("dns error")
+        || lower.contains("failed to lookup address information")
+        || lower.contains("name or service not known")
+        || lower.contains("temporary failure in name resolution")
+        || lower.contains("nodename nor servname provided")
+        || lower.contains("no such host")
+    {
+        return Some(ReqwestProxyErrorClass {
+            message: MSG_UPSTREAM_DNS_FAILED,
+            kind: "upstream_dns_failed",
+        });
+    }
+    if lower.contains("connection refused")
+        || lower.contains("actively refused")
+        || lower.contains("os error 111")
+    {
+        return Some(ReqwestProxyErrorClass {
+            message: MSG_UPSTREAM_CONNECTION_REFUSED,
+            kind: "upstream_connection_refused",
+        });
+    }
+    if lower.contains("timed out") || lower.contains("operation timed out") {
+        return Some(ReqwestProxyErrorClass {
+            message: MSG_UPSTREAM_CONNECT_TIMEOUT,
+            kind: "upstream_connect_timeout",
+        });
+    }
+    if lower.contains("tls")
+        || lower.contains("certificate")
+        || lower.contains("invalid peer certificate")
+    {
+        return Some(ReqwestProxyErrorClass {
+            message: MSG_UPSTREAM_TLS_FAILED,
+            kind: "upstream_tls_failed",
+        });
+    }
+    None
+}
+
+fn classify_reqwest_proxy_message(err: &reqwest::Error) -> &'static str {
+    classify_reqwest_proxy_error(err).message
 }
 
 fn classify_standard_proxy_error(err: &anyhow::Error) -> Option<Value> {
@@ -397,6 +478,7 @@ fn build_upstream_client(config: &Config) -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(config.upstream_timeout)
         .connect_timeout(config.upstream_connect_timeout)
+        .danger_accept_invalid_certs(config.upstream_insecure_skip_verify)
         .tcp_keepalive(config.upstream_tcp_keepalive)
         .pool_idle_timeout(config.upstream_pool_idle_timeout)
         .build()
@@ -6017,5 +6099,37 @@ mod tests {
             structured.detail,
             "上游响应缺少 data[].b64_json 或 data[].url"
         );
+    }
+
+    #[test]
+    fn classify_reqwest_connect_error_detail_detects_common_root_causes() {
+        let cases = [
+            (
+                "error trying to connect: dns error: failed to lookup address information",
+                "upstream_dns_failed",
+                MSG_UPSTREAM_DNS_FAILED,
+            ),
+            (
+                "error trying to connect: tcp connect error: Connection refused (os error 111)",
+                "upstream_connection_refused",
+                MSG_UPSTREAM_CONNECTION_REFUSED,
+            ),
+            (
+                "error trying to connect: tcp connect error: Operation timed out (os error 60)",
+                "upstream_connect_timeout",
+                MSG_UPSTREAM_CONNECT_TIMEOUT,
+            ),
+            (
+                "error trying to connect: invalid peer certificate: UnknownIssuer",
+                "upstream_tls_failed",
+                MSG_UPSTREAM_TLS_FAILED,
+            ),
+        ];
+
+        for (detail, expected_kind, expected_message) in cases {
+            let class = classify_reqwest_connect_error_detail(detail).unwrap();
+            assert_eq!(class.kind, expected_kind, "detail={detail}");
+            assert_eq!(class.message, expected_message, "detail={detail}");
+        }
     }
 }

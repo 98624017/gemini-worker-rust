@@ -112,6 +112,13 @@ export MALLOC_CONF="background_thread:true,dirty_decay_ms:100,muzzy_decay_ms:100
   默认 `https://magic666.top`
 - `UPSTREAM_API_KEY`
   必填；为空时请求返回 `401`
+- `UPSTREAM_TIMEOUT_MS`
+  上游请求总超时；默认 `600000`
+- `UPSTREAM_CONNECT_TIMEOUT_MS`
+  连接上游阶段超时；默认 `30000`
+- `UPSTREAM_INSECURE_SKIP_VERIFY`
+  默认关闭；设为 `true`/`1` 时，上游请求跳过 TLS 证书校验。只建议在确认上游
+  证书链异常且能接受中间人风险时临时开启
 - `MALLOC_CONF`
   `jemalloc` 运行时参数；镜像默认
   `background_thread:true,dirty_decay_ms:500,muzzy_decay_ms:500`

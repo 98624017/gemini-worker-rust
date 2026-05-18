@@ -7,7 +7,7 @@ fn defaults_match_runtime_expectations() {
     assert_eq!(cfg.port, 8787);
     assert_eq!(cfg.upstream_base_url, "https://magic666.top");
     assert_eq!(cfg.upstream_timeout, Duration::from_millis(600_000));
-    assert_eq!(cfg.upstream_connect_timeout, Duration::from_millis(10_000));
+    assert_eq!(cfg.upstream_connect_timeout, Duration::from_millis(30_000));
     assert_eq!(cfg.upstream_tcp_keepalive, Duration::from_millis(30_000));
     assert_eq!(
         cfg.upstream_pool_idle_timeout,
@@ -30,6 +30,7 @@ fn defaults_match_runtime_expectations() {
         Duration::from_millis(10_000)
     );
     assert!(!cfg.image_fetch_insecure_skip_verify);
+    assert!(!cfg.upstream_insecure_skip_verify);
     assert!(!cfg.upload_insecure_skip_verify);
     assert_eq!(
         cfg.inline_data_url_memory_cache_max_bytes,
@@ -76,6 +77,10 @@ fn disabled_values_follow_go_semantics() {
             "IMAGE_FETCH_INSECURE_SKIP_VERIFY".to_string(),
             "true".to_string(),
         ),
+        (
+            "UPSTREAM_INSECURE_SKIP_VERIFY".to_string(),
+            "true".to_string(),
+        ),
         ("UPLOAD_INSECURE_SKIP_VERIFY".to_string(), "1".to_string()),
     ]);
 
@@ -85,6 +90,7 @@ fn disabled_values_follow_go_semantics() {
     assert!(cfg.inline_data_url_cache_dir.is_empty());
     assert_eq!(cfg.inline_data_url_memory_cache_max_bytes, 0);
     assert!(cfg.image_fetch_insecure_skip_verify);
+    assert!(cfg.upstream_insecure_skip_verify);
     assert!(cfg.upload_insecure_skip_verify);
 }
 

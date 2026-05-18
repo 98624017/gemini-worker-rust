@@ -8,7 +8,7 @@ use url::Url;
 const DEFAULT_UPSTREAM_BASE_URL: &str = "https://magic666.top";
 const DEFAULT_PORT: u16 = 8787;
 const DEFAULT_UPSTREAM_TIMEOUT_MS: u64 = 600_000;
-const DEFAULT_UPSTREAM_CONNECT_TIMEOUT_MS: u64 = 10_000;
+const DEFAULT_UPSTREAM_CONNECT_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_UPSTREAM_TCP_KEEPALIVE_MS: u64 = 30_000;
 const DEFAULT_UPSTREAM_POOL_IDLE_TIMEOUT_MS: u64 = 15_000;
 const DEFAULT_UPSTREAM_BLOCK_CACHE_TTL_MS: u64 = 300_000;
@@ -47,6 +47,7 @@ pub struct Config {
     pub upstream_api_key: String,
     pub upstream_timeout: Duration,
     pub upstream_connect_timeout: Duration,
+    pub upstream_insecure_skip_verify: bool,
     pub upstream_tcp_keepalive: Duration,
     pub upstream_pool_idle_timeout: Duration,
     pub upstream_block_cache_ttl: Duration,
@@ -171,6 +172,10 @@ impl Config {
                 env_map.get("UPSTREAM_CONNECT_TIMEOUT_MS"),
                 DEFAULT_UPSTREAM_CONNECT_TIMEOUT_MS,
             )),
+            upstream_insecure_skip_verify: parse_bool(
+                env_map.get("UPSTREAM_INSECURE_SKIP_VERIFY"),
+                false,
+            ),
             upstream_tcp_keepalive: Duration::from_millis(parse_positive_u64_with_default(
                 env_map.get("UPSTREAM_TCP_KEEPALIVE_MS"),
                 DEFAULT_UPSTREAM_TCP_KEEPALIVE_MS,
