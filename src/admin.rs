@@ -1528,6 +1528,49 @@ fn redact_inline_data_and_collect_image_urls(root: &mut Value) -> Vec<String> {
     let mut urls = Vec::new();
     let mut seen = HashSet::new();
 
+    fn push_image_url(raw: &str, urls: &mut Vec<String>, seen: &mut HashSet<String>) {
+        let trimmed = raw.trim().to_string();
+        if is_image_url(&trimmed) && seen.insert(trimmed.clone()) {
+            urls.push(trimmed);
+        }
+    }
+
+    fn collect_explicit_url_image_items(
+        node: &Value,
+        urls: &mut Vec<String>,
+        seen: &mut HashSet<String>,
+    ) {
+        match node {
+            Value::Object(map) => {
+                let is_typed_image = map
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| value.eq_ignore_ascii_case("image"));
+                if is_typed_image && let Some(Value::String(url)) = map.get("url") {
+                    push_image_url(url, urls, seen);
+                }
+                for child in map.values() {
+                    collect_explicit_url_image_items(child, urls, seen);
+                }
+            }
+            Value::Array(items) => {
+                for child in items {
+                    collect_explicit_url_image_items(child, urls, seen);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(items) = root.get("data").and_then(Value::as_array) {
+        for item in items {
+            if let Some(url) = item.get("url").and_then(Value::as_str) {
+                push_image_url(url, &mut urls, &mut seen);
+            }
+        }
+    }
+    collect_explicit_url_image_items(root, &mut urls, &mut seen);
+
     fn walk(node: &mut Value, urls: &mut Vec<String>, seen: &mut HashSet<String>) {
         match node {
             Value::Object(map) => {

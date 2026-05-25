@@ -30,6 +30,39 @@ fn admin_log_collects_proxy_and_http_image_urls() {
 }
 
 #[test]
+fn admin_log_collects_openai_image_response_urls() {
+    let sanitized = rust_sync_proxy::admin::sanitize_json_for_log(
+        br#"{"created":1776663103,"data":[{"url":"https://img.example/final.png"}]}"#,
+    );
+
+    assert_eq!(
+        sanitized.image_urls,
+        vec!["https://img.example/final.png".to_string()]
+    );
+}
+
+#[test]
+fn admin_log_does_not_collect_generic_url_fields_as_images() {
+    let sanitized = rust_sync_proxy::admin::sanitize_json_for_log(
+        br#"{"candidates":[{"content":{"parts":[{"text":"see link"},{"url":"https://docs.example/reference"}]}}],"error":{"url":"https://status.example/error"}}"#,
+    );
+
+    assert!(sanitized.image_urls.is_empty());
+}
+
+#[test]
+fn admin_log_collects_typed_image_url_items() {
+    let sanitized = rust_sync_proxy::admin::sanitize_json_for_log(
+        br#"{"result":{"items":[{"url":"https://img.example/final.png","type":"image"},{"url":"https://docs.example/page","type":"link"}]}}"#,
+    );
+
+    assert_eq!(
+        sanitized.image_urls,
+        vec!["https://img.example/final.png".to_string()]
+    );
+}
+
+#[test]
 fn maybe_sanitize_json_for_log_skips_when_admin_is_disabled() {
     let sanitized = rust_sync_proxy::admin::maybe_sanitize_json_for_log(
         br#"{"inlineData":{"data":"AQID"}}"#,

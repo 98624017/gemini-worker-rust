@@ -20,7 +20,7 @@ DEFAULT_PROXY_HOST = "127.0.0.1"
 DEFAULT_PROXY_PORT = 18790
 DEFAULT_STARTUP_TIMEOUT_SECONDS = 60.0
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 450.0
-DEFAULT_AIAPIDEV_BASE_URL = "https://www.aiapidev.com"
+DEFAULT_AIAPIDEV_BASE_URL = "https://www.aiapipro.vip"
 DEFAULT_GOOD_IMAGE_URLS = [
     "https://httpbin.org/image/png",
     "https://httpbin.org/image/jpeg",

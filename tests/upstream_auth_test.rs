@@ -90,9 +90,12 @@ fn malformed_dual_upstream_token_returns_error() {
 #[test]
 fn aiapidev_base_url_is_detected() {
     assert!(rust_sync_proxy::upstream::is_aiapidev_base_url(
+        "https://www.aiapipro.vip"
+    ));
+    assert!(!rust_sync_proxy::upstream::is_aiapidev_base_url(
         "https://www.aiapidev.com"
     ));
-    assert!(rust_sync_proxy::upstream::is_aiapidev_base_url(
+    assert!(!rust_sync_proxy::upstream::is_aiapidev_base_url(
         "https://aiapidev.com"
     ));
     assert!(!rust_sync_proxy::upstream::is_aiapidev_base_url(

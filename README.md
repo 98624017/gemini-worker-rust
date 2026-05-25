@@ -31,7 +31,7 @@
 | Provider | 匹配域名 | 行为 |
 | --- | --- | --- |
 | `grsai` | `grsai.com`、`*.grsai.com` | 同步单次请求到 `/v1/draw/nano-banana` |
-| `aiapidev` | `aiapidev.com`、`www.aiapidev.com` | 创建任务并轮询结果 |
+| `aiapidev` | `www.aiapipro.vip` | 创建任务并轮询结果 |
 | `transparent` | 其他上游 | 保持现有 Gemini/OpenAI 透明转发 |
 
 `grsai` 支持 Gemini `generateContent` 和 OpenAI `/v1/images/generations`。
@@ -336,7 +336,7 @@ curl -sS \
 
 ### `aiapidev` 特殊兼容
 
-- 当请求头里的上游地址是 `https://www.aiapidev.com` 或 `https://aiapidev.com` 时，代理会走专用分支：
+- 当请求头里的上游地址是 `https://www.aiapipro.vip` 时，代理会走专用分支：
   - `gemini-3-pro-image-preview -> nanobananapro`
   - `gemini-3.1-flash-image-preview -> nanobanana2`
   - 请求体里的图片 URL 会从 `inlineData` 改写成 `file_data.file_uri`

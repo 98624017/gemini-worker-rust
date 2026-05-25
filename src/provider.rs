@@ -59,7 +59,7 @@ pub fn is_aiapidev_base_url(raw: &str) -> bool {
     let Some(host) = parse_host(raw) else {
         return false;
     };
-    matches!(host.as_str(), "aiapidev.com" | "www.aiapidev.com")
+    host == "www.aiapipro.vip"
 }
 
 fn parse_host(raw: &str) -> Option<String> {

@@ -153,10 +153,7 @@ pub fn is_aiapidev_base_url(raw: &str) -> bool {
     let Ok(parsed) = Url::parse(raw) else {
         return false;
     };
-    matches!(
-        parsed.host_str(),
-        Some("www.aiapidev.com") | Some("aiapidev.com")
-    )
+    matches!(parsed.host_str(), Some("www.aiapipro.vip"))
 }
 
 pub fn is_happyapi_base_url(raw: &str) -> bool {

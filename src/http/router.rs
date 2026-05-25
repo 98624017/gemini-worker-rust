@@ -3570,7 +3570,7 @@ mod tests {
         });
 
         let resolved = ResolvedUpstream {
-            base_url: "http://www.aiapidev.com".to_string(),
+            base_url: "http://www.aiapipro.vip".to_string(),
             api_key: "special-key".to_string(),
         };
         let upstream_client = reqwest::Client::builder()
@@ -3664,7 +3664,7 @@ mod tests {
         });
 
         let resolved = ResolvedUpstream {
-            base_url: "http://www.aiapidev.com".to_string(),
+            base_url: "http://www.aiapipro.vip".to_string(),
             api_key: "special-key".to_string(),
         };
         let upstream_client = reqwest::Client::builder()
@@ -5719,7 +5719,7 @@ mod tests {
         });
 
         let mut config = crate::test_config();
-        config.upstream_base_url = "http://www.aiapidev.com".to_string();
+        config.upstream_base_url = "http://www.aiapipro.vip".to_string();
         config.upstream_api_key = "special-key".to_string();
         config.public_base_url = "https://proxy.example.com/base/".to_string();
         config.proxy_special_upstream_urls = true;

@@ -13,7 +13,7 @@ Rust 同步代理当前已经支持 Gemini `generateContent` 透明转发、Open
 Go 版 `go-banana-proxy` 已经有更明确的上游抽象：
 
 - `grsai`：`api.grsai.com`，同步单次请求。
-- `aiapidev`：`www.aiapidev.com`，异步创建任务并轮询。
+- `aiapidev`：`www.aiapipro.vip`，异步创建任务并轮询。
 
 这次目标是把 Go 版 `grsai` 同步链路复刻到 Rust 项目，同时引入统一
 Provider Registry，避免继续把新渠道做成路由层特例。
@@ -45,7 +45,7 @@ Provider Registry，避免继续把新渠道做成路由层特例。
 ```text
 resolved.base_url
   ├── grsai.com / *.grsai.com -> grsai provider
-  ├── aiapidev.com / www.aiapidev.com -> aiapidev provider
+  ├── www.aiapipro.vip -> aiapidev provider
   └── 其他 -> transparent provider
 ```
 
@@ -338,7 +338,7 @@ Provider registry：
 3. `sub.api.grsai.com` 命中 `grsai`。
 4. `evilgrsai.com` 不命中。
 5. `grsai.com.evil.com` 不命中。
-6. `aiapidev.com` 和 `www.aiapidev.com` 命中 `aiapidev`。
+6. `www.aiapipro.vip` 命中 `aiapidev`。
 7. 未知域返回 transparent。
 
 `grsai` 请求构造：

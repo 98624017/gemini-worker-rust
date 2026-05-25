@@ -30,15 +30,26 @@ fn grsai_provider_rejects_suffix_tricks() {
 }
 
 #[test]
-fn aiapidev_provider_matches_existing_hosts() {
+fn aiapidev_provider_matches_current_host() {
     assert_eq!(
-        resolve_provider("https://aiapidev.com").kind(),
+        resolve_provider("https://www.aiapipro.vip").kind(),
         ProviderKind::Aiapidev
     );
-    assert_eq!(resolve_provider("https://aiapidev.com").name(), "aiapidev");
+    assert_eq!(
+        resolve_provider("https://www.aiapipro.vip").name(),
+        "aiapidev"
+    );
+}
+
+#[test]
+fn aiapidev_provider_rejects_old_hosts() {
     assert_eq!(
         resolve_provider("https://www.aiapidev.com").kind(),
-        ProviderKind::Aiapidev
+        ProviderKind::Transparent
+    );
+    assert_eq!(
+        resolve_provider("https://aiapidev.com").kind(),
+        ProviderKind::Transparent
     );
 }
 

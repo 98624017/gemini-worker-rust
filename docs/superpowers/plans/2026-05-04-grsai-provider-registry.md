@@ -73,11 +73,11 @@ fn grsai_provider_rejects_suffix_tricks() {
 #[test]
 fn aiapidev_provider_matches_existing_hosts() {
     assert_eq!(
-        resolve_provider("https://aiapidev.com").kind,
+        resolve_provider("https://www.aiapipro.vip").kind,
         ProviderKind::Aiapidev
     );
     assert_eq!(
-        resolve_provider("https://www.aiapidev.com").kind,
+        resolve_provider("https://www.aiapipro.vip").kind,
         ProviderKind::Aiapidev
     );
 }
@@ -152,7 +152,7 @@ pub fn is_aiapidev_base_url(raw: &str) -> bool {
     let Some(host) = parse_host(raw) else {
         return false;
     };
-    matches!(host.as_str(), "aiapidev.com" | "www.aiapidev.com")
+    host == "www.aiapipro.vip"
 }
 
 fn parse_host(raw: &str) -> Option<String> {
@@ -1850,7 +1850,7 @@ Add a small provider support section near the current status or route sections:
 | Provider | 匹配域名 | 行为 |
 | --- | --- | --- |
 | `grsai` | `grsai.com`、`*.grsai.com` | 同步单次请求到 `/v1/draw/nano-banana` |
-| `aiapidev` | `aiapidev.com`、`www.aiapidev.com` | 创建任务并轮询结果 |
+| `aiapidev` | `www.aiapipro.vip` | 创建任务并轮询结果 |
 | `transparent` | 其他上游 | 保持现有 Gemini/OpenAI 透明转发 |
 
 `grsai` 支持 Gemini `generateContent` 和 OpenAI `/v1/images/generations`。
