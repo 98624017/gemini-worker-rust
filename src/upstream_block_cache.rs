@@ -14,6 +14,7 @@ pub struct UpstreamBlockCacheKey(String);
 #[derive(Clone, Debug)]
 pub struct CachedBlockResponse {
     pub status: StatusCode,
+    pub upstream_status: StatusCode,
     pub content_type: HeaderValue,
     pub body: Bytes,
     pub reason: &'static str,
@@ -22,6 +23,7 @@ pub struct CachedBlockResponse {
 #[derive(Clone, Debug)]
 pub struct BlockCacheHit {
     pub status: StatusCode,
+    pub upstream_status: StatusCode,
     pub content_type: HeaderValue,
     pub body: Bytes,
     pub reason: &'static str,
@@ -71,6 +73,7 @@ impl UpstreamBlockCache {
         }
         Some(BlockCacheHit {
             status: entry.response.status,
+            upstream_status: entry.response.upstream_status,
             content_type: entry.response.content_type.clone(),
             body: entry.response.body.clone(),
             reason: entry.response.reason,
@@ -236,6 +239,7 @@ mod tests {
                 key.clone(),
                 CachedBlockResponse {
                     status: StatusCode::BAD_GATEWAY,
+                    upstream_status: StatusCode::BAD_GATEWAY,
                     content_type: HeaderValue::from_static("application/json"),
                     body: Bytes::from_static(br#"{"error":{"message":"content blocked"}}"#),
                     reason: "content_blocked",
@@ -270,6 +274,7 @@ mod tests {
             UpstreamBlockCacheKey::new("/c", "https://upstream.example", &json!({"p": "c"}));
         let entry = |message: &'static str| CachedBlockResponse {
             status: StatusCode::BAD_GATEWAY,
+            upstream_status: StatusCode::BAD_GATEWAY,
             content_type: HeaderValue::from_static("application/json"),
             body: Bytes::from_static(message.as_bytes()),
             reason: "content_blocked",
@@ -296,6 +301,7 @@ mod tests {
             UpstreamBlockCacheKey::new("/c", "https://upstream.example", &json!({"p": "c"}));
         let entry = |message: &'static str| CachedBlockResponse {
             status: StatusCode::BAD_GATEWAY,
+            upstream_status: StatusCode::BAD_GATEWAY,
             content_type: HeaderValue::from_static("application/json"),
             body: Bytes::from_static(message.as_bytes()),
             reason: "content_blocked",

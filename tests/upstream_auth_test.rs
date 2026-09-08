@@ -109,13 +109,13 @@ fn aiapidev_model_path_is_mapped() {
         rust_sync_proxy::upstream::rewrite_aiapidev_model_path(
             "/v1beta/models/gemini-3-pro-image-preview:generateContent"
         ),
-        "/v1beta/models/nanobananapro:generateContent"
+        "/v1beta/models/nanobananapro-qyj:generateContent"
     );
     assert_eq!(
         rust_sync_proxy::upstream::rewrite_aiapidev_model_path(
             "/v1beta/models/gemini-3.1-flash-image-preview:generateContent"
         ),
-        "/v1beta/models/nanobanana2:generateContent"
+        "/v1beta/models/nanobanana2-qyj:generateContent"
     );
     assert_eq!(
         rust_sync_proxy::upstream::rewrite_aiapidev_model_path(

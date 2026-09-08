@@ -440,7 +440,7 @@ async fn generate_content_reuses_cached_upstream_block_error() {
         )
         .await
         .unwrap();
-    assert_eq!(first.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(first.status(), StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);
     let first_body = to_bytes(first.into_body(), usize::MAX).await.unwrap();
 
     let second = app
@@ -455,7 +455,7 @@ async fn generate_content_reuses_cached_upstream_block_error() {
         )
         .await
         .unwrap();
-    assert_eq!(second.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(second.status(), StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);
     let second_body = to_bytes(second.into_body(), usize::MAX).await.unwrap();
 
     assert_eq!(second_body, first_body);
@@ -502,7 +502,7 @@ async fn upstream_block_cache_does_not_match_different_request_body() {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(response.status(), StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);
     }
 
     assert_eq!(state.upstream_requests.lock().await.len(), 2);
@@ -553,7 +553,7 @@ async fn upstream_block_cache_does_not_match_different_upstream_base_url() {
         )
         .await
         .unwrap();
-    assert_eq!(first.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(first.status(), StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);
 
     let second = app
         .oneshot(
@@ -567,7 +567,7 @@ async fn upstream_block_cache_does_not_match_different_upstream_base_url() {
         )
         .await
         .unwrap();
-    assert_eq!(second.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(second.status(), StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);
 
     assert_eq!(first_state.upstream_requests.lock().await.len(), 1);
     assert_eq!(second_state.upstream_requests.lock().await.len(), 1);
@@ -658,7 +658,7 @@ async fn upstream_block_cache_hit_is_marked_in_admin_logs() {
             .oneshot(builder.body(Body::from(body.clone())).unwrap())
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(response.status(), StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);
     }
 
     let auth = format!(
@@ -687,6 +687,7 @@ async fn upstream_block_cache_hit_is_marked_in_admin_logs() {
     assert_eq!(cache_hit["errorSource"], "proxy");
     assert_eq!(cache_hit["errorStage"], "upstream_block_cache");
     assert_eq!(cache_hit["errorKind"], "cache_hit");
+    assert_eq!(cache_hit["upstreamStatusCode"], 502);
     assert!(
         cache_hit["errorDetail"]
             .as_str()
@@ -733,7 +734,7 @@ async fn generate_content_does_not_cache_large_block_error_body() {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(response.status(), StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);
     }
 
     let upstream_requests = state.upstream_requests.lock().await.clone();
@@ -1177,7 +1178,7 @@ async fn image_generations_reuses_cached_upstream_block_error() {
         )
         .await
         .unwrap();
-    assert_eq!(first.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(first.status(), StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);
     let first_body = to_bytes(first.into_body(), usize::MAX).await.unwrap();
 
     let second = app
@@ -1191,7 +1192,7 @@ async fn image_generations_reuses_cached_upstream_block_error() {
         )
         .await
         .unwrap();
-    assert_eq!(second.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(second.status(), StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);
     let second_body = to_bytes(second.into_body(), usize::MAX).await.unwrap();
 
     assert_eq!(second_body, first_body);
@@ -1234,7 +1235,7 @@ async fn upstream_block_cache_ttl_zero_disables_cache() {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(response.status(), StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);
     }
 
     assert_eq!(state.upstream_requests.lock().await.len(), 2);

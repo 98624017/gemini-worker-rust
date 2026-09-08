@@ -79,6 +79,9 @@ const MSG_UPSTREAM_URL_INVALID: &str = "上游服务地址配置有误，请检�
 
 type CacheObserver = Arc<dyn Fn(&str, bool) + Send + Sync>;
 
+#[derive(Clone, Copy)]
+struct OriginalUpstreamStatus(StatusCode);
+
 fn contains_cjk(text: &str) -> bool {
     text.chars()
         .any(|ch| ('\u{4e00}'..='\u{9fff}').contains(&ch))
@@ -168,10 +171,8 @@ async fn upstream_block_cache_json_error_response(
         &body,
     )
     .await;
-    let mut response = Response::new(Body::from(body));
-    *response.status_mut() = status;
-    response.headers_mut().insert(CONTENT_TYPE, content_type);
-    response
+    let response_status = block_error_response_status(status, &body);
+    raw_response_with_upstream_status(response_status, status, content_type, body)
 }
 
 fn request_body_read_error_response(err: &axum::Error) -> (StatusCode, &'static str, &'static str) {
@@ -762,10 +763,13 @@ async fn image_generations_action(State(state): State<AppState>, request: Reques
                 return finalize_admin_response(&state, response, admin_entry).await;
             }
         };
-    let block_cache_key =
-        UpstreamBlockCacheKey::new(&request_path, &resolved.base_url, &normalized_body);
+    let block_cache_key = state
+        .upstream_block_cache
+        .as_ref()
+        .map(|_| UpstreamBlockCacheKey::new(&request_path, &resolved.base_url, &normalized_body));
     if let Some(cache) = state.upstream_block_cache.as_ref()
-        && let Some(hit) = cache.get(&block_cache_key).await
+        && let Some(key) = block_cache_key.as_ref()
+        && let Some(hit) = cache.get(key).await
     {
         let mut admin_entry = block_cache_hit_entry(&request_log, &hit);
         admin_entry.created_at = created_at;
@@ -791,7 +795,7 @@ async fn image_generations_action(State(state): State<AppState>, request: Reques
             Some(request_query.clone())
         },
         request_log.clone(),
-        Some(block_cache_key),
+        block_cache_key,
     )
     .await
     {
@@ -966,10 +970,13 @@ async fn model_action(
             return finalize_admin_response(&state, response, admin_entry).await;
         }
     };
-    let block_cache_key =
-        UpstreamBlockCacheKey::new(&request_path, &resolved.base_url, &parsed_body);
+    let block_cache_key = state
+        .upstream_block_cache
+        .as_ref()
+        .map(|_| UpstreamBlockCacheKey::new(&request_path, &resolved.base_url, &parsed_body));
     if let Some(cache) = state.upstream_block_cache.as_ref()
-        && let Some(hit) = cache.get(&block_cache_key).await
+        && let Some(key) = block_cache_key.as_ref()
+        && let Some(hit) = cache.get(key).await
     {
         let mut admin_entry = block_cache_hit_entry(&request_log, &hit);
         admin_entry.created_at = created_at;
@@ -994,7 +1001,7 @@ async fn model_action(
         parts,
         parsed_body,
         request_log.clone(),
-        Some(block_cache_key),
+        block_cache_key,
     )
     .await
     {
@@ -2053,18 +2060,22 @@ async fn handle_non_stream_response(
     if !status.is_success() {
         let response_body_bytes = annotate_upstream_error_json(status, &body_bytes)
             .unwrap_or_else(|| body_bytes.to_vec());
-        let response_status = StatusCode::from_u16(status.as_u16())?;
+        let upstream_status = StatusCode::from_u16(status.as_u16())?;
+        let response_status = block_error_response_status(upstream_status, &response_body_bytes);
         maybe_store_upstream_block_error(
             block_cache,
             block_cache_key,
-            response_status,
+            upstream_status,
             content_type.clone(),
             &response_body_bytes,
         )
         .await;
-        let mut response = Response::new(Body::from(response_body_bytes));
-        *response.status_mut() = response_status;
-        response.headers_mut().insert(CONTENT_TYPE, content_type);
+        let response = raw_response_with_upstream_status(
+            response_status,
+            upstream_status,
+            content_type,
+            response_body_bytes,
+        );
         return Ok((
             response,
             ResponseStageDurations {
@@ -2145,16 +2156,21 @@ async fn handle_openai_image_response(
     })?;
 
     if !status.is_success() {
-        let response_status = StatusCode::from_u16(status.as_u16())?;
+        let upstream_status = StatusCode::from_u16(status.as_u16())?;
         maybe_store_upstream_block_error(
             block_cache,
             block_cache_key,
-            response_status,
+            upstream_status,
             content_type.clone(),
             &body_bytes,
         )
         .await;
-        let response = raw_reqwest_response_with_body(status, content_type, body_bytes.to_vec());
+        let response = raw_response_with_upstream_status(
+            block_error_response_status(upstream_status, &body_bytes),
+            upstream_status,
+            content_type,
+            body_bytes.to_vec(),
+        );
         return Ok((
             response,
             ResponseStageDurations {
@@ -2478,16 +2494,19 @@ async fn poll_aiapidev_openai_image_task(
             };
             let response_status =
                 StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-            if maybe_store_upstream_block_error(
+            let is_blockable =
+                classify_blockable_upstream_error(response_status, &body_bytes).is_some();
+            maybe_store_upstream_block_error(
                 block_cache,
                 block_cache_key,
                 response_status,
                 content_type.clone(),
                 &body_bytes,
             )
-            .await
-            {
-                return Err(raw_response_with_body(
+            .await;
+            if is_blockable {
+                return Err(raw_response_with_upstream_status(
+                    block_error_response_status(response_status, &body_bytes),
                     response_status,
                     content_type,
                     body_bytes.to_vec(),
@@ -2787,16 +2806,19 @@ async fn poll_aiapidev_task(
             };
             let response_status =
                 StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-            if maybe_store_upstream_block_error(
+            let is_blockable =
+                classify_blockable_upstream_error(response_status, &body_bytes).is_some();
+            maybe_store_upstream_block_error(
                 block_cache,
                 block_cache_key,
                 response_status,
                 content_type.clone(),
                 &body_bytes,
             )
-            .await
-            {
-                return Err(raw_response_with_body(
+            .await;
+            if is_blockable {
+                return Err(raw_response_with_upstream_status(
+                    block_error_response_status(response_status, &body_bytes),
                     response_status,
                     content_type,
                     body_bytes.to_vec(),
@@ -2911,26 +2933,30 @@ async fn raw_reqwest_response(
         }
     };
 
-    let response_status = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let upstream_status = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     maybe_store_upstream_block_error(
         block_cache,
         block_cache_key,
-        response_status,
+        upstream_status,
         content_type.clone(),
         &body_bytes,
     )
     .await;
 
-    raw_reqwest_response_with_body(status, content_type, body_bytes.to_vec())
+    raw_response_with_upstream_status(
+        block_error_response_status(upstream_status, &body_bytes),
+        upstream_status,
+        content_type,
+        body_bytes.to_vec(),
+    )
 }
 
-fn raw_reqwest_response_with_body(
-    status: reqwest::StatusCode,
-    content_type: HeaderValue,
-    body_bytes: Vec<u8>,
-) -> Response {
-    let response_status = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-    raw_response_with_body(response_status, content_type, body_bytes)
+fn block_error_response_status(status: StatusCode, body: &[u8]) -> StatusCode {
+    if classify_blockable_upstream_error(status, body).is_some() {
+        StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS
+    } else {
+        status
+    }
 }
 
 fn raw_response_with_body(
@@ -2944,13 +2970,26 @@ fn raw_response_with_body(
     response
 }
 
+fn raw_response_with_upstream_status(
+    status: StatusCode,
+    upstream_status: StatusCode,
+    content_type: HeaderValue,
+    body_bytes: Vec<u8>,
+) -> Response {
+    let mut response = raw_response_with_body(status, content_type, body_bytes);
+    response
+        .extensions_mut()
+        .insert(OriginalUpstreamStatus(upstream_status));
+    response
+}
+
 fn response_from_block_cache_hit(hit: crate::upstream_block_cache::BlockCacheHit) -> Response {
-    let mut response = Response::new(Body::from(hit.body));
-    *response.status_mut() = hit.status;
-    response
-        .headers_mut()
-        .insert(CONTENT_TYPE, hit.content_type);
-    response
+    raw_response_with_upstream_status(
+        hit.status,
+        hit.upstream_status,
+        hit.content_type,
+        hit.body.to_vec(),
+    )
 }
 
 fn block_cache_hit_entry(
@@ -2959,6 +2998,7 @@ fn block_cache_hit_entry(
 ) -> AdminLogEntry {
     let mut entry = request_log.base_entry();
     entry.status_code = hit.status.as_u16();
+    entry.upstream_status_code = hit.upstream_status.as_u16();
     entry.error_source = "proxy".to_string();
     entry.error_stage = "upstream_block_cache".to_string();
     entry.error_kind = "cache_hit".to_string();
@@ -2990,7 +3030,8 @@ async fn maybe_store_upstream_block_error(
         .insert(
             key.clone(),
             CachedBlockResponse {
-                status,
+                status: block_error_response_status(status, body),
+                upstream_status: status,
                 content_type,
                 body: Bytes::copy_from_slice(body),
                 reason,
@@ -3060,6 +3101,9 @@ async fn finalize_admin_response(
 
     let (parts, body) = response.into_parts();
     let body_bytes = to_bytes(body, usize::MAX).await.unwrap_or_default();
+    if let Some(status) = parts.extensions.get::<OriginalUpstreamStatus>() {
+        entry.upstream_status_code = status.0.as_u16();
+    }
 
     if !body_bytes.is_empty() {
         let sanitized = admin::sanitize_json_for_log(&body_bytes);
@@ -3069,7 +3113,12 @@ async fn finalize_admin_response(
         if let Ok(value) = serde_json::from_slice::<Value>(&body_bytes) {
             entry.finish_reason = admin::extract_finish_reason(&value).unwrap_or_default();
             if !preserves_admin_error_fields(&entry) {
-                apply_admin_error_fields(&mut entry, parts.status, &value, &response_downstream);
+                let upstream_status = parts
+                    .extensions
+                    .get::<OriginalUpstreamStatus>()
+                    .map(|status| status.0)
+                    .unwrap_or(parts.status);
+                apply_admin_error_fields(&mut entry, upstream_status, &value, &response_downstream);
             }
         }
     }
@@ -3399,7 +3448,7 @@ mod tests {
         let state = AiapidevMockState::default();
         let app = Router::new()
             .route(
-                "/v1beta/models/nanobananapro:generateContent",
+                "/v1beta/models/nanobananapro-qyj:generateContent",
                 post(mock_aiapidev_create),
             )
             .route("/v1beta/tasks/{request_id}", get(mock_aiapidev_poll))
@@ -3425,7 +3474,7 @@ mod tests {
 
         let response = handle_aiapidev_response(
             &resolved,
-            "/v1beta/models/nanobananapro:generateContent",
+            "/v1beta/models/nanobananapro-qyj:generateContent",
             Some("output=url"),
             request_body,
             OutputMode::Url,
@@ -3449,7 +3498,7 @@ mod tests {
         let create_paths = state.create_paths.lock().await.clone();
         assert_eq!(
             create_paths.as_slice(),
-            ["/v1beta/models/nanobananapro:generateContent"]
+            ["/v1beta/models/nanobananapro-qyj:generateContent"]
         );
 
         let create_headers = state.create_headers.lock().await;
@@ -5177,7 +5226,7 @@ mod tests {
         let state = AiapidevMockState::default();
         let app = Router::new()
             .route(
-                "/v1beta/models/nanobananapro:generateContent",
+                "/v1beta/models/nanobananapro-qyj:generateContent",
                 post(mock_aiapidev_create),
             )
             .route(
@@ -5198,7 +5247,7 @@ mod tests {
 
         let response = handle_aiapidev_response(
             &resolved,
-            "/v1beta/models/nanobananapro:generateContent",
+            "/v1beta/models/nanobananapro-qyj:generateContent",
             None,
             json!({"contents": []}),
             OutputMode::Url,
@@ -5220,7 +5269,7 @@ mod tests {
     #[tokio::test]
     async fn aiapidev_create_invalid_json_returns_structured_proxy_error() {
         let app = Router::new().route(
-            "/v1beta/models/nanobananapro:generateContent",
+            "/v1beta/models/nanobananapro-qyj:generateContent",
             post(mock_aiapidev_create_invalid_json),
         );
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -5236,7 +5285,7 @@ mod tests {
 
         let response = handle_aiapidev_response(
             &resolved,
-            "/v1beta/models/nanobananapro:generateContent",
+            "/v1beta/models/nanobananapro-qyj:generateContent",
             None,
             json!({"contents": []}),
             OutputMode::Url,
@@ -5265,7 +5314,7 @@ mod tests {
     async fn aiapidev_poll_invalid_json_returns_structured_proxy_error() {
         let app = Router::new()
             .route(
-                "/v1beta/models/nanobananapro:generateContent",
+                "/v1beta/models/nanobananapro-qyj:generateContent",
                 post(mock_aiapidev_create),
             )
             .route(
@@ -5286,7 +5335,7 @@ mod tests {
 
         let response = handle_aiapidev_response(
             &resolved,
-            "/v1beta/models/nanobananapro:generateContent",
+            "/v1beta/models/nanobananapro-qyj:generateContent",
             None,
             json!({"contents": []}),
             OutputMode::Url,
@@ -5329,7 +5378,7 @@ mod tests {
         };
         let app = Router::new()
             .route(
-                "/v1beta/models/nanobananapro:generateContent",
+                "/v1beta/models/nanobananapro-qyj:generateContent",
                 post(mock_aiapidev_create),
             )
             .route(
@@ -5350,7 +5399,7 @@ mod tests {
 
         let response = handle_aiapidev_response(
             &resolved,
-            "/v1beta/models/nanobananapro:generateContent",
+            "/v1beta/models/nanobananapro-qyj:generateContent",
             Some("output=url"),
             json!({"contents": []}),
             OutputMode::Url,
@@ -5402,7 +5451,7 @@ mod tests {
         };
         let app = Router::new()
             .route(
-                "/v1beta/models/nanobananapro:generateContent",
+                "/v1beta/models/nanobananapro-qyj:generateContent",
                 post(mock_aiapidev_create),
             )
             .route(
@@ -5423,7 +5472,7 @@ mod tests {
 
         let response = handle_aiapidev_response(
             &resolved,
-            "/v1beta/models/nanobananapro:generateContent",
+            "/v1beta/models/nanobananapro-qyj:generateContent",
             None,
             json!({"contents": []}),
             OutputMode::Url,
@@ -5473,7 +5522,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(first.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(first.status(), StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);
         let first_body = to_bytes(first.into_body(), usize::MAX).await.unwrap();
         assert!(String::from_utf8_lossy(&first_body).contains("image_unsafe"));
         assert_eq!(mock_state.create_paths.lock().await.len(), 1);
@@ -5491,7 +5540,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(second.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(second.status(), StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);
         let second_body = to_bytes(second.into_body(), usize::MAX).await.unwrap();
         assert_eq!(second_body, first_body);
         assert_eq!(mock_state.create_paths.lock().await.len(), 1);
@@ -5527,7 +5576,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(first.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(first.status(), StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);
         let first_body = to_bytes(first.into_body(), usize::MAX).await.unwrap();
         assert!(String::from_utf8_lossy(&first_body).contains("image_unsafe"));
         assert_eq!(mock_state.create_paths.lock().await.len(), 1);
@@ -5544,7 +5593,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(second.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(second.status(), StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);
         let second_body = to_bytes(second.into_body(), usize::MAX).await.unwrap();
         assert_eq!(second_body, first_body);
         assert_eq!(mock_state.create_paths.lock().await.len(), 1);
@@ -5649,7 +5698,7 @@ mod tests {
         let path = extract_proxy_path(request.uri());
         let headers = request.headers().clone();
 
-        if path == "/v1beta/models/nanobananapro:generateContent"
+        if path == "/v1beta/models/nanobananapro-qyj:generateContent"
             || path == "/v1/images/generations"
         {
             let body = to_bytes(request.into_body(), usize::MAX).await.unwrap();
@@ -5749,7 +5798,7 @@ mod tests {
         let path = extract_proxy_path(request.uri());
         let headers = request.headers().clone();
 
-        if path == "/v1beta/models/nanobananapro:generateContent"
+        if path == "/v1beta/models/nanobananapro-qyj:generateContent"
             || path == "/v1/images/generations"
         {
             let body = to_bytes(request.into_body(), usize::MAX).await.unwrap();

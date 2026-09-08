@@ -337,8 +337,8 @@ curl -sS \
 ### `aiapidev` 特殊兼容
 
 - 当请求头里的上游地址是 `https://www.aiapipro.vip` 时，代理会走专用分支：
-  - `gemini-3-pro-image-preview -> nanobananapro`
-  - `gemini-3.1-flash-image-preview -> nanobanana2`
+  - `gemini-3-pro-image-preview -> nanobananapro-qyj`
+  - `gemini-3.1-flash-image-preview -> nanobanana2-qyj`
   - 请求体里的图片 URL 会从 `inlineData` 改写成 `file_data.file_uri`
   - 创建任务后会同步轮询 `/v1beta/tasks/{requestId}`，直到成功、失败或总超时（当前硬编码 `450s`）
   - 轮询遇到网络错误或 `408/425/429/500/502/503/504` 会按 1 秒间隔重试；连续失败 5 次会提前返回最后一次错误
