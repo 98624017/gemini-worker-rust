@@ -1180,6 +1180,11 @@ async fn image_generations_reuses_cached_upstream_block_error() {
         .unwrap();
     assert_eq!(first.status(), StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);
     let first_body = to_bytes(first.into_body(), usize::MAX).await.unwrap();
+    let first_json: Value = serde_json::from_slice(&first_body).unwrap();
+    assert_eq!(
+        first_json["message"],
+        "输入内容触发上游违规提示，请调整输入提示词和参考图或尝试更换模型。"
+    );
 
     let second = app
         .oneshot(

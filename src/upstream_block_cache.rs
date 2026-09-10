@@ -191,9 +191,28 @@ mod tests {
             "https://upstream.example",
             &reversed_array,
         );
+        let other_model_key = UpstreamBlockCacheKey::new(
+            "/v1beta/models/other:generateContent",
+            "https://upstream.example",
+            &first,
+        );
+        let openai_first = json!({"model": "gpt-image-2", "prompt": "blocked"});
+        let openai_other_model = json!({"model": "gpt-image-3", "prompt": "blocked"});
+        let openai_first_key = UpstreamBlockCacheKey::new(
+            "/v1/images/generations",
+            "https://upstream.example",
+            &openai_first,
+        );
+        let openai_other_model_key = UpstreamBlockCacheKey::new(
+            "/v1/images/generations",
+            "https://upstream.example",
+            &openai_other_model,
+        );
 
         assert_eq!(first_key, second_key);
         assert_ne!(first_key, reversed_key);
+        assert_ne!(first_key, other_model_key);
+        assert_ne!(openai_first_key, openai_other_model_key);
     }
 
     #[test]

@@ -76,6 +76,8 @@ const MSG_OPENAI_IMAGE_MISSING_DATA: &str = "上游服务没有返回可用的�
 const MSG_OPENAI_IMAGE_MISSING_PAYLOAD: &str = "上游服务返回的图片数据不完整，请稍后再试";
 const MSG_PROXY_INTERNAL_ERROR: &str = "代理处理请求时遇到问题，请稍后再试";
 const MSG_UPSTREAM_URL_INVALID: &str = "上游服务地址配置有误，请检查后再试";
+const MSG_UPSTREAM_BLOCKED_INPUT: &str =
+    "输入内容触发上游违规提示，请调整输入提示词和参考图或尝试更换模型。";
 
 type CacheObserver = Arc<dyn Fn(&str, bool) + Send + Sync>;
 
@@ -2976,6 +2978,7 @@ fn raw_response_with_upstream_status(
     content_type: HeaderValue,
     body_bytes: Vec<u8>,
 ) -> Response {
+    let body_bytes = block_error_response_body(upstream_status, &body_bytes);
     let mut response = raw_response_with_body(status, content_type, body_bytes);
     response
         .extensions_mut()
@@ -3007,6 +3010,27 @@ fn block_cache_hit_entry(
     entry
 }
 
+fn block_error_response_body(status: StatusCode, body: &[u8]) -> Vec<u8> {
+    if classify_blockable_upstream_error(status, body).is_none() {
+        return body.to_vec();
+    }
+    let Ok(mut value) = serde_json::from_slice::<Value>(body) else {
+        return MSG_UPSTREAM_BLOCKED_INPUT.as_bytes().to_vec();
+    };
+    let object = if let Some(error) = value.get_mut("error").and_then(Value::as_object_mut) {
+        error
+    } else if let Some(object) = value.as_object_mut() {
+        object
+    } else {
+        return MSG_UPSTREAM_BLOCKED_INPUT.as_bytes().to_vec();
+    };
+    object.insert(
+        "message".to_string(),
+        Value::String(MSG_UPSTREAM_BLOCKED_INPUT.to_string()),
+    );
+    serde_json::to_vec(&value).unwrap_or_else(|_| MSG_UPSTREAM_BLOCKED_INPUT.as_bytes().to_vec())
+}
+
 async fn maybe_store_upstream_block_error(
     cache: Option<&Arc<UpstreamBlockCache>>,
     key: Option<&UpstreamBlockCacheKey>,
@@ -3026,14 +3050,16 @@ async fn maybe_store_upstream_block_error(
     let Some(reason) = classify_blockable_upstream_error(status, body) else {
         return false;
     };
+    let response_status = block_error_response_status(status, body);
+    let body = block_error_response_body(status, body);
     cache
         .insert(
             key.clone(),
             CachedBlockResponse {
-                status: block_error_response_status(status, body),
+                status: response_status,
                 upstream_status: status,
                 content_type,
-                body: Bytes::copy_from_slice(body),
+                body: Bytes::from(body),
                 reason,
             },
         )
@@ -5524,7 +5550,7 @@ mod tests {
 
         assert_eq!(first.status(), StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);
         let first_body = to_bytes(first.into_body(), usize::MAX).await.unwrap();
-        assert!(String::from_utf8_lossy(&first_body).contains("image_unsafe"));
+        assert!(String::from_utf8_lossy(&first_body).contains(MSG_UPSTREAM_BLOCKED_INPUT));
         assert_eq!(mock_state.create_paths.lock().await.len(), 1);
         assert_eq!(mock_state.poll_headers.lock().await.len(), 1);
 
@@ -5578,7 +5604,7 @@ mod tests {
 
         assert_eq!(first.status(), StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);
         let first_body = to_bytes(first.into_body(), usize::MAX).await.unwrap();
-        assert!(String::from_utf8_lossy(&first_body).contains("image_unsafe"));
+        assert!(String::from_utf8_lossy(&first_body).contains(MSG_UPSTREAM_BLOCKED_INPUT));
         assert_eq!(mock_state.create_paths.lock().await.len(), 1);
         assert_eq!(mock_state.poll_headers.lock().await.len(), 1);
 
