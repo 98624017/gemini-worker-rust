@@ -177,6 +177,8 @@ pub fn rewrite_aiapidev_model_path(path: &str) -> String {
     let mapped_model = match model {
         "gemini-3-pro-image-preview" => "nanobananapro-qyj",
         "gemini-3.1-flash-image-preview" => "nanobanana2-qyj",
+        "gemini-3-pro-image-preview-as" => "nanobananapro-qyj",
+        "gemini-3.1-flash-image-preview-as" => "nanobanana2-qyj",
         _ => model,
     };
 
