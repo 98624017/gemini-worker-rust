@@ -108,6 +108,9 @@ pub fn classify_blockable_upstream_error(status: StatusCode, body: &[u8]) -> Opt
     if text.contains("content blocked") {
         return Some("content_blocked");
     }
+    if text.contains("请求无法用于生成图像") {
+        return Some("content_blocked");
+    }
     None
 }
 
@@ -233,6 +236,14 @@ mod tests {
         );
         assert_eq!(
             classify_blockable_upstream_error(StatusCode::BAD_REQUEST, b"content blocked"),
+            Some("content_blocked")
+        );
+        assert_eq!(
+            classify_blockable_upstream_error(
+                StatusCode::BAD_REQUEST,
+                "您的请求无法用于生成图像。该请求可能因安全政策被拦截，或不适合进行图像生成。"
+                    .as_bytes(),
+            ),
             Some("content_blocked")
         );
         assert_eq!(
