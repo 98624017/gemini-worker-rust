@@ -168,7 +168,8 @@ export MALLOC_CONF="background_thread:true,dirty_decay_ms:100,muzzy_decay_ms:100
 - `SLOW_LOG_THRESHOLD_MS`
   默认 `100000`；`0` 表示关闭慢请求日志
 - `PROXY_SPECIAL_UPSTREAM_URLS`
-  默认开启；影响 Markdown / `aiapidev` 特殊上游结果是否包装代理前缀
+  默认开启；影响 Markdown / `aiapidev` 特殊上游结果，以及 OpenAI 图片结果中
+  `tianyue.xyz` 及其子域的 URL 是否包装公共代理前缀
 - `ENABLE_IMAGE_COMPRESSION`
   默认关闭；开启后，响应侧 PNG 图片超过 `15MiB` 时会尝试转成
   `4:4:4 / quality=97` 的 JPEG，以降低上传图床 / R2 或返回 base64 的体积
@@ -277,10 +278,17 @@ R2 模式还需要：
 - `POST /v1/images/generations` 成功响应兼容两类上游返回：
   - `data[].b64_json`：代理会解码并上传，再返回最终 URL
   - `data[].url`：代理默认直接复用该 URL；仅当
-    `OPENAI_IMAGE_UPSTREAM_URL_PROXY_PREFIX` 非空时，才会包装专用代理前缀
+    `OPENAI_IMAGE_UPSTREAM_URL_PROXY_PREFIX` 非空时，才会包装专用代理前缀；
+    该专用前缀为空时，`tianyue.xyz` 及其子域的 URL 在
+    `PROXY_SPECIAL_UPSTREAM_URLS=true` 时使用公共代理前缀，目标 URL 会编码
 - `POST /v1/images/generations` 请求默认保留原始 `response_format`
   - 未命中 `OPENAI_IMAGE_B64_JSON_UPSTREAM_DOMAINS` 时，`url` 会原样发给上游
   - 命中后，代理才会把 `url` 改写为 `b64_json`
+- 上游 host 为 `api.tianyue.xyz` 时，`POST /v1/images/generations` 将
+  `seedream-5-pro` 按 `size=1K/2K`（大小写均可）改写为
+  `GZ-seedream-5-pro-1K/2K`；缺失或其他 `size` 保持模型不变。
+  参考图字段 `image`、`images`、`reference_images` 合并后统一发送为 `images`，
+  未传参考图时不添加该字段
 - `POST /v1/images/generations` 请求体包含参考图时，若上游 host 命中
   `OPENAI_IMAGE_EDITS_UPSTREAM_DOMAINS`，上游路径会改为 `/v1/images/edits`
   并转为 multipart；参考图字段兼容 `image`、`images`、`reference_images`

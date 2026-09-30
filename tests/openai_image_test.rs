@@ -1,6 +1,90 @@
 use serde_json::json;
 
 #[test]
+fn tianyue_request_rewrites_model_and_merges_image_aliases() {
+    for size in ["1K", "1k", "2K", "2k"] {
+        let body = rust_sync_proxy::openai_image::normalize_request_body_for_upstream(
+            json!({
+                "model": "seedream-5-pro",
+                "size": size,
+                "prompt": "draw cat",
+                "image": ["https://img.example/a.png"],
+                "images": ["https://img.example/b.png"],
+                "reference_images": ["https://img.example/c.png"],
+            }),
+            false,
+            "https://API.TIANYUE.XYZ/v1",
+        )
+        .unwrap();
+        assert_eq!(
+            body["model"],
+            format!("GZ-seedream-5-pro-{}", size.to_ascii_uppercase())
+        );
+        assert_eq!(body["size"], size);
+        assert_eq!(body["prompt"], "draw cat");
+        assert_eq!(body["response_format"], "url");
+        assert_eq!(
+            body["images"],
+            json!([
+                "https://img.example/c.png",
+                "https://img.example/b.png",
+                "https://img.example/a.png",
+            ])
+        );
+        assert!(body.get("image").is_none());
+        assert!(body.get("reference_images").is_none());
+    }
+}
+
+#[test]
+fn tianyue_request_keeps_other_models_sizes_and_channels_unchanged() {
+    for body in [
+        json!({"model": "seedream-5-pro"}),
+        json!({"model": "seedream-5-pro", "size": "4K"}),
+        json!({"model": "seedream-5-pro", "size": 2}),
+        json!({"model": "other-model", "size": "2K"}),
+        json!({"model": "GZ-seedream-5-pro-1K", "size": "2K"}),
+    ] {
+        let normalized = rust_sync_proxy::openai_image::normalize_request_body_for_upstream(
+            body.clone(),
+            false,
+            "https://api.tianyue.xyz",
+        )
+        .unwrap();
+        assert_eq!(normalized["model"], body["model"]);
+        assert!(normalized.get("images").is_none());
+    }
+
+    let body =
+        json!({"model": "seedream-5-pro", "size": "2K", "image": ["https://img.example/a.png"]});
+    for base_url in [
+        "https://api.example.com",
+        "https://api.tianyue.xyz.evil.com",
+        "https://other.tianyue.xyz",
+        "invalid",
+    ] {
+        let normalized = rust_sync_proxy::openai_image::normalize_request_body_for_upstream(
+            body.clone(),
+            false,
+            base_url,
+        )
+        .unwrap();
+        assert_eq!(normalized["model"], body["model"]);
+        assert_eq!(normalized["image"], body["image"]);
+        assert!(normalized.get("images").is_none());
+    }
+
+    assert!(
+        rust_sync_proxy::openai_image::normalize_request_body_for_upstream(
+            json!({"image": ["file:///tmp/a.png"]}),
+            false,
+            "https://api.tianyue.xyz",
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn normalize_openai_image_request_supports_all_aliases_without_forcing_b64_json() {
     let cases = [
         (

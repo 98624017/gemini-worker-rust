@@ -46,6 +46,33 @@ pub fn normalize_request_body(body: Value, force_b64_json: bool) -> Result<Value
     Ok(Value::Object(object))
 }
 
+pub fn normalize_request_body_for_upstream(
+    body: Value,
+    force_b64_json: bool,
+    base_url: &str,
+) -> Result<Value> {
+    let mut body = normalize_request_body(body, force_b64_json)?;
+    if Url::parse(base_url)
+        .ok()
+        .is_some_and(|url| url.host_str() == Some("api.tianyue.xyz"))
+        && let Some(object) = body.as_object_mut()
+    {
+        if object.get("model").and_then(Value::as_str) == Some("seedream-5-pro")
+            && let Some(size) = object.get("size").and_then(Value::as_str)
+            && (size.eq_ignore_ascii_case("1K") || size.eq_ignore_ascii_case("2K"))
+        {
+            let model = format!("GZ-seedream-5-pro-{}", size.to_ascii_uppercase());
+            object.insert("model".to_string(), Value::String(model));
+        }
+        for alias in ["image", "reference_images"] {
+            if let Some(images) = object.remove(alias) {
+                object.insert("images".to_string(), images);
+            }
+        }
+    }
+    Ok(body)
+}
+
 pub fn build_fixed_usage() -> Value {
     json!({
         "input_tokens": 1024,

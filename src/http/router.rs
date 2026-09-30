@@ -733,38 +733,39 @@ async fn image_generations_action(State(state): State<AppState>, request: Reques
     let force_b64_json = state
         .config
         .should_force_openai_image_b64_json_for_upstream(&resolved.base_url);
-    let normalized_body =
-        match crate::openai_image::normalize_request_body(parsed_body, force_b64_json) {
-            Ok(body) => body,
-            Err(err) => {
-                let mut admin_entry = AdminLogEntry {
-                    created_at,
-                    method: request_method,
-                    path: request_path,
-                    query: request_query,
-                    remote_addr,
-                    is_stream: false,
-                    status_code: StatusCode::BAD_REQUEST.as_u16(),
-                    duration_ms: started_at.elapsed().as_millis() as i64,
-                    request_parse_ms: request_parse_started.elapsed().as_millis() as i64,
-                    error_source: "proxy".to_string(),
-                    error_stage: "normalize_openai_image_request".to_string(),
-                    error_kind: "invalid_request".to_string(),
-                    error_message: "invalid openai image request".to_string(),
-                    error_detail: err.to_string(),
-                    ..Default::default()
-                };
-                request_log.apply_to_entry(&mut admin_entry);
-                let response = (
-                    StatusCode::BAD_REQUEST,
-                    Json(
-                        json!({"error": {"code": 400, "message": downstream_anyhow_message(&err)}}),
-                    ),
-                )
-                    .into_response();
-                return finalize_admin_response(&state, response, admin_entry).await;
-            }
-        };
+    let normalized_body = match crate::openai_image::normalize_request_body_for_upstream(
+        parsed_body,
+        force_b64_json,
+        &resolved.base_url,
+    ) {
+        Ok(body) => body,
+        Err(err) => {
+            let mut admin_entry = AdminLogEntry {
+                created_at,
+                method: request_method,
+                path: request_path,
+                query: request_query,
+                remote_addr,
+                is_stream: false,
+                status_code: StatusCode::BAD_REQUEST.as_u16(),
+                duration_ms: started_at.elapsed().as_millis() as i64,
+                request_parse_ms: request_parse_started.elapsed().as_millis() as i64,
+                error_source: "proxy".to_string(),
+                error_stage: "normalize_openai_image_request".to_string(),
+                error_kind: "invalid_request".to_string(),
+                error_message: "invalid openai image request".to_string(),
+                error_detail: err.to_string(),
+                ..Default::default()
+            };
+            request_log.apply_to_entry(&mut admin_entry);
+            let response = (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": {"code": 400, "message": downstream_anyhow_message(&err)}})),
+            )
+                .into_response();
+            return finalize_admin_response(&state, response, admin_entry).await;
+        }
+    };
     let block_cache_key = state
         .upstream_block_cache
         .as_ref()
@@ -3364,10 +3365,23 @@ fn parse_openai_image_data_url(raw: &str) -> Option<ParsedOpenAiImageDataUrl> {
 fn build_openai_image_output_url(config: &Config, provider: &str, target_url: &str) -> String {
     if provider.eq_ignore_ascii_case("direct") {
         let openai_proxy_prefix = config.openai_image_upstream_url_proxy_prefix.trim();
-        if openai_proxy_prefix.is_empty() {
-            return target_url.to_string();
+        if !openai_proxy_prefix.is_empty() {
+            return wrap_external_proxy_url(openai_proxy_prefix, target_url);
         }
-        return wrap_external_proxy_url(openai_proxy_prefix, target_url);
+        if config.proxy_special_upstream_urls
+            && Url::parse(target_url).ok().is_some_and(|url| {
+                matches!(url.scheme(), "http" | "https")
+                    && url
+                        .host_str()
+                        .is_some_and(|host| host == "tianyue.xyz" || host.ends_with(".tianyue.xyz"))
+            })
+        {
+            let external_proxy_prefix = config.resolved_external_image_proxy_prefix();
+            if !external_proxy_prefix.is_empty() {
+                return wrap_external_proxy_url(&external_proxy_prefix, target_url);
+            }
+        }
+        return target_url.to_string();
     }
 
     let external_proxy_prefix = config.resolved_external_image_proxy_prefix();
@@ -3917,6 +3931,128 @@ mod tests {
         assert_eq!(create_bodies[0]["aspectRatio"], "16:9");
         assert_eq!(create_bodies[0]["imageSize"], "2K");
         assert_eq!(create_bodies[0]["shutProgress"], true);
+    }
+
+    #[test]
+    fn tianyue_image_output_uses_public_proxy_with_safe_domain_matching() {
+        let mut config = crate::test_config();
+        config.public_base_url = "https://image.xinbao-ai.cn".to_string();
+        for url in [
+            "https://dw2.tianyue.xyz/proxy/down_image?token=a.b_c&x=1",
+            "https://tianyue.xyz/image.png",
+            "https://DW2.TIANYUE.XYZ/image.png",
+        ] {
+            let result = build_openai_image_output_url(&config, "direct", url);
+            let parsed = Url::parse(&result).unwrap();
+            assert_eq!(parsed.host_str(), Some("image.xinbao-ai.cn"));
+            assert_eq!(parsed.path(), "/proxy/image");
+            assert_eq!(
+                parsed.query_pairs().collect::<Vec<_>>(),
+                vec![("url".into(), url.into())]
+            );
+        }
+        for url in [
+            "https://tianyue.xyz.evil.com/image.png",
+            "https://eviltianyue.xyz/image.png",
+            "https://example.com/tianyue.xyz/image.png",
+            "https://example.com/image.png?url=https://dw2.tianyue.xyz",
+            "ftp://dw2.tianyue.xyz/image.png",
+        ] {
+            assert_eq!(build_openai_image_output_url(&config, "direct", url), url);
+        }
+        let url = "https://dw2.tianyue.xyz/image.png";
+        config.proxy_special_upstream_urls = false;
+        assert_eq!(build_openai_image_output_url(&config, "direct", url), url);
+        config.proxy_special_upstream_urls = true;
+        config.external_image_proxy_prefix = "https://external.example/fetch?url=".to_string();
+        assert_eq!(
+            build_openai_image_output_url(&config, "direct", url),
+            wrap_external_proxy_url(&config.external_image_proxy_prefix, url)
+        );
+        config.openai_image_upstream_url_proxy_prefix =
+            "https://openai.example/fetch?url=".to_string();
+        assert_eq!(
+            build_openai_image_output_url(&config, "direct", url),
+            wrap_external_proxy_url(&config.openai_image_upstream_url_proxy_prefix, url)
+        );
+        config.openai_image_upstream_url_proxy_prefix.clear();
+        config.external_image_proxy_prefix.clear();
+        config.public_base_url.clear();
+        assert_eq!(build_openai_image_output_url(&config, "direct", url), url);
+    }
+
+    #[tokio::test]
+    async fn tianyue_image_generations_adapts_request_and_proxies_response() {
+        let upstream = Router::new().route(
+            "/v1/images/generations",
+            post(|headers: HeaderMap, Json(body): Json<Value>| async move {
+                assert_eq!(headers[AUTHORIZATION], "Bearer tianyue-key");
+                assert_eq!(body["model"], "GZ-seedream-5-pro-2K");
+                assert_eq!(body["size"], "2k");
+                assert_eq!(
+                    body["images"],
+                    json!(["https://img.example/a.webp", "https://img.example/b.webp"])
+                );
+                assert!(body.get("image").is_none());
+                Json(json!({
+                    "created": 1790729428,
+                    "data": [{"url": "https://dw2.tianyue.xyz/proxy/down_image?token=a.b_c&x=1"}],
+                    "usage": {"total_tokens": 20, "input_tokens": 10, "output_tokens": 10}
+                }))
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, upstream).await.unwrap();
+        });
+        let mut config = crate::test_config();
+        config.public_base_url = "https://image.xinbao-ai.cn".to_string();
+        let upstream_client = reqwest::Client::builder()
+            .no_proxy()
+            .resolve("api.tianyue.xyz", address)
+            .build()
+            .unwrap();
+        let state = AppState {
+            config: Arc::new(config.clone()),
+            upstream_client,
+            image_client: reqwest::Client::new(),
+            uploader: Arc::new(Uploader::new(reqwest::Client::new(), config)),
+            admin: None,
+            request_inline_data_fetch_service: None,
+            response_inline_data_fetch_service: None,
+            blob_runtime: Arc::new(crate::test_blob_runtime(8 * 1024 * 1024)),
+            upstream_block_cache: None,
+        };
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/images/generations")
+            .header(CONTENT_TYPE, "application/json")
+            .header(
+                AUTHORIZATION,
+                format!(
+                    "Bearer http://api.tianyue.xyz:{}|tianyue-key",
+                    address.port()
+                ),
+            )
+            .body(Body::from(
+                json!({
+                    "model": "seedream-5-pro", "size": "2k", "prompt": "draw cat",
+                    "image": ["https://img.example/a.webp", "https://img.example/b.webp"]
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let response = image_generations_action(State(state), request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["created"], 1790729428_i64);
+        assert_eq!(
+            body["data"][0]["url"],
+            "https://image.xinbao-ai.cn/proxy/image?url=https%3A%2F%2Fdw2.tianyue.xyz%2Fproxy%2Fdown_image%3Ftoken%3Da.b_c%26x%3D1"
+        );
+        server.abort();
     }
 
     #[test]
