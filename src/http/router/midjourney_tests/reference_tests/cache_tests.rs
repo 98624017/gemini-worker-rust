@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn legacy_cache_hits_misses_and_disabled_cache_keep_mj_png_contract() {
+async fn legacy_cache_hits_misses_and_disabled_cache_keep_all_mj_png_references() {
     let mut png = image_bytes(32, 16, ImageFormat::Png, Rgba([10, 20, 30, 255]));
     png.resize(crate::image_io::REQUEST_PNG_WEBP_THRESHOLD_BYTES + 1, 0);
     for variant in ["disabled", "miss", "legacy-hit"] {
@@ -46,10 +46,15 @@ async fn legacy_cache_hits_misses_and_disabled_cache_keep_mj_png_contract() {
             None,
         )
         .await;
-        let response = harness.request(generation(&source)).send().await.unwrap();
+        let mut body = generation(&source);
+        body["image"] = json!([source.url(), source.url()]);
+        let response = harness.request(body).send().await.unwrap();
         assert_eq!(response.status(), StatusCode::OK, "{variant}");
         let requests = harness.mock.requests.lock().await;
-        let (mime, bytes) = decode_reference(&requests[0]);
+        let items = requests[0].body["base64Array"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0], items[1]);
+        let (mime, bytes) = super::multiple_tests::decode_item(&items[0]);
         assert_eq!(mime, "image/jpeg", "{variant}");
         assert_eq!(
             image::load_from_memory(&bytes).unwrap().dimensions(),
@@ -57,7 +62,7 @@ async fn legacy_cache_hits_misses_and_disabled_cache_keep_mj_png_contract() {
         );
         assert_jpeg_444(&bytes);
         drop(requests);
-        let mj_downloads = if warmed.is_some() { 2 } else { 1 };
+        let mj_downloads = if warmed.is_some() { 3 } else { 2 };
         assert_eq!(source.requests.lock().await.len(), mj_downloads);
         if let Some(service) = service {
             let cached = service.fetch(&source.url()).await.unwrap();
@@ -65,9 +70,9 @@ async fn legacy_cache_hits_misses_and_disabled_cache_keep_mj_png_contract() {
             assert_eq!(cached.from_cache, warmed.is_some());
             if let Some(warmed) = warmed {
                 assert_eq!(cached.bytes, warmed);
-                assert_eq!(source.requests.lock().await.len(), 2);
+                assert_eq!(source.requests.lock().await.len(), 3);
             } else {
-                assert_eq!(source.requests.lock().await.len(), 2);
+                assert_eq!(source.requests.lock().await.len(), 3);
                 assert!(service.fetch(&source.url()).await.unwrap().from_cache);
             }
         }

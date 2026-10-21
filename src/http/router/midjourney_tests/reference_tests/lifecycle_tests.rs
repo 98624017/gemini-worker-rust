@@ -2,7 +2,7 @@ use super::*;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
-fn spilled_runtime(directory: &std::path::Path) -> Arc<BlobRuntime> {
+pub(super) fn spilled_runtime(directory: &std::path::Path) -> Arc<BlobRuntime> {
     Arc::new(BlobRuntime::new(BlobRuntimeConfig {
         inline_max_bytes: 8,
         request_hot_budget_bytes: 8,
@@ -11,7 +11,7 @@ fn spilled_runtime(directory: &std::path::Path) -> Arc<BlobRuntime> {
     }))
 }
 
-async fn finished<T>(task: &JoinHandle<T>) {
+pub(super) async fn finished<T>(task: &JoinHandle<T>) {
     let deadline = Instant::now() + Duration::from_secs(3);
     while !task.is_finished() {
         assert!(Instant::now() < deadline, "HTTP request did not finish");
@@ -19,7 +19,7 @@ async fn finished<T>(task: &JoinHandle<T>) {
     }
 }
 
-async fn wait_until_empty(directory: &std::path::Path) {
+pub(super) async fn wait_until_empty(directory: &std::path::Path) {
     let deadline = Instant::now() + Duration::from_secs(3);
     while std::fs::read_dir(directory).unwrap().next().is_some() {
         assert!(
@@ -97,11 +97,14 @@ async fn preparation_submission_and_polling_share_the_same_deadline_and_release_
         .lock()
         .await
         .insert(1, Arc::new(Notify::new()));
-    let request = harness.request(generation(&source));
+    let mut body = generation(&source);
+    body["image"] = json!([source.url(), source.url()]);
+    let request = harness.request(body);
     let task = tokio::spawn(async move { request.send().await.unwrap() });
     source.wait_for_downloads(1).await;
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(20)).await;
+    *source.gate.lock().await = None;
     image_gate.notify_one();
     harness.wait_for_requests(2).await;
     assert!(
@@ -143,12 +146,10 @@ async fn reference_decode_failure_releases_the_downloaded_blob() {
 }
 
 #[tokio::test]
-async fn downstream_disconnect_during_submission_releases_reference_and_request_blobs() {
-    let source = ReferenceSource::new(
-        image_bytes(64, 32, ImageFormat::Jpeg, Rgba([30, 60, 90, 255])),
-        "image/jpeg",
-    )
-    .await;
+async fn downstream_disconnect_during_submission_releases_all_large_reference_and_request_blobs() {
+    let mut jpeg = image_bytes(64, 32, ImageFormat::Jpeg, Rgba([30, 60, 90, 255]));
+    jpeg.resize(128 * 1024, 0);
+    let source = ReferenceSource::new(jpeg.clone(), "image/jpeg").await;
     let directory = tempfile::tempdir().unwrap();
     let harness = Harness::with_image_services(
         reference_replies(),
@@ -164,8 +165,17 @@ async fn downstream_disconnect_during_submission_releases_reference_and_request_
         .lock()
         .await
         .insert(0, Arc::new(Notify::new()));
-    let socket = open_generation_socket(&harness, generation(&source)).await;
+    let mut body = generation(&source);
+    body["image"] = json!([source.url(), source.url()]);
+    let socket = open_generation_socket(&harness, body).await;
     harness.wait_for_requests(1).await;
+    {
+        let requests = harness.mock.requests.lock().await;
+        let items = requests[0].body["base64Array"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0], items[1]);
+        assert_eq!(super::multiple_tests::decode_item(&items[1]).1, jpeg);
+    }
     assert!(
         std::fs::read_dir(directory.path())
             .unwrap()
@@ -220,4 +230,90 @@ async fn concurrent_reference_preparations_are_bounded_and_cancellation_releases
     drop(sockets);
     settle().await;
     assert!(harness.mock.requests.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn disconnect_during_a_later_download_cleans_prior_images_and_keeps_shared_services_alive() {
+    let first = ReferenceSource::new(
+        image_bytes(64, 32, ImageFormat::Jpeg, Rgba([30, 60, 90, 255])),
+        "image/jpeg",
+    )
+    .await;
+    let second = ReferenceSource::new(
+        image_bytes(32, 64, ImageFormat::WebP, Rgba([20, 40, 60, 77])),
+        "image/webp",
+    )
+    .await;
+    *second.gate.lock().await = Some(Arc::new(Notify::new()));
+    let directory = tempfile::tempdir().unwrap();
+    let harness = Harness::with_image_services(
+        reference_replies(),
+        |_| {},
+        first.client(),
+        None,
+        Some(spilled_runtime(directory.path())),
+    )
+    .await;
+    let socket = open_generation_socket(
+        &harness,
+        json!({
+            "model": "mj_relax_imagine", "prompt": "中文狐狸",
+            "image": [first.url(), second.url(), first.url()]
+        }),
+    )
+    .await;
+    second.wait_for_downloads(1).await;
+    assert!(
+        std::fs::read_dir(directory.path())
+            .unwrap()
+            .next()
+            .is_some()
+    );
+    drop(socket);
+    wait_until_empty(directory.path()).await;
+    assert!(harness.mock.requests.lock().await.is_empty());
+    assert_eq!(first.requests.lock().await.len(), 1);
+    let response = harness.request(generation(&first)).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    wait_until_empty(directory.path()).await;
+    assert_eq!(harness.mock.requests.lock().await.len(), 2);
+}
+
+#[tokio::test]
+async fn unavailable_spill_storage_fails_reference_preparation_without_a_submission() {
+    let source = ReferenceSource::new(
+        image_bytes(64, 32, ImageFormat::Jpeg, Rgba([30, 60, 90, 255])),
+        "image/jpeg",
+    )
+    .await;
+    let directory = tempfile::tempdir().unwrap();
+    let blocked = directory.path().join("not-a-directory");
+    std::fs::write(&blocked, b"occupied").unwrap();
+    let harness = Harness::with_image_services(
+        reference_replies(),
+        |_| {},
+        source.client(),
+        None,
+        Some(spilled_runtime(&blocked)),
+    )
+    .await;
+    let response = harness
+        .request(json!({
+            "model": "mj_fast_imagine", "prompt": "中文狐狸", "image": [source.url(), source.url()]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let error: Value = response.json().await.unwrap();
+    assert_eq!(error["error"]["stage"], "magic_prepare_image");
+    assert_eq!(error["error"]["kind"], "image_storage_failed");
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("参考图片 1")
+    );
+    assert!(harness.mock.requests.lock().await.is_empty());
+    assert_eq!(source.requests.lock().await.len(), 1);
 }

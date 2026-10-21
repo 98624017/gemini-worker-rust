@@ -192,10 +192,7 @@ async fn invalid_relax_input_is_rejected_before_task_creation() {
         ("response_format", json!(null)),
         ("response_format", json!("b64_json")),
         ("image", json!(null)),
-        (
-            "image",
-            json!(["https://img.example/a.png", "https://img.example/b.png"]),
-        ),
+        ("image", json!(vec!["https://img.example/a.png"; 7])),
         ("images", json!([1])),
         ("reference_images", json!(["QUJDREVGRw=="])),
         ("image", json!(["data:image/png;base64,AQID"])),

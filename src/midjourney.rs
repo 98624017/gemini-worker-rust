@@ -44,7 +44,7 @@ impl Mode {
 pub(crate) struct PreparedRequest {
     pub mode: Mode,
     pub payload: Value,
-    pub reference_url: Option<String>,
+    pub reference_urls: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -164,7 +164,10 @@ pub(crate) fn is_magic_upstream(base_url: &str) -> bool {
         .is_some_and(|url| url.host_str() == Some("magic666.top"))
 }
 
-pub(crate) fn prepare_request(body: Value) -> Result<PreparedRequest, Error> {
+pub(crate) fn prepare_request(
+    body: Value,
+    max_reference_images: usize,
+) -> Result<PreparedRequest, Error> {
     let object = body
         .as_object()
         .ok_or_else(|| invalid_request("请求内容必须是 JSON 对象"))?;
@@ -196,20 +199,22 @@ pub(crate) fn prepare_request(body: Value) -> Result<PreparedRequest, Error> {
     let images = IMAGE_ALIASES
         .iter()
         .find_map(|alias| body.get(*alias).and_then(Value::as_array));
-    if images.is_some_and(|images| images.len() > 1) {
-        return Err(invalid_request(
-            "Magic 当前仅支持一张参考图片，请合并别名后保留一张 URL",
-        ));
+    if images.is_some_and(|images| images.len() > max_reference_images) {
+        return Err(invalid_request(format!(
+            "参考图片最多支持 {max_reference_images} 张，请减少后再试"
+        )));
     }
-    let reference_url = images
-        .and_then(|images| images.first())
-        .and_then(Value::as_str)
-        .map(str::to_string);
+    let reference_urls = images
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect();
     let prompt = body.get("prompt").and_then(Value::as_str).unwrap();
     Ok(PreparedRequest {
         mode,
         payload: json!({"mode": mode.as_str(), "prompt": normalize_prompt(prompt, mode)}),
-        reference_url,
+        reference_urls,
     })
 }
 

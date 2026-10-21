@@ -54,7 +54,7 @@ pub(super) async fn handle(
         .upstream_block_cache
         .as_ref()
         .map(|_| UpstreamBlockCacheKey::new("/v1/images/generations", &resolved.base_url, &body));
-    let result = match crate::midjourney::prepare_request(body) {
+    let result = match crate::midjourney::prepare_request(body, MAX_OPENAI_REFERENCE_IMAGES) {
         Err(err) => Err(err),
         Ok(request) => {
             entry.upstream_mode = request.mode.as_str().into();
@@ -67,7 +67,7 @@ pub(super) async fn handle(
                 let response = response_from_block_cache_hit(hit);
                 return (response, pending.entry.take().unwrap());
             }
-            entry.upstream_stage = if request.reference_url.is_some() {
+            entry.upstream_stage = if !request.reference_urls.is_empty() {
                 "magic_prepare_image"
             } else {
                 "magic_encode_request"
@@ -77,9 +77,11 @@ pub(super) async fn handle(
                 Err(timeout_error(timeout_stage(entry)))
             } else {
                 let upstream_started = Instant::now();
-                let result =
-                    tokio::time::timeout_at(deadline, execute(state, resolved, &request, entry))
-                        .await;
+                let result = tokio::time::timeout_at(
+                    deadline,
+                    execute(state, resolved, &request, entry, deadline),
+                )
+                .await;
                 entry.upstream_build_ms = upstream_started.elapsed().as_millis() as i64;
                 match result {
                     Ok(result) => result,
@@ -119,34 +121,49 @@ async fn execute(
     resolved: &ResolvedUpstream,
     prepared: &PreparedRequest,
     entry: &mut AdminLogEntry,
+    deadline: tokio::time::Instant,
 ) -> std::result::Result<CompletedTask, Error> {
     let mut resources = reference::RequestBlobs::new(&state.blob_runtime);
     let mut payload = prepared.payload.clone();
     let mut logged = payload.clone();
     let mut replacements = Vec::new();
-    if let Some(url) = &prepared.reference_url {
+    let mut images = Vec::new();
+    let mut summaries = Vec::new();
+    let prepare_started = Instant::now();
+    // 逐张准备以限制解码峰值；占用既有全局槽，顺序和重复项均保留。
+    for (index, url) in prepared.reference_urls.iter().enumerate() {
         entry.upstream_stage = "magic_prepare_image".into();
-        let started = Instant::now();
-        let result = reference::prepare(
-            &state.image_client,
-            &state.blob_runtime,
-            &mut resources,
-            url,
+        let result = tokio::time::timeout_at(
+            deadline,
+            reference::prepare(
+                &state.image_client,
+                &state.blob_runtime,
+                &mut resources,
+                url,
+            ),
         )
-        .await;
-        entry.request_image_prepare_ms = started.elapsed().as_millis() as i64;
-        let image = result?;
-        payload["base64Array"] = json!([null]);
-        logged["base64Array"] = json!([format!(
+        .await
+        .unwrap_or_else(|_| Err(timeout_error("magic_prepare_image")));
+        entry.request_image_prepare_ms = prepare_started.elapsed().as_millis() as i64;
+        let image = result.map_err(|mut error| {
+            error.message = format!("参考图片 {}：{}", index + 1, error.message);
+            error
+        })?;
+        summaries.push(format!(
             "[base64 omitted mime={} bytes={}]",
             image.meta().mime_type,
             image.meta().size_bytes
-        )]);
+        ));
+        images.push(image.clone());
         replacements.push(RequestReplacement {
-            json_pointer: "/base64Array/0".into(),
+            json_pointer: format!("/base64Array/{index}"),
             mime_type: image.meta().mime_type.clone(),
             blob: image,
         });
+    }
+    if !images.is_empty() {
+        payload["base64Array"] = json!(vec![Value::Null; images.len()]);
+        logged["base64Array"] = json!(summaries);
     }
     if state.admin.is_some() {
         entry.request_upstream = admin::truncate_for_admin_log(
@@ -160,12 +177,11 @@ async fn execute(
     }
     entry.upstream_stage = "magic_encode_request".into();
     let started = Instant::now();
-    let image = replacements.first().map(|item| item.blob.clone());
     let result = encode_data_uri_request_body(payload, replacements, &state.blob_runtime).await;
     entry.request_encode_ms = started.elapsed().as_millis() as i64;
     let encoded = result.map_err(encode_error)?;
     resources.track(encoded.body_blob.clone());
-    if let Some(image) = image {
+    for image in images {
         resources.release(&image).await.map_err(encode_error)?;
     }
     let reader = state

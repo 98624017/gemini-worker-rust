@@ -11,7 +11,7 @@
 
 上游配置可以带 `/v1` 或尾斜杠；代理会基于解析后的 origin 构造 Magic 路径，并保留配置中的 scheme、port 和请求头鉴权覆盖语义。Magic 的其他模型、其他 provider 和非目标 OpenAI 图片请求保持原有分发。
 
-本文说明 FAST 文生图；RELAX 用法见 [RELAX 调用说明](magic-relax-openai.md)。单张参考图用法见 [参考图调用说明](magic-reference-openai.md)。
+本文说明 FAST 文生图；RELAX 用法见 [RELAX 调用说明](magic-relax-openai.md)。单张及多张参考图用法见 [参考图调用说明](magic-reference-openai.md)。
 
 ## 请求
 
@@ -36,7 +36,7 @@ curl --fail-with-body --silent --show-error \
 | `model` | 必填、非空字符串，且必须是 `mj_fast_imagine`。 |
 | `prompt` | 必填、非空字符串；中文正文、`--v 8.1`、`--ar` 等参数原样保留。 |
 | `response_format` | 可省略，默认 `url`；仅接受大小写兼容的 `url`。 |
-| `image` / `images` / `reference_images` | 省略或传空数组表示文生图；合并后支持一张 HTTP(S) 参考图 URL，多张明确返回 `400`。 |
+| `image` / `images` / `reference_images` | 省略或传空数组表示文生图；合并后支持一至六张 HTTP(S) 参考图 URL，保留顺序及重复项；超过六张返回 `400`。六张为本层上限，并非上游实测支持承诺。 |
 
 本路径不支持 `b64_json`、`n`、`size`、`quality`、`stream`。这些字段会在创建 Magic 任务前返回清晰的 `400`，不会被通用的 `b64_json` 强制配置改写。图片字段的非法类型、`null`、非字符串元素或无效 URL 也会在创建前返回 `400`。
 
@@ -109,7 +109,7 @@ curl --fail-with-body --silent --show-error \
 
 | HTTP | 典型原因 |
 | --- | --- |
-| `400` | 请求字段非法、参考图格式不支持或解码失败、多张参考图、Magic 明确拒绝输入，或业务 code `4`/`24`。 |
+| `400` | 请求字段非法、参考图格式不支持或解码失败、超过六张参考图、Magic 明确拒绝输入，或业务 code `4`/`24`。 |
 | `401` / `403` | Magic 鉴权失败；不要重提相同任务。 |
 | `429` | Magic 限流。 |
 | `502` | 上游协议损坏、一般上游 HTTP/传输失败、任务失败/取消或成功结果缺失。 |

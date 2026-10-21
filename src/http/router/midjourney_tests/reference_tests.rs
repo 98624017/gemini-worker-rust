@@ -7,6 +7,7 @@ use std::net::SocketAddr;
 
 mod cache_tests;
 mod lifecycle_tests;
+mod multiple_tests;
 
 struct ReferenceSource {
     address: SocketAddr,
@@ -291,18 +292,14 @@ async fn aliases_and_relax_reuse_the_single_reference_pipeline() {
 }
 
 #[tokio::test]
-async fn merged_multiple_images_and_private_base64_are_rejected_before_any_download() {
+async fn private_base64_is_rejected_before_any_download() {
     let source = ReferenceSource::new(
         image_bytes(1, 1, ImageFormat::Png, Rgba([0, 0, 0, 255])),
         "image/png",
     )
     .await;
     let harness = source.harness().await;
-    let mut cases = vec![
-        json!({"image": [source.url(), source.url()]}),
-        json!({"reference_images": [source.url()], "images": [source.url()]}),
-        json!({"images": [source.url()], "image": [source.url()]}),
-    ];
+    let mut cases = Vec::new();
     for value in [
         Value::Null,
         json!([]),
