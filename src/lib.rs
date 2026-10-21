@@ -6,6 +6,7 @@ pub mod config;
 pub mod grsai;
 pub mod http;
 pub mod image_io;
+mod midjourney;
 pub mod openai_image;
 pub mod provider;
 pub mod request_encode;

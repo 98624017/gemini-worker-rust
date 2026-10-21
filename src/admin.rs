@@ -46,6 +46,9 @@ pub struct AdminLogEntry {
     pub request_image_store_work_ms: i64,
     pub request_encode_ms: i64,
     pub upstream_build_ms: i64,
+    pub upstream_mode: String,
+    pub upstream_task_id: String,
+    pub upstream_stage: String,
     pub response_process_ms: i64,
     pub upload_ms: i64,
     pub finish_reason: String,
@@ -938,6 +941,9 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
     return '<div class="detail-grid">'
       + '<div>'
         + '<div class="detail-col-label">request body</div>'
+        + (item.upstreamMode ? '<pre>'+esc('mode: ' + item.upstreamMode
+          + '\ntask: ' + (item.upstreamTaskId || '')
+          + '\nstage: ' + (item.upstreamStage || ''))+'</pre>' : '')
         + renderImgs(item.requestRawImages, item.requestRawImageCacheHits)
         + '<pre>'+esc(item.requestRaw || '')+'</pre>'
       + '</div>'

@@ -42,6 +42,11 @@ use crate::upstream_block_cache::{
     classify_blockable_upstream_error,
 };
 
+mod midjourney;
+
+#[cfg(test)]
+mod midjourney_tests;
+
 const MAX_REQUEST_BODY_BYTES: usize = 20 * 1024 * 1024;
 const MAX_UPSTREAM_BLOCK_CACHE_BODY_BYTES: usize = 64 * 1024;
 const AIAPIDEV_POLL_INTERVAL: Duration = Duration::from_secs(1);
@@ -53,6 +58,7 @@ const OPENAI_IMAGE_REFERENCE_FIELDS: [&str; 3] = ["image", "images", "reference_
 const MSG_INVALID_REQUEST_JSON: &str = "请求内容不是有效的 JSON，请检查后再试";
 const MSG_REQUEST_BODY_TOO_LARGE: &str = "请求内容太大，请缩小后再试";
 const MSG_READ_REQUEST_BODY_FAILED: &str = "读取请求内容失败，请重试";
+const MSG_READ_REQUEST_BODY_TIMEOUT: &str = "读取请求内容超时，请检查网络或缩小请求后重试";
 const MSG_UPSTREAM_TIMEOUT: &str = "上游服务响应超时，请稍后再试";
 const MSG_UPSTREAM_CONNECT_FAILED: &str = "连接上游服务失败，请稍后再试";
 const MSG_UPSTREAM_CONNECT_TIMEOUT: &str = "连接上游服务超时，请检查上游网络或地址配置";
@@ -629,6 +635,7 @@ pub fn build_router(config: Config) -> Router {
 
 async fn image_generations_action(State(state): State<AppState>, request: Request) -> Response {
     let started_at = Instant::now();
+    let deadline = tokio::time::Instant::now() + state.config.upstream_timeout;
     let created_at = admin::now_rfc3339();
     let request_method = request.method().to_string();
     let request_path = request.uri().path().to_string();
@@ -642,10 +649,25 @@ async fn image_generations_action(State(state): State<AppState>, request: Reques
 
     let request_parse_started = Instant::now();
     let (parts, body) = request.into_parts();
-    let request_body = match to_bytes(body, MAX_REQUEST_BODY_BYTES).await {
+    let body_result = tokio::time::timeout_at(deadline, to_bytes(body, MAX_REQUEST_BODY_BYTES))
+        .await
+        .map_err(|err| {
+            (
+                StatusCode::GATEWAY_TIMEOUT,
+                MSG_READ_REQUEST_BODY_TIMEOUT,
+                "timeout",
+                err.to_string(),
+            )
+        })
+        .and_then(|result| {
+            result.map_err(|err| {
+                let (status, message, kind) = request_body_read_error_response(&err);
+                (status, message, kind, err.to_string())
+            })
+        });
+    let request_body = match body_result {
         Ok(body) => body,
-        Err(err) => {
-            let (status, message, kind) = request_body_read_error_response(&err);
+        Err((status, message, kind, detail)) => {
             let response = proxy_error_response(status, message, "read_request_body", kind);
             return finalize_admin_response(
                 &state,
@@ -664,7 +686,7 @@ async fn image_generations_action(State(state): State<AppState>, request: Reques
                     error_stage: "read_request_body".to_string(),
                     error_kind: kind.to_string(),
                     error_message: message.to_string(),
-                    error_detail: err.to_string(),
+                    error_detail: detail,
                     ..Default::default()
                 },
             )
@@ -729,6 +751,27 @@ async fn image_generations_action(State(state): State<AppState>, request: Reques
             return finalize_admin_response(&state, response, admin_entry).await;
         }
     };
+
+    let invalid_magic_model = crate::midjourney::is_magic_upstream(&resolved.base_url)
+        && parsed_body
+            .get("model")
+            .and_then(Value::as_str)
+            .is_none_or(|model| model.trim().is_empty());
+    if invalid_magic_model || crate::midjourney::matches(&resolved.base_url, &parsed_body) {
+        let entry = AdminLogEntry {
+            created_at,
+            method: request_method,
+            path: request_path,
+            query: request_query,
+            remote_addr,
+            request_parse_ms: request_parse_started.elapsed().as_millis() as i64,
+            ..request_log.base_entry()
+        };
+        let (response, mut entry) =
+            midjourney::handle(&state, &resolved, parsed_body, entry, started_at, deadline).await;
+        entry.duration_ms = started_at.elapsed().as_millis() as i64;
+        return finalize_admin_response(&state, response, entry).await;
+    }
 
     let force_b64_json = state
         .config

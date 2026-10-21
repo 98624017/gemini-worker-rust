@@ -10,15 +10,39 @@
 
 ## 本地模拟 HTTP
 
-实现方已提供首条 happy path 的本地模拟 HTTP 验证：
+新增测试位于 `src/http/router/midjourney_tests.rs` 及其三个子模块，共 31 个测试。它们启动真实下游 TCP 服务，通过已注入的 HTTP 客户端将逻辑域名 `magic666.top` 映射到本地模拟服务；没有添加产品测试路由或全局环境变量。
 
-- 目标匹配使用解析后的 host 精确 `magic666.top` 与 model `mj_fast_imagine`。
-- 代理向模拟 Magic 发送一次 `POST /mj/submit/imagine`，JSON 为 `mode=FAST` 和规范化 prompt。
-- 提交返回任务 ID 后立即查询 `GET /mj/task/{taskId}/fetch`，没有重复创建任务。
-- `imageUrls` 的字符串与 `{ "url": ... }` 候选均可读取，保持顺序并去除重复项。
-- 最终响应为 OpenAI 风格 `created`、`data[].url` 和兼容 `usage`。
+覆盖范围：
 
-截至本文编写时，首条 happy tracer 与 `cargo check` 的已知状态为通过；最终交付前由主 agent 补入实际命令、精确测试名称和候选树结果。本文不宣称未运行的完整测试套件、错误/取消/期限用例或真实外部生成已经通过；本文件编辑者未运行共享 `cargo` 命令。
+- 精确 host/model 分流、上游路径和端口、请求头覆盖、空参考图别名及强制 b64 配置隔离；非目标 Magic、其他渠道和 Gemini 保持原协议。
+- 中文 v8.1 提示词、冲突模式清理、一次提交、立即查询、空/未知状态等待、合法成功终态和候选 URL 严格校验。
+- 业务码、鉴权、限流、失败/取消/MODAL、损坏响应、五次连续查询失败与成功清零；提交中断不重提。
+- 同一绝对预算覆盖请求体读取、提交、慢查询和轮询等待；缺省 600 秒；读取停滞也会返回 504，且不创建任务。
+- 真实 TCP 断连后不再轮询，在途查询释放，admin 保存 499 取消诊断；已知密钥在错误和 admin 中脱敏。
+- 候选顺序/去重、主图回退、毫秒时间戳、兼容 usage、直链代理前缀，以及既有违规缓存与普通审核失败的区别。
+
+验证命令及结果：
+
+| 命令 | 结果 |
+| --- | --- |
+| `rtk cargo check --all-targets` | 通过 |
+| `rtk cargo fmt --all -- --check` | 通过 |
+| `rtk cargo test` | 当前工作区 273 个测试通过，24 个测试套件；包含以上 31 个新增 HTTP 测试及既有 aiapipro、grsai、Gemini/OpenAI 回归 |
+| `rtk proxy git diff --check` | 通过 |
+
+验证保留了工作区已有未提交改动。等待和截止时间采用 Tokio 虚拟时间，真实网络连接用于请求转发与断连；没有真实等待数分钟。
+
+## Standards
+
+审查基点为任务开始前的 `ce801055480768780447a2a0c1be3751b6fb0bab`，只审查本任务提交的改动。首轮发现一项 P2：Magic 网络错误只保存友好分类，admin 缺少底层根因链，不符合诊断日志要求。现已复用 `reqwest_error_detail`，移除请求 URL 并对已知 key 脱敏，仅写入 admin 诊断；`interrupted_submission_is_not_replayed` 通过真实 HTTP 日志接口验证根因保留、下游响应无原始 detail，且仍只提交一次。
+
+未发现需要处理的 Fowler code smell；既有大路由只作局部接入，协议和任务执行分别由新模块负责。
+
+## Spec
+
+按 GitHub [#1](https://github.com/98624017/gemini-worker-rust/issues/1) 核对，未发现 FAST 文生图实现缺口、错误行为或范围扩张。真实 Magic 生成因缺少凭据未执行，按 ticket 要求明确保留验证局限，未引用旧原生协议结果代替。
+
+Standards：1 项 P2 已修复，未解决 0 项；Spec：0 项。
 
 ## 待补验收项
 
@@ -27,9 +51,9 @@
 | 真实中文 `mj_fast_imagine` 代理生成 | 未验证，缺少凭据 |
 | 任务 ID、实际 `FAST` 模式、终态、耗时 | 未验证 |
 | 返回 URL 实际下载 | 未验证 |
-| 非目标 Magic 模型、恶意相似域名、Gemini、aiapipro、grsai 和既有 OpenAI 图片行为不回归 | 需由主 agent 补充精确测试结果 |
-| 输入拒绝、Magic 业务错误、查询重试、连续失败五次、超时和下游断连不重提 | 需由主 agent 补充精确测试结果 |
-| 明确违规错误保持 `451`/现有缓存，其他审核错误不扩大缓存 | 需由主 agent 补充精确测试结果 |
+| 非目标 Magic 模型、恶意相似域名、Gemini、aiapipro、grsai 和既有 OpenAI 图片行为不回归 | 本地测试通过 |
+| 输入拒绝、Magic 业务错误、查询重试、连续失败五次、超时和下游断连不重提 | 本地测试通过 |
+| 明确违规错误保持 `451`/现有缓存，其他审核错误不扩大缓存 | 本地测试通过 |
 
 ## 真实验收命令模板
 

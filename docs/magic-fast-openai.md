@@ -18,7 +18,7 @@
 ```bash
 curl --fail-with-body --silent --show-error \
   -X POST 'http://127.0.0.1:8787/v1/images/generations' \
-  -H 'Authorization: Bearer YOUR_API_KEY' \
+  -H 'Authorization: Bearer https://magic666.top|YOUR_API_KEY' \
   -H 'Content-Type: application/json' \
   --data-raw '{
     "model": "mj_fast_imagine",
@@ -27,7 +27,7 @@ curl --fail-with-body --silent --show-error \
   }'
 ```
 
-示例中的 `YOUR_API_KEY` 只是占位符，不要把真实密钥写入脚本、文档或请求文件。代理使用解析出的 Bearer key 同时发送 Magic 的提交和查询请求；也可以按仓库现有的上游覆盖规则从服务配置或请求头解析上游地址与 key。
+示例用现有的 `baseUrl|apiKey` 请求头格式选择 Magic 上游，`YOUR_API_KEY` 是占位符。若服务已配置 `UPSTREAM_BASE_URL=https://magic666.top`，也可只传 `Bearer YOUR_API_KEY`。代理使用解析出的 key 同时发送 Magic 的提交和查询请求。
 
 请求字段合同：
 
@@ -60,7 +60,7 @@ curl --fail-with-body --silent --show-error \
 4. 创建后立即发送 `GET /mj/task/{taskId}/fetch`。任务未完成时默认每 10 秒查询一次；空状态、`NOT_START`、`SUBMITTED`、`IN_PROGRESS` 和未知非终态继续等待。
 5. 只有 `status=SUCCESS` 且结果包含合法 HTTP(S) 图片 URL 才算成功。`FAILURE`、`FAILED`、`CANCEL`、`CANCELLED` 和 `MODAL` 直接结束；`progress=100%` 不能单独作为成功依据。
 
-整个流程从收到请求开始受 `UPSTREAM_TIMEOUT_MS` 的绝对截止时间约束，默认 `600000` 毫秒（600 秒）。查询的暂时性传输错误及现有可重试 HTTP 状态只在查询阶段重试，连续失败五次停止；成功查询后清零。提交失败、超时或连接中断都不会自动重提任务。调用方断开后代理停止本请求的查询并释放资源，但不会向 Magic 发送取消请求，因此上游任务可能继续运行。
+整个流程从收到请求开始受 `UPSTREAM_TIMEOUT_MS` 的绝对截止时间约束，默认 `600000` 毫秒（600 秒）。OpenAI 图片入口读取请求体也受此预算约束；读取超时返回 `504`，阶段为 `read_request_body`。查询的暂时性传输错误及现有可重试 HTTP 状态只在查询阶段重试，连续失败五次停止；成功查询后清零。提交失败、超时或连接中断都不会自动重提任务。调用方断开后代理停止本请求的查询并释放资源，但不会向 Magic 发送取消请求，因此上游任务可能继续运行。
 
 ## 成功响应
 
