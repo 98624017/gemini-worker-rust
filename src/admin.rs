@@ -1580,6 +1580,33 @@ fn redact_inline_data_and_collect_image_urls(root: &mut Value) -> Vec<String> {
     fn walk(node: &mut Value, urls: &mut Vec<String>, seen: &mut HashSet<String>) {
         match node {
             Value::Object(map) => {
+                if let Some(value) = map.get_mut("base64Array") {
+                    if let Value::Array(items) = value {
+                        for item in items {
+                            let summary = item.as_str().map(|raw| {
+                                let (mime, data) = raw
+                                    .split_once(',')
+                                    .map(|(prefix, data)| {
+                                        let mime = match prefix {
+                                            "data:image/jpeg;base64" => "image/jpeg",
+                                            "data:image/png;base64" => "image/png",
+                                            "data:image/webp;base64" => "image/webp",
+                                            _ => "unknown",
+                                        };
+                                        (mime, data)
+                                    })
+                                    .unwrap_or(("unknown", raw));
+                                format!("[base64 omitted mime={mime} len={}]", data.len())
+                            });
+                            *item =
+                                Value::String(summary.unwrap_or_else(|| {
+                                    "[base64 omitted invalid item]".to_string()
+                                }));
+                        }
+                    } else {
+                        *value = Value::String("[base64 omitted invalid array]".to_string());
+                    }
+                }
                 for key in ["inlineData", "inline_data"] {
                     if let Some(Value::Object(inline)) = map.get_mut(key)
                         && let Some(Value::String(data)) = inline.get("data")
@@ -1629,7 +1656,7 @@ fn is_image_url(value: &str) -> bool {
         || value.starts_with("/proxy/image")
 }
 
-fn truncate_for_admin_log(input: &str, max_bytes: usize) -> String {
+pub(crate) fn truncate_for_admin_log(input: &str, max_bytes: usize) -> String {
     if input.len() <= max_bytes {
         return input.to_string();
     }

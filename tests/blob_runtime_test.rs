@@ -128,3 +128,76 @@ async fn blob_runtime_can_store_external_shared_bytes_without_spill() {
     assert_eq!(runtime.read_bytes(&handle).await.unwrap(), data);
     assert_eq!(runtime.stats_snapshot().spill_count, 0);
 }
+
+#[tokio::test]
+async fn interrupted_blob_stream_removes_partial_spill() {
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = BlobRuntime::new(BlobRuntimeConfig {
+        inline_max_bytes: 8,
+        request_hot_budget_bytes: 8,
+        global_hot_budget_bytes: 8,
+        spill_dir: directory.path().to_path_buf(),
+    });
+    let chunks = futures_util::stream::iter([
+        Ok(Bytes::from_static(b"partial image payload")),
+        Err(std::io::Error::from(std::io::ErrorKind::ConnectionReset)),
+    ]);
+    let error = runtime
+        .store_stream(
+            tokio_util::io::StreamReader::new(chunks),
+            "application/json".into(),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(error.downcast_ref::<std::io::Error>().is_some());
+    assert!(
+        std::fs::read_dir(directory.path())
+            .unwrap()
+            .next()
+            .is_none()
+    );
+    assert_eq!(runtime.stats_snapshot().spill_count, 0);
+}
+
+#[tokio::test]
+async fn cancelled_blob_stream_removes_partial_spill() {
+    use tokio::io::AsyncWriteExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = BlobRuntime::new(BlobRuntimeConfig {
+        inline_max_bytes: 8,
+        request_hot_budget_bytes: 8,
+        global_hot_budget_bytes: 8,
+        spill_dir: directory.path().to_path_buf(),
+    });
+    let store_runtime = runtime.clone();
+    let (mut writer, reader) = tokio::io::duplex(64);
+    let storing = tokio::spawn(async move {
+        store_runtime
+            .store_stream(reader, "application/json".into())
+            .await
+    });
+    writer.write_all(b"partial image payload").await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while std::fs::read_dir(directory.path())
+            .unwrap()
+            .next()
+            .is_none()
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+
+    storing.abort();
+    assert!(storing.await.unwrap_err().is_cancelled());
+    assert!(
+        std::fs::read_dir(directory.path())
+            .unwrap()
+            .next()
+            .is_none()
+    );
+    assert_eq!(runtime.stats_snapshot().spill_count, 0);
+}

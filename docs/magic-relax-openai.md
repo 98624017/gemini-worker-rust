@@ -20,7 +20,7 @@ curl --fail-with-body --silent --show-error \
 
 仅在上游 host 精确为 `magic666.top`，且 `model` 精确为 `mj_relax_imagine` 时采用此适配。配置地址可带 `/v1` 或尾斜杠，代理从 origin 构造固定路径。其他 host、Magic 其他模型和既有 FAST 请求保持现有分发。
 
-`prompt` 必须是非空字符串。`response_format` 可省略，默认 `url`，兼容大小写；`b64_json`、`null`、`n`、`size`、`quality`、`stream` 会在提交前返回 `400`。省略图片字段或传空数组表示文生图，不发送 `base64Array`；本票暂不支持非空 `image` / `images` / `reference_images`，会明确返回 `400`。
+`prompt` 必须是非空字符串。`response_format` 可省略，默认 `url`，兼容大小写；`b64_json`、`null`、`n`、`size`、`quality`、`stream` 会在提交前返回 `400`。省略图片字段或传空数组表示文生图，不发送 `base64Array`；`image` / `images` / `reference_images` 合并后支持一张 HTTP(S) URL，处理规则与 FAST 共用，见 [单参考图调用说明](magic-reference-openai.md)。多张参考图会明确返回 `400`。
 
 ## 实际慢速链路
 

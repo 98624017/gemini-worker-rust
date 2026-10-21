@@ -97,3 +97,41 @@ async fn request_encoder_writes_spilled_blob_as_base64() {
     let expected = base64::engine::general_purpose::STANDARD.encode(source);
     assert!(text.contains(&expected));
 }
+
+#[tokio::test]
+async fn request_encoder_cleans_partial_output_when_source_blob_is_unavailable() {
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = rust_sync_proxy::BlobRuntime::new(rust_sync_proxy::BlobRuntimeConfig {
+        inline_max_bytes: 8,
+        request_hot_budget_bytes: 8,
+        global_hot_budget_bytes: 8,
+        spill_dir: directory.path().to_path_buf(),
+    });
+    let blob = runtime
+        .store_bytes(vec![11_u8; 4096], "image/png".into())
+        .await
+        .unwrap();
+    runtime.remove(&blob).await.unwrap();
+    let request = json!({
+        "contents": [{"parts": [{"inlineData": {"data": "https://example.com/a.png"}}]}]
+    });
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        rust_sync_proxy::request_encode::encode_request_body(
+            request,
+            vec![replacement("/contents/0/parts/0/inlineData", blob)],
+            &runtime,
+        ),
+    )
+    .await
+    .expect("encoder must stop when its source blob is unavailable");
+
+    assert!(result.is_err());
+    assert!(
+        std::fs::read_dir(directory.path())
+            .unwrap()
+            .next()
+            .is_none()
+    );
+}

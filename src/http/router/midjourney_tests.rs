@@ -8,6 +8,7 @@ use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 
 mod protocol_tests;
+mod reference_tests;
 mod relax_tests;
 mod selection_tests;
 mod timing_tests;
@@ -50,6 +51,24 @@ impl Harness {
     }
 
     async fn with_config(replies: Vec<Value>, configure: impl FnOnce(&mut Config)) -> Self {
+        Self::with_image_client(replies, configure, reqwest::Client::new()).await
+    }
+
+    async fn with_image_client(
+        replies: Vec<Value>,
+        configure: impl FnOnce(&mut Config),
+        image_client: reqwest::Client,
+    ) -> Self {
+        Self::with_image_services(replies, configure, image_client, None, None).await
+    }
+
+    async fn with_image_services(
+        replies: Vec<Value>,
+        configure: impl FnOnce(&mut Config),
+        image_client: reqwest::Client,
+        request_inline_data_fetch_service: Option<Arc<InlineDataUrlFetchService>>,
+        blob_runtime: Option<Arc<BlobRuntime>>,
+    ) -> Self {
         let mock = MagicMock {
             requests: Default::default(),
             replies: Arc::new(Mutex::new(
@@ -85,12 +104,12 @@ impl Harness {
         let state = AppState {
             config: Arc::new(config.clone()),
             upstream_client,
-            image_client: reqwest::Client::new(),
+            image_client,
             uploader: Arc::new(Uploader::new(reqwest::Client::new(), config.clone())),
             admin: Some(Arc::new(AdminState::new("admin-test".into()))),
-            request_inline_data_fetch_service: None,
+            request_inline_data_fetch_service,
             response_inline_data_fetch_service: None,
-            blob_runtime: Arc::new(crate::test_blob_runtime(1024)),
+            blob_runtime: blob_runtime.unwrap_or_else(|| Arc::new(crate::test_blob_runtime(1024))),
             upstream_block_cache: UpstreamBlockCache::new(
                 config.upstream_block_cache_ttl,
                 config.upstream_block_cache_max_entries,
@@ -266,7 +285,7 @@ async fn invalid_fields_are_rejected_before_creating_a_task() {
             json!([""]),
             json!(["data:image/png;base64,AQID"]),
             json!(["file:///tmp/ref.png"]),
-            json!(["https://img.example/ref.png"]),
+            json!(["QUJDREVGRw=="]),
         ] {
             let mut body = valid.clone();
             body[alias] = value;

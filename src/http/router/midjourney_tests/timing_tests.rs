@@ -266,20 +266,34 @@ async fn real_downstream_disconnect_stops_polling_and_releases_inflight_query() 
         ).as_bytes()).await.unwrap();
         harness.wait_for_requests(2).await;
         drop(socket);
-        settle().await;
+        // TCP 断开依赖真实 I/O 就绪，先观察取消完成再推进虚拟轮询时钟。
+        let logs = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let logs: Value = harness
+                    .client
+                    .get(format!("{}/admin/api/logs", harness.base_url))
+                    .basic_auth("user", Some("admin-test"))
+                    .send()
+                    .await
+                    .unwrap()
+                    .json()
+                    .await
+                    .unwrap();
+                if logs["items"][0]["statusCode"] == 499
+                    && harness.mock.active_requests.load(Ordering::Relaxed) == 0
+                {
+                    break logs;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("downstream cancellation did not release upstream query and record status 499");
         tokio::time::pause();
         tokio::time::advance(Duration::from_secs(30)).await;
         settle().await;
         assert_eq!(harness.mock.requests.lock().await.len(), 2);
         assert_eq!(harness.mock.active_requests.load(Ordering::Relaxed), 0);
-        let response = harness
-            .client
-            .get(format!("{}/admin/api/logs", harness.base_url))
-            .basic_auth("user", Some("admin-test"))
-            .send()
-            .await
-            .unwrap();
-        let logs: Value = response.json().await.unwrap();
         assert_eq!(logs["items"][0]["statusCode"], 499);
         assert_eq!(logs["items"][0]["upstreamTaskId"], "timed-task");
         tokio::time::resume();

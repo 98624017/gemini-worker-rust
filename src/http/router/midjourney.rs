@@ -1,6 +1,9 @@
 use super::*;
 use crate::midjourney::{CompletedTask, Error, Mode, PreparedRequest};
-use std::io::Cursor;
+use crate::request_encode::encode_data_uri_request_body;
+use crate::request_materialize::RequestReplacement;
+
+mod reference;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(10);
 const MAX_CONSECUTIVE_FAILURES: usize = 5;
@@ -64,13 +67,14 @@ pub(super) async fn handle(
                 let response = response_from_block_cache_hit(hit);
                 return (response, pending.entry.take().unwrap());
             }
-            if state.admin.is_some() {
-                entry.request_upstream =
-                    admin::sanitize_json_for_log(request.payload.to_string().as_bytes()).pretty;
+            entry.upstream_stage = if request.reference_url.is_some() {
+                "magic_prepare_image"
+            } else {
+                "magic_encode_request"
             }
-            entry.upstream_stage = "magic_submit".into();
+            .into();
             if tokio::time::Instant::now() >= deadline {
-                Err(timeout_error("magic_submit"))
+                Err(timeout_error(timeout_stage(entry)))
             } else {
                 let upstream_started = Instant::now();
                 let result =
@@ -79,11 +83,7 @@ pub(super) async fn handle(
                 entry.upstream_build_ms = upstream_started.elapsed().as_millis() as i64;
                 match result {
                     Ok(result) => result,
-                    Err(_) => Err(timeout_error(if entry.upstream_task_id.is_empty() {
-                        "magic_submit"
-                    } else {
-                        "magic_poll"
-                    })),
+                    Err(_) => Err(timeout_error(timeout_stage(entry))),
                 }
             }
         }
@@ -120,17 +120,69 @@ async fn execute(
     prepared: &PreparedRequest,
     entry: &mut AdminLogEntry,
 ) -> std::result::Result<CompletedTask, Error> {
+    let mut resources = reference::RequestBlobs::new(&state.blob_runtime);
+    let mut payload = prepared.payload.clone();
+    let mut logged = payload.clone();
+    let mut replacements = Vec::new();
+    if let Some(url) = &prepared.reference_url {
+        entry.upstream_stage = "magic_prepare_image".into();
+        let started = Instant::now();
+        let result = reference::prepare(
+            &state.image_client,
+            &state.blob_runtime,
+            &mut resources,
+            url,
+        )
+        .await;
+        entry.request_image_prepare_ms = started.elapsed().as_millis() as i64;
+        let image = result?;
+        payload["base64Array"] = json!([null]);
+        logged["base64Array"] = json!([format!(
+            "[base64 omitted mime={} bytes={}]",
+            image.meta().mime_type,
+            image.meta().size_bytes
+        )]);
+        replacements.push(RequestReplacement {
+            json_pointer: "/base64Array/0".into(),
+            mime_type: image.meta().mime_type.clone(),
+            blob: image,
+        });
+    }
+    if state.admin.is_some() {
+        entry.request_upstream = admin::truncate_for_admin_log(
+            &redact(
+                &serde_json::to_string_pretty(&logged).unwrap(),
+                resolved,
+                &state.config,
+            ),
+            admin::ADMIN_MAX_BODY_BYTES_PER_ENTRY,
+        );
+    }
+    entry.upstream_stage = "magic_encode_request".into();
+    let started = Instant::now();
+    let image = replacements.first().map(|item| item.blob.clone());
+    let result = encode_data_uri_request_body(payload, replacements, &state.blob_runtime).await;
+    entry.request_encode_ms = started.elapsed().as_millis() as i64;
+    let encoded = result.map_err(encode_error)?;
+    resources.track(encoded.body_blob.clone());
+    if let Some(image) = image {
+        resources.release(&image).await.map_err(encode_error)?;
+    }
+    let reader = state
+        .blob_runtime
+        .open_reader(&encoded.body_blob)
+        .await
+        .map_err(encode_error)?;
+    entry.upstream_stage = "magic_submit".into();
     let submit_url = task_url(&resolved.base_url, prepared.mode, None)?;
-    let bytes = prepared.payload.to_string().into_bytes();
-    let length = bytes.len();
     // 不可重放的请求体阻止 HTTP 客户端自动重新提交计费任务。
-    let body = reqwest::Body::wrap_stream(ReaderStream::new(Cursor::new(bytes)));
+    let body = reqwest::Body::wrap_stream(ReaderStream::new(reader));
     let request = state
         .upstream_client
         .post(submit_url)
         .bearer_auth(&resolved.api_key)
         .header(CONTENT_TYPE, "application/json")
-        .header(axum::http::header::CONTENT_LENGTH, length)
+        .header(axum::http::header::CONTENT_LENGTH, encoded.content_length)
         .body(body);
     let submission = exchange(request, "magic_submit", entry)
         .await
@@ -138,6 +190,8 @@ async fn execute(
     let task_id = crate::midjourney::submitted_task(&submission)?;
     entry.upstream_task_id = redact(&task_id, resolved, &state.config);
     entry.upstream_stage = "magic_poll".into();
+    resources.cleanup().await;
+    drop(encoded);
     let poll_url = task_url(&resolved.base_url, prepared.mode, Some(&task_id))?;
     let mut failures = 0;
     loop {
@@ -252,8 +306,33 @@ fn timeout_error(stage: &'static str) -> Error {
         "proxy",
         stage,
         "timeout",
-        "等待 Magic 任务完成超时，请稍后查询已有任务",
+        if matches!(stage, "magic_prepare_image" | "magic_encode_request") {
+            "准备 Magic 参考图片或请求超时，请检查图片源并重试"
+        } else {
+            "等待 Magic 任务完成超时，请稍后查询已有任务"
+        },
     )
+}
+
+fn timeout_stage(entry: &AdminLogEntry) -> &'static str {
+    match entry.upstream_stage.as_str() {
+        "magic_prepare_image" => "magic_prepare_image",
+        "magic_encode_request" => "magic_encode_request",
+        "magic_poll" => "magic_poll",
+        _ => "magic_submit",
+    }
+}
+
+fn encode_error(error: anyhow::Error) -> Error {
+    let mut result = Error::new(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "proxy",
+        "magic_encode_request",
+        "request_encode_failed",
+        "Magic 提交请求编码失败，请稍后重试",
+    );
+    result.detail = Some(error.to_string());
+    result
 }
 
 fn redact(value: &str, resolved: &ResolvedUpstream, config: &Config) -> String {

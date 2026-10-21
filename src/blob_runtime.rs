@@ -1,5 +1,5 @@
 use std::io::Cursor;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -77,6 +77,30 @@ struct BlobRuntimeInner {
     spill_bytes_total: AtomicU64,
 }
 
+struct PendingSpill {
+    path: Option<PathBuf>,
+}
+
+impl PendingSpill {
+    fn into_path(mut self) -> PathBuf {
+        self.path.take().expect("pending spill path must exist")
+    }
+}
+
+impl Drop for PendingSpill {
+    fn drop(&mut self) {
+        let Some(path) = self.path.take() else {
+            return;
+        };
+        // 守卫在实际 open 的阻塞任务内创建，取消不会先清理再迟到创建文件。
+        if let Err(error) = std::fs::remove_file(path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(%error, "incomplete blob spill cleanup failed");
+        }
+    }
+}
+
 impl BlobRuntime {
     pub fn new(cfg: BlobRuntimeConfig) -> Self {
         Self {
@@ -142,7 +166,7 @@ impl BlobRuntime {
         let mut buffer = Vec::new();
         let mut chunk = [0_u8; 16 * 1024];
         let mut spill_file: Option<File> = None;
-        let mut spill_path: Option<PathBuf> = None;
+        let mut pending_spill: Option<PendingSpill> = None;
 
         loop {
             let read = reader.read(&mut chunk).await?;
@@ -160,22 +184,20 @@ impl BlobRuntime {
                 continue;
             }
 
-            let path = self.spill_path(id);
-            ensure_parent_dir(&path).await?;
-            let mut file = File::create(&path).await?;
+            let (mut file, pending) = self.open_spill(id).await?;
             if !buffer.is_empty() {
                 file.write_all(&buffer).await?;
                 buffer.clear();
             }
             file.write_all(&chunk[..read]).await?;
             spill_file = Some(file);
-            spill_path = Some(path);
+            pending_spill = Some(pending);
         }
 
         let size_bytes = if let Some(mut file) = spill_file {
             file.flush().await?;
-            let path = spill_path.expect("spill path must exist");
-            let metadata = fs::metadata(&path).await?;
+            let metadata = file.metadata().await?;
+            let path = pending_spill.expect("spill guard must exist").into_path();
             self.record_spill(metadata.len());
             return Ok(self.build_handle(
                 id,
@@ -319,20 +341,31 @@ impl BlobRuntime {
     }
 
     async fn write_spilled_bytes(&self, id: u64, bytes: &[u8]) -> Result<PathBuf> {
+        let (mut file, pending) = self.open_spill(id).await?;
+        file.write_all(bytes).await?;
+        file.flush().await?;
+        Ok(pending.into_path())
+    }
+
+    async fn open_spill(&self, id: u64) -> Result<(File, PendingSpill)> {
         let path = self.spill_path(id);
-        ensure_parent_dir(&path).await?;
-        fs::write(&path, bytes).await?;
-        Ok(path)
+        let (file, pending) = tokio::task::spawn_blocking(move || {
+            let pending = PendingSpill { path: Some(path) };
+            let path = pending
+                .path
+                .as_ref()
+                .expect("pending spill path must exist");
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let file = std::fs::File::create(path)?;
+            Ok::<_, std::io::Error>((file, pending))
+        })
+        .await??;
+        Ok((File::from_std(file), pending))
     }
 
     fn spill_path(&self, id: u64) -> PathBuf {
         self.inner.cfg.spill_dir.join(format!("blob-{id}.bin"))
     }
-}
-
-async fn ensure_parent_dir(path: &Path) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).await?;
-    }
-    Ok(())
 }

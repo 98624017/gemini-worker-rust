@@ -16,6 +16,27 @@ fn admin_log_omits_base64_payloads() {
 }
 
 #[test]
+fn admin_log_omits_each_magic_reference_payload() {
+    let sanitized = rust_sync_proxy::admin::sanitize_json_for_log(
+        br#"{"mode":"FAST","base64Array":["data:image/jpeg;base64,QUJDREVGRw==","data:image/webp;base64,AQID","private-raw-payload"],"nested":{"base64Array":["data:image/png;base64,BAUG"]}}"#,
+    );
+    assert!(sanitized.pretty.contains("image/jpeg"));
+    assert!(sanitized.pretty.contains("image/webp"));
+    assert!(sanitized.pretty.contains("image/png"));
+    assert!(sanitized.pretty.contains("len=12"));
+    for secret in [
+        "QUJDREVGRw==",
+        "AQID",
+        "BAUG",
+        "private-raw-payload",
+        "data:image/",
+    ] {
+        assert!(!sanitized.pretty.contains(secret), "{}", sanitized.pretty);
+    }
+    assert!(sanitized.image_urls.is_empty());
+}
+
+#[test]
 fn admin_log_collects_proxy_and_http_image_urls() {
     let sanitized = rust_sync_proxy::admin::sanitize_json_for_log(
         br#"{"parts":[{"inlineData":{"data":"https://img.example/a.png"}},{"inline_data":{"data":"/proxy/image?u=abc"}}]}"#,

@@ -44,6 +44,7 @@ impl Mode {
 pub(crate) struct PreparedRequest {
     pub mode: Mode,
     pub payload: Value,
+    pub reference_url: Option<String>,
 }
 
 #[derive(Debug)]
@@ -182,29 +183,33 @@ pub(crate) fn prepare_request(body: Value) -> Result<PreparedRequest, Error> {
     {
         return Err(invalid_request("response_format 只支持 url，请调整后再试"));
     }
-    for field in ["n", "size", "quality", "stream"] {
+    for field in ["n", "size", "quality", "stream", "base64Array"] {
         if object.contains_key(field) {
             return Err(invalid_request(format!(
-                "Magic 文生图暂不支持 {field} 字段，请通过 prompt 设置生成参数"
+                "Magic 生图不支持下游 {field} 字段；参考图请使用 HTTP(S) URL 数组，生成参数请通过 prompt 设置"
             )));
         }
     }
 
     let body = crate::openai_image::normalize_request_body(body, false)
         .map_err(|error| invalid_request(error.to_string()))?;
-    if IMAGE_ALIASES.iter().any(|alias| {
-        body.get(*alias)
-            .and_then(Value::as_array)
-            .is_some_and(|images| !images.is_empty())
-    }) {
+    let images = IMAGE_ALIASES
+        .iter()
+        .find_map(|alias| body.get(*alias).and_then(Value::as_array));
+    if images.is_some_and(|images| images.len() > 1) {
         return Err(invalid_request(
-            "Magic 当前仅支持文生图，暂不支持非空参考图片数组",
+            "Magic 当前仅支持一张参考图片，请合并别名后保留一张 URL",
         ));
     }
+    let reference_url = images
+        .and_then(|images| images.first())
+        .and_then(Value::as_str)
+        .map(str::to_string);
     let prompt = body.get("prompt").and_then(Value::as_str).unwrap();
     Ok(PreparedRequest {
         mode,
         payload: json!({"mode": mode.as_str(), "prompt": normalize_prompt(prompt, mode)}),
+        reference_url,
     })
 }
 

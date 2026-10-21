@@ -22,45 +22,60 @@ pub async fn encode_request_body(
     runtime: &BlobRuntime,
 ) -> Result<EncodedRequestBody> {
     strip_output_from_value(&mut request);
+    encode_body(request, replacements, runtime, false).await
+}
 
+pub(crate) async fn encode_data_uri_request_body(
+    request: Value,
+    replacements: Vec<RequestReplacement>,
+    runtime: &BlobRuntime,
+) -> Result<EncodedRequestBody> {
+    encode_body(request, replacements, runtime, true).await
+}
+
+async fn encode_body(
+    request: Value,
+    replacements: Vec<RequestReplacement>,
+    runtime: &BlobRuntime,
+    data_uri: bool,
+) -> Result<EncodedRequestBody> {
     let replacements = replacements
         .into_iter()
         .map(|replacement| (replacement.json_pointer.clone(), replacement))
         .collect::<HashMap<_, _>>();
 
     let (writer, reader) = tokio::io::duplex(64 * 1024);
-    let runtime_for_store = runtime.clone();
-    let store_task = tokio::spawn(async move {
-        runtime_for_store
-            .store_stream(reader, "application/json".to_string())
-            .await
-    });
-
-    let mut writer = writer;
-    let mut content_length = 0_u64;
-    let write_result = write_json_value(
-        &mut writer,
-        "",
-        &request,
-        &replacements,
-        runtime,
-        &mut content_length,
-    )
-    .await;
-
-    match write_result {
-        Ok(()) => {
-            writer.shutdown().await?;
-            let body_blob = store_task.await??;
-            Ok(EncodedRequestBody {
-                body_blob,
-                content_length,
-            })
-        }
-        Err(err) => {
-            store_task.abort();
+    let write = async {
+        let mut writer = writer;
+        let mut content_length = 0_u64;
+        write_json_value(
+            &mut writer,
+            "",
+            &request,
+            &replacements,
+            runtime,
+            &mut content_length,
+            data_uri,
+        )
+        .await?;
+        writer.shutdown().await?;
+        Ok::<_, anyhow::Error>(content_length)
+    };
+    // 两端属于同一个请求 future，取消不会留下继续写入的后台任务。
+    let (write_result, stored) = tokio::join!(
+        write,
+        runtime.store_stream(reader, "application/json".to_string())
+    );
+    match (write_result, stored) {
+        (Ok(content_length), Ok(body_blob)) => Ok(EncodedRequestBody {
+            body_blob,
+            content_length,
+        }),
+        (Err(err), Ok(body_blob)) => {
+            runtime.remove(&body_blob).await?;
             Err(err)
         }
+        (_, Err(err)) => Err(err),
     }
 }
 
@@ -71,10 +86,11 @@ fn write_json_value<'a, W: AsyncWrite + Unpin + Send + 'a>(
     replacements: &'a HashMap<String, RequestReplacement>,
     runtime: &'a BlobRuntime,
     content_length: &'a mut u64,
+    data_uri: bool,
 ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
     Box::pin(async move {
         if let Some(replacement) = replacements.get(path) {
-            write_replacement(writer, replacement, runtime, content_length).await?;
+            write_replacement(writer, replacement, runtime, content_length, data_uri).await?;
             return Ok(());
         }
 
@@ -100,6 +116,7 @@ fn write_json_value<'a, W: AsyncWrite + Unpin + Send + 'a>(
                         replacements,
                         runtime,
                         content_length,
+                        data_uri,
                     )
                     .await?;
                 }
@@ -119,6 +136,7 @@ fn write_json_value<'a, W: AsyncWrite + Unpin + Send + 'a>(
                         replacements,
                         runtime,
                         content_length,
+                        data_uri,
                     )
                     .await?;
                 }
@@ -139,7 +157,15 @@ async fn write_replacement<W: AsyncWrite + Unpin>(
     replacement: &RequestReplacement,
     runtime: &BlobRuntime,
     content_length: &mut u64,
+    data_uri: bool,
 ) -> Result<()> {
+    if data_uri {
+        let prefix = serde_json::to_vec(&format!("data:{};base64,", replacement.mime_type))?;
+        write_counted(writer, &prefix[..prefix.len() - 1], content_length).await?;
+        write_blob_as_base64_chunked(writer, runtime, &replacement.blob, content_length).await?;
+        write_counted(writer, b"\"", content_length).await?;
+        return Ok(());
+    }
     let mime_key = serde_json::to_vec("mimeType")?;
     let mime_value = serde_json::to_vec(&replacement.mime_type)?;
     let data_key = serde_json::to_vec("data")?;
@@ -167,6 +193,15 @@ async fn write_blob_as_base64<W: AsyncWrite + Unpin>(
         return Ok(());
     }
 
+    write_blob_as_base64_chunked(writer, runtime, blob, content_length).await
+}
+
+async fn write_blob_as_base64_chunked<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    runtime: &BlobRuntime,
+    blob: &BlobHandle,
+    content_length: &mut u64,
+) -> Result<()> {
     let mut reader = runtime.open_reader(blob).await?;
     const CHUNK_BYTES: usize = 48 * 1024;
     let mut input = vec![0_u8; CHUNK_BYTES + 2];
