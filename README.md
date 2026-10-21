@@ -23,6 +23,7 @@
 - 已实现请求侧内存缓存、磁盘缓存与后台桥接下载
 - 已有 Rust 集成测试
 - 已有可选的 Go/Rust 对照脚本
+- Magic FAST OpenAI 文生图调用说明见 [docs/magic-fast-openai.md](docs/magic-fast-openai.md)
 
 ## 支持的上游 Provider
 
