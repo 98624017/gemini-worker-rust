@@ -11,7 +11,7 @@
 
 上游配置可以带 `/v1` 或尾斜杠；代理会基于解析后的 origin 构造 Magic 路径，并保留配置中的 scheme、port 和请求头鉴权覆盖语义。Magic 的其他模型、其他 provider 和非目标 OpenAI 图片请求保持原有分发。
 
-本票只支持 FAST 文生图。RELAX 和参考图由后续路径提供；本路径传入非空参考图会在创建任务前拒绝。
+本文说明 FAST 文生图；RELAX 用法见 [RELAX 调用说明](magic-relax-openai.md)。参考图由后续路径提供；本路径传入非空参考图会在创建任务前拒绝。
 
 ## 请求
 

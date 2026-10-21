@@ -2,8 +2,49 @@ use axum::http::StatusCode;
 use serde_json::{Value, json};
 use url::Url;
 
-const MODEL: &str = "mj_fast_imagine";
 const IMAGE_ALIASES: [&str; 3] = ["image", "images", "reference_images"];
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Mode {
+    Fast,
+    Relax,
+}
+
+impl Mode {
+    fn from_model(model: &str) -> Option<Self> {
+        match model {
+            "mj_fast_imagine" => Some(Self::Fast),
+            "mj_relax_imagine" => Some(Self::Relax),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Fast => "FAST",
+            Self::Relax => "RELAX",
+        }
+    }
+
+    pub(crate) fn submit_path(self) -> &'static str {
+        match self {
+            Self::Fast => "/mj/submit/imagine",
+            Self::Relax => "/mj-relax/mj/submit/imagine",
+        }
+    }
+
+    fn flag(self) -> &'static str {
+        match self {
+            Self::Fast => "--fast",
+            Self::Relax => "--relax",
+        }
+    }
+}
+
+pub(crate) struct PreparedRequest {
+    pub mode: Mode,
+    pub payload: Value,
+}
 
 #[derive(Debug)]
 pub(crate) struct CompletedTask {
@@ -109,7 +150,11 @@ impl Error {
 }
 
 pub(crate) fn matches(base_url: &str, body: &Value) -> bool {
-    body.get("model").and_then(Value::as_str) == Some(MODEL) && is_magic_upstream(base_url)
+    body.get("model")
+        .and_then(Value::as_str)
+        .and_then(Mode::from_model)
+        .is_some()
+        && is_magic_upstream(base_url)
 }
 
 pub(crate) fn is_magic_upstream(base_url: &str) -> bool {
@@ -118,7 +163,7 @@ pub(crate) fn is_magic_upstream(base_url: &str) -> bool {
         .is_some_and(|url| url.host_str() == Some("magic666.top"))
 }
 
-pub(crate) fn prepare_request(body: Value) -> Result<Value, Error> {
+pub(crate) fn prepare_request(body: Value) -> Result<PreparedRequest, Error> {
     let object = body
         .as_object()
         .ok_or_else(|| invalid_request("请求内容必须是 JSON 对象"))?;
@@ -127,9 +172,9 @@ pub(crate) fn prepare_request(body: Value) -> Result<Value, Error> {
             return Err(invalid_request(format!("{field} 必须是非空字符串")));
         }
     }
-    if object.get("model").and_then(Value::as_str) != Some(MODEL) {
-        return Err(invalid_request("此 Magic 生图路径仅支持 mj_fast_imagine"));
-    }
+    let mode = Mode::from_model(object.get("model").and_then(Value::as_str).unwrap()).ok_or_else(
+        || invalid_request("此 Magic 生图路径仅支持 mj_fast_imagine 或 mj_relax_imagine"),
+    )?;
     if let Some(format) = object.get("response_format")
         && !format
             .as_str()
@@ -153,11 +198,14 @@ pub(crate) fn prepare_request(body: Value) -> Result<Value, Error> {
             .is_some_and(|images| !images.is_empty())
     }) {
         return Err(invalid_request(
-            "Magic FAST 当前仅支持文生图，暂不支持非空参考图片数组",
+            "Magic 当前仅支持文生图，暂不支持非空参考图片数组",
         ));
     }
     let prompt = body.get("prompt").and_then(Value::as_str).unwrap();
-    Ok(json!({"mode": "FAST", "prompt": normalize_prompt(prompt)}))
+    Ok(PreparedRequest {
+        mode,
+        payload: json!({"mode": mode.as_str(), "prompt": normalize_prompt(prompt, mode)}),
+    })
 }
 
 pub(crate) fn submitted_task(body: &Value) -> Result<String, Error> {
@@ -217,8 +265,9 @@ fn invalid_request(message: impl Into<String>) -> Error {
     )
 }
 
-fn normalize_prompt(prompt: &str) -> String {
-    let mut normalized = String::with_capacity(prompt.len() + " --fast".len());
+fn normalize_prompt(prompt: &str, mode: Mode) -> String {
+    let flag = mode.flag();
+    let mut normalized = String::with_capacity(prompt.len() + flag.len() + 1);
     for piece in prompt.split_inclusive(char::is_whitespace) {
         let token = piece.trim_end_matches(char::is_whitespace);
         if !matches!(token, "--fast" | "--relax" | "--turbo") {
@@ -227,9 +276,9 @@ fn normalize_prompt(prompt: &str) -> String {
     }
     let prompt = normalized.trim_end();
     if prompt.is_empty() {
-        "--fast".to_string()
+        flag.to_string()
     } else {
-        format!("{prompt} --fast")
+        format!("{prompt} {flag}")
     }
 }
 

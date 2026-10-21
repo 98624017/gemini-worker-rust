@@ -8,6 +8,7 @@ use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 
 mod protocol_tests;
+mod relax_tests;
 mod selection_tests;
 mod timing_tests;
 

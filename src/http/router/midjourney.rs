@@ -1,5 +1,5 @@
 use super::*;
-use crate::midjourney::{CompletedTask, Error};
+use crate::midjourney::{CompletedTask, Error, Mode, PreparedRequest};
 use std::io::Cursor;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(10);
@@ -53,8 +53,8 @@ pub(super) async fn handle(
         .map(|_| UpstreamBlockCacheKey::new("/v1/images/generations", &resolved.base_url, &body));
     let result = match crate::midjourney::prepare_request(body) {
         Err(err) => Err(err),
-        Ok(payload) => {
-            entry.upstream_mode = "FAST".into();
+        Ok(request) => {
+            entry.upstream_mode = request.mode.as_str().into();
             if let (Some(cache), Some(key)) = (&state.upstream_block_cache, &cache_key)
                 && let Some(hit) = cache.get(key).await
             {
@@ -66,7 +66,7 @@ pub(super) async fn handle(
             }
             if state.admin.is_some() {
                 entry.request_upstream =
-                    admin::sanitize_json_for_log(payload.to_string().as_bytes()).pretty;
+                    admin::sanitize_json_for_log(request.payload.to_string().as_bytes()).pretty;
             }
             entry.upstream_stage = "magic_submit".into();
             if tokio::time::Instant::now() >= deadline {
@@ -74,7 +74,7 @@ pub(super) async fn handle(
             } else {
                 let upstream_started = Instant::now();
                 let result =
-                    tokio::time::timeout_at(deadline, execute(state, resolved, &payload, entry))
+                    tokio::time::timeout_at(deadline, execute(state, resolved, &request, entry))
                         .await;
                 entry.upstream_build_ms = upstream_started.elapsed().as_millis() as i64;
                 match result {
@@ -117,11 +117,11 @@ pub(super) async fn handle(
 async fn execute(
     state: &AppState,
     resolved: &ResolvedUpstream,
-    payload: &Value,
+    prepared: &PreparedRequest,
     entry: &mut AdminLogEntry,
 ) -> std::result::Result<CompletedTask, Error> {
-    let submit_url = task_url(&resolved.base_url, None)?;
-    let bytes = payload.to_string().into_bytes();
+    let submit_url = task_url(&resolved.base_url, prepared.mode, None)?;
+    let bytes = prepared.payload.to_string().into_bytes();
     let length = bytes.len();
     // 不可重放的请求体阻止 HTTP 客户端自动重新提交计费任务。
     let body = reqwest::Body::wrap_stream(ReaderStream::new(Cursor::new(bytes)));
@@ -138,7 +138,7 @@ async fn execute(
     let task_id = crate::midjourney::submitted_task(&submission)?;
     entry.upstream_task_id = redact(&task_id, resolved, &state.config);
     entry.upstream_stage = "magic_poll".into();
-    let poll_url = task_url(&resolved.base_url, Some(&task_id))?;
+    let poll_url = task_url(&resolved.base_url, prepared.mode, Some(&task_id))?;
     let mut failures = 0;
     loop {
         let request = state
@@ -163,7 +163,7 @@ async fn execute(
     }
 }
 
-fn task_url(base_url: &str, task_id: Option<&str>) -> std::result::Result<Url, Error> {
+fn task_url(base_url: &str, mode: Mode, task_id: Option<&str>) -> std::result::Result<Url, Error> {
     let mut url = Url::parse(base_url)
         .map_err(|_| Error::protocol("magic_submit", MSG_UPSTREAM_URL_INVALID))?;
     url.set_query(None);
@@ -171,7 +171,7 @@ fn task_url(base_url: &str, task_id: Option<&str>) -> std::result::Result<Url, E
     url.set_path(if task_id.is_some() {
         "/mj/task/"
     } else {
-        "/mj/submit/imagine"
+        mode.submit_path()
     });
     if let Some(task_id) = task_id {
         url.path_segments_mut()

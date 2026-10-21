@@ -1,13 +1,15 @@
 use super::*;
 
 #[tokio::test]
-async fn fast_selection_requires_exact_host_and_model() {
+async fn imagine_selection_requires_exact_host_and_model() {
     for (host, model) in [
         ("magic666.top.evil.example", "mj_fast_imagine"),
         ("other.example", "mj_fast_imagine"),
-        ("magic666.top", "mj_relax_imagine"),
+        ("magic666.top.evil.example", "mj_relax_imagine"),
+        ("other.example", "mj_relax_imagine"),
         ("magic666.top", "mj_fast_upscale"),
         ("magic666.top", "MJ_FAST_IMAGINE"),
+        ("magic666.top", "MJ_RELAX_IMAGINE"),
         ("magic666.top", "gpt-image-2"),
     ] {
         let harness = Harness::with_config(
@@ -45,41 +47,59 @@ async fn fast_selection_requires_exact_host_and_model() {
 
 #[tokio::test]
 async fn origin_paths_and_empty_image_aliases_work_even_with_force_b64_configuration() {
-    for suffix in ["", "/", "/v1", "/v1/"] {
-        let mut origin = String::new();
-        let harness = Harness::with_config(
-            vec![
-                json!({"code": 1, "result": "path-task"}),
-                json!({"status": "SUCCESS", "imageUrl": "https://img.example/result.png"}),
-            ],
-            |config| {
-                let mut base = Url::parse(&config.upstream_base_url).unwrap();
-                base.set_path(suffix);
-                config.upstream_base_url = base.to_string();
-                origin = base.origin().ascii_serialization();
-                config.openai_image_b64_json_upstream_domains = vec!["magic666.top".into()];
-            },
-        )
-        .await;
-        let response = harness.request(json!({
-            "model": "mj_fast_imagine", "prompt": "正文x--fast 保留--faster --turbo --ar 1:1 --v 8.1",
-            "image": [], "images": [], "reference_images": [], "response_format": "UrL"
-        })).send().await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK, "base path={suffix}");
-        let requests = harness.mock.requests.lock().await;
-        assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0].uri, "/mj/submit/imagine");
-        assert_eq!(requests[1].uri, "/mj/task/path-task/fetch");
-        assert_eq!(
-            requests[0].headers["host"],
-            origin.strip_prefix("http://").unwrap()
-        );
-        assert_eq!(
-            requests[0].body,
-            json!({
-                "mode": "FAST", "prompt": "正文x--fast 保留--faster --ar 1:1 --v 8.1 --fast"
-            })
-        );
+    for (model, mode, path, flag) in [
+        ("mj_fast_imagine", "FAST", "/mj/submit/imagine", "--fast"),
+        (
+            "mj_relax_imagine",
+            "RELAX",
+            "/mj-relax/mj/submit/imagine",
+            "--relax",
+        ),
+    ] {
+        for suffix in ["", "/", "/v1", "/v1/"] {
+            let mut origin = String::new();
+            let harness = Harness::with_config(
+                vec![
+                    json!({"code": 1, "result": "path-task"}),
+                    json!({"status": "SUCCESS", "imageUrl": "https://img.example/result.png"}),
+                ],
+                |config| {
+                    let mut base = Url::parse(&config.upstream_base_url).unwrap();
+                    base.set_path(suffix);
+                    config.upstream_base_url = base.to_string();
+                    origin = base.origin().ascii_serialization();
+                    config.openai_image_b64_json_upstream_domains = vec!["magic666.top".into()];
+                },
+            )
+            .await;
+            let response = harness
+                .request(json!({
+                    "model": model, "prompt": "正文x--fast 保留--faster --turbo --ar 1:1 --v 8.1",
+                    "image": [], "images": [], "reference_images": [], "response_format": "UrL"
+                }))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "model={model}, base path={suffix}"
+            );
+            let requests = harness.mock.requests.lock().await;
+            assert_eq!(requests.len(), 2);
+            assert_eq!(requests[0].uri, path);
+            assert_eq!(requests[1].uri, "/mj/task/path-task/fetch");
+            assert_eq!(
+                requests[0].headers["host"],
+                origin.strip_prefix("http://").unwrap()
+            );
+            assert_eq!(
+                requests[0].body,
+                json!({
+                    "mode": mode, "prompt": format!("正文x--fast 保留--faster --ar 1:1 --v 8.1 {flag}")
+                })
+            );
+        }
     }
 }
 
