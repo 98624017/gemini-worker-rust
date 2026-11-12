@@ -409,9 +409,9 @@ struct RequestLogSnapshot {
 }
 
 impl RequestLogSnapshot {
-    fn from_request_body(raw: &[u8], enabled: bool) -> Self {
+    fn from_request_body(raw: &[u8], parsed: Option<&Value>, enabled: bool) -> Self {
         Self {
-            request_raw: sanitize_request_body_for_log(raw, enabled),
+            request_raw: sanitize_request_body_for_log(raw, parsed, enabled),
         }
     }
 
@@ -433,10 +433,34 @@ impl RequestLogSnapshot {
 static REQUEST_LOG_SANITIZE_CALLS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
-fn sanitize_request_body_for_log(raw: &[u8], enabled: bool) -> Option<SanitizedAdminLog> {
+fn sanitize_request_body_for_log(
+    raw: &[u8],
+    parsed: Option<&Value>,
+    enabled: bool,
+) -> Option<SanitizedAdminLog> {
     #[cfg(test)]
     REQUEST_LOG_SANITIZE_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    admin::maybe_sanitize_json_for_log(raw, enabled)
+    enabled.then(|| match parsed {
+        Some(value) => admin::sanitize_json_value_for_log(value),
+        None => admin::sanitize_json_for_log(raw),
+    })
+}
+
+#[derive(Clone)]
+struct ResponseLogSnapshot {
+    sanitized: SanitizedAdminLog,
+    finish_reason: String,
+    error: Option<Value>,
+}
+
+impl ResponseLogSnapshot {
+    fn from_value(value: &Value) -> Self {
+        Self {
+            sanitized: admin::sanitize_json_value_for_log(value),
+            finish_reason: admin::extract_finish_reason(value).unwrap_or_default(),
+            error: value.get("error").cloned(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -693,9 +717,14 @@ async fn image_generations_action(State(state): State<AppState>, request: Reques
             .await;
         }
     };
-    let request_log = RequestLogSnapshot::from_request_body(&request_body, state.admin.is_some());
+    let parsed = serde_json::from_slice::<Value>(&request_body);
+    let request_log = RequestLogSnapshot::from_request_body(
+        &request_body,
+        parsed.as_ref().ok(),
+        state.admin.is_some(),
+    );
 
-    let parsed_body: Value = match serde_json::from_slice(&request_body) {
+    let parsed_body = match parsed {
         Ok(body) => body,
         Err(err) => {
             let mut admin_entry = AdminLogEntry {
@@ -958,9 +987,14 @@ async fn model_action(
             .await;
         }
     };
-    let request_log = RequestLogSnapshot::from_request_body(&request_body, state.admin.is_some());
+    let parsed = serde_json::from_slice::<Value>(&request_body);
+    let request_log = RequestLogSnapshot::from_request_body(
+        &request_body,
+        parsed.as_ref().ok(),
+        state.admin.is_some(),
+    );
 
-    let parsed_body: Value = match serde_json::from_slice(&request_body) {
+    let parsed_body = match parsed {
         Ok(body) => body,
         Err(err) => {
             let mut admin_entry = AdminLogEntry {
@@ -1144,13 +1178,8 @@ async fn forward_gemini_request(
                 &state.config.image_fetch_external_proxy_domains,
             );
             let target_path = rewrite_aiapidev_model_path(&target_path);
-            let request_upstream = if admin_enabled {
-                let request_upstream_bytes = serde_json::to_vec(&rewritten_body)
-                    .map_err(|err| ForwardRequestFailure::new(err, admin_entry.clone()))?;
-                admin::maybe_sanitize_json_for_log(&request_upstream_bytes, true)
-            } else {
-                None
-            };
+            let request_upstream =
+                admin_enabled.then(|| admin::sanitize_json_value_for_log(&rewritten_body));
             let upstream_build_started = Instant::now();
             let response = handle_aiapidev_response(
                 &resolved,
@@ -1209,6 +1238,12 @@ async fn forward_gemini_request(
     };
     let request_image_materialize_ms =
         request_image_materialize_started.elapsed().as_millis() as i64;
+    let request_upstream = admin_enabled.then(|| {
+        admin::sanitize_materialized_request_for_log(
+            &materialized.request,
+            &materialized.replacements,
+        )
+    });
     let request_encode_started = Instant::now();
     let encoded = match encode_request_body(
         materialized.request,
@@ -1243,20 +1278,8 @@ async fn forward_gemini_request(
             return Err(ForwardRequestFailure::new(err, admin_entry));
         }
     }
+    drop(materialized.replacements);
 
-    let request_upstream = if admin_enabled {
-        let request_upstream_bytes = state
-            .blob_runtime
-            .read_bytes(&encoded.body_blob)
-            .await
-            .map_err(|err| {
-                update_request_cache_hits(&mut admin_entry, &cache_tracking);
-                ForwardRequestFailure::new(err, admin_entry.clone())
-            })?;
-        admin::maybe_sanitize_json_for_log(&request_upstream_bytes, true)
-    } else {
-        None
-    };
     let upstream_url =
         build_upstream_url(&resolved.base_url, &target_path, request_query.as_deref()).map_err(
             |err| {
@@ -1308,6 +1331,7 @@ async fn forward_gemini_request(
             update_request_cache_hits(&mut admin_entry, &cache_tracking);
             ForwardRequestFailure::new(err, admin_entry.clone())
         })?;
+    drop(encoded);
     let upstream_build_ms = upstream_build_started.elapsed().as_millis() as i64;
     admin_entry.upstream_build_ms = upstream_build_ms;
     update_request_cache_hits(&mut admin_entry, &cache_tracking);
@@ -1390,13 +1414,10 @@ async fn forward_grsai_gemini_request(
     }
 
     let request_body = crate::grsai::build_grsai_request_body(&params);
-    let request_upstream = if state.admin.is_some() {
-        let request_upstream_bytes = serde_json::to_vec(&request_body)
-            .map_err(|err| ForwardRequestFailure::new(err, admin_entry.clone()))?;
-        admin::maybe_sanitize_json_for_log(&request_upstream_bytes, true)
-    } else {
-        None
-    };
+    let request_upstream = state
+        .admin
+        .as_ref()
+        .map(|_| admin::sanitize_json_value_for_log(&request_body));
     let upstream_url = build_upstream_url(
         &resolved.base_url,
         crate::grsai::IMAGE_GENERATION_PATH,
@@ -1662,13 +1683,7 @@ async fn forward_openai_image_request(
         return Ok((response, admin_entry));
     }
 
-    let request_upstream = if admin_enabled {
-        let request_upstream_bytes = serde_json::to_vec(&request_body)
-            .map_err(|err| ForwardRequestFailure::new(err, admin_entry.clone()))?;
-        admin::maybe_sanitize_json_for_log(&request_upstream_bytes, true)
-    } else {
-        None
-    };
+    let request_upstream = admin_enabled.then(|| admin::sanitize_json_value_for_log(&request_body));
 
     match provider.kind() {
         ProviderKind::Grsai => {
@@ -1856,13 +1871,10 @@ async fn forward_grsai_openai_image_request(
     )
     .map_err(|err| ForwardRequestFailure::new(err, admin_entry.clone()))?;
 
-    let request_upstream = if state.admin.is_some() {
-        let request_upstream_bytes = serde_json::to_vec(&request_body)
-            .map_err(|err| ForwardRequestFailure::new(err, admin_entry.clone()))?;
-        admin::maybe_sanitize_json_for_log(&request_upstream_bytes, true)
-    } else {
-        None
-    };
+    let request_upstream = state
+        .admin
+        .as_ref()
+        .map(|_| admin::sanitize_json_value_for_log(&request_body));
 
     let upstream_build_started = Instant::now();
     let upstream_response = state
@@ -2147,6 +2159,7 @@ async fn handle_non_stream_response(
         }
     };
 
+    drop(body_bytes);
     let mut final_json = normalize_special_markdown_image_response(
         json_body,
         output_mode,
@@ -2168,6 +2181,11 @@ async fn handle_non_stream_response(
     let mut response = Response::new(Body::from(final_body));
     *response.status_mut() = StatusCode::from_u16(status.as_u16())?;
     response.headers_mut().insert(CONTENT_TYPE, content_type);
+    if !config.admin_password.trim().is_empty() {
+        response
+            .extensions_mut()
+            .insert(ResponseLogSnapshot::from_value(&final_json));
+    }
     let total_process_ms = response_started.elapsed().as_millis() as i64;
     Ok((
         response,
@@ -2226,7 +2244,7 @@ async fn handle_openai_image_response(
         ));
     }
 
-    let upstream_body: Value = serde_json::from_slice(&body_bytes).map_err(|err| {
+    let mut upstream_body: Value = serde_json::from_slice(&body_bytes).map_err(|err| {
         StructuredProxyError::new(
             MSG_PARSE_UPSTREAM_JSON_FAILED,
             "parse_upstream_response",
@@ -2234,15 +2252,15 @@ async fn handle_openai_image_response(
             err.to_string(),
         )
     })?;
-    let image_items = extract_openai_image_items(&upstream_body)?;
+    drop(body_bytes);
+    let image_items = extract_openai_image_items(&mut upstream_body)?;
 
     let upload_started = Instant::now();
     let mut uploaded = Vec::with_capacity(image_items.len());
     for image_item in image_items {
         match image_item {
             OpenAiImageItem::B64Json(base64_image) => {
-                let decoded = base64::engine::general_purpose::STANDARD
-                    .decode(base64_image.as_bytes())
+                let mime_type = crate::upload::validate_base64_image(&base64_image)
                     .map_err(|err| {
                         StructuredProxyError::new(
                             MSG_DECODE_UPSTREAM_B64_FAILED,
@@ -2250,11 +2268,10 @@ async fn handle_openai_image_response(
                             "invalid_base64",
                             err.to_string(),
                         )
-                    })?;
-                let mime_type =
-                    crate::image_io::sniff_image_mime_type(&decoded).unwrap_or("image/png");
+                    })?
+                    .unwrap_or("image/png");
                 let upload_result = uploader
-                    .upload_inline_data_base64(Arc::from(base64_image.as_str()), mime_type)
+                    .upload_owned_base64(base64_image, mime_type)
                     .await?;
                 let final_url = build_openai_image_output_url(
                     config,
@@ -2267,8 +2284,7 @@ async fn handle_openai_image_response(
                 mime_type,
                 data_base64,
             } => {
-                let decoded = base64::engine::general_purpose::STANDARD
-                    .decode(data_base64.as_bytes())
+                let detected_mime_type = crate::upload::validate_base64_image(&data_base64)
                     .map_err(|err| {
                         StructuredProxyError::new(
                             MSG_DECODE_UPSTREAM_B64_FAILED,
@@ -2276,11 +2292,10 @@ async fn handle_openai_image_response(
                             "invalid_base64",
                             err.to_string(),
                         )
-                    })?;
-                let detected_mime_type =
-                    crate::image_io::sniff_image_mime_type(&decoded).unwrap_or(mime_type.as_str());
+                    })?
+                    .unwrap_or(mime_type.as_str());
                 let upload_result = uploader
-                    .upload_inline_data_base64(Arc::from(data_base64.as_str()), detected_mime_type)
+                    .upload_owned_base64(data_base64, detected_mime_type)
                     .await?;
                 let final_url = build_openai_image_output_url(
                     config,
@@ -2309,6 +2324,11 @@ async fn handle_openai_image_response(
     response
         .headers_mut()
         .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    if !config.admin_password.trim().is_empty() {
+        response
+            .extensions_mut()
+            .insert(ResponseLogSnapshot::from_value(&final_json));
+    }
     let total_process_ms = response_started.elapsed().as_millis() as i64;
     Ok((
         response,
@@ -3169,28 +3189,42 @@ async fn finalize_admin_response(
         return response;
     };
 
-    let (parts, body) = response.into_parts();
+    let (mut parts, body) = response.into_parts();
     let body_bytes = to_bytes(body, usize::MAX).await.unwrap_or_default();
     if let Some(status) = parts.extensions.get::<OriginalUpstreamStatus>() {
         entry.upstream_status_code = status.0.as_u16();
     }
 
     if !body_bytes.is_empty() {
-        let sanitized = admin::sanitize_json_for_log(&body_bytes);
-        let response_downstream = sanitized.pretty;
-        entry.response_images = sanitized.image_urls;
-        entry.response_downstream = response_downstream.clone();
-        if let Ok(value) = serde_json::from_slice::<Value>(&body_bytes) {
-            entry.finish_reason = admin::extract_finish_reason(&value).unwrap_or_default();
+        let snapshot = parts
+            .extensions
+            .remove::<ResponseLogSnapshot>()
+            .or_else(|| {
+                serde_json::from_slice::<Value>(&body_bytes)
+                    .ok()
+                    .map(|value| ResponseLogSnapshot::from_value(&value))
+            });
+        let sanitized = if let Some(snapshot) = snapshot {
+            entry.finish_reason = snapshot.finish_reason;
             if !preserves_admin_error_fields(&entry) {
                 let upstream_status = parts
                     .extensions
                     .get::<OriginalUpstreamStatus>()
                     .map(|status| status.0)
                     .unwrap_or(parts.status);
-                apply_admin_error_fields(&mut entry, upstream_status, &value, &response_downstream);
+                apply_admin_error_fields(
+                    &mut entry,
+                    upstream_status,
+                    &json!({"error": snapshot.error}),
+                    &snapshot.sanitized.pretty,
+                );
             }
-        }
+            snapshot.sanitized
+        } else {
+            admin::sanitize_json_for_log(&body_bytes)
+        };
+        entry.response_images = sanitized.image_urls;
+        entry.response_downstream = sanitized.pretty;
     }
 
     entry.status_code = parts.status.as_u16();
@@ -3307,15 +3341,18 @@ enum OpenAiImageItem {
     Url(String),
 }
 
-fn extract_openai_image_items(body: &Value) -> Result<Vec<OpenAiImageItem>> {
-    let data = body.get("data").and_then(Value::as_array).ok_or_else(|| {
-        StructuredProxyError::new(
-            MSG_OPENAI_IMAGE_MISSING_DATA,
-            "rewrite_openai_image_response",
-            "missing_data",
-            "上游响应缺少 data 数组",
-        )
-    })?;
+fn extract_openai_image_items(body: &mut Value) -> Result<Vec<OpenAiImageItem>> {
+    let data = body
+        .get_mut("data")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| {
+            StructuredProxyError::new(
+                MSG_OPENAI_IMAGE_MISSING_DATA,
+                "rewrite_openai_image_response",
+                "missing_data",
+                "上游响应缺少 data 数组",
+            )
+        })?;
     if data.is_empty() {
         return Err(StructuredProxyError::new(
             MSG_OPENAI_IMAGE_MISSING_DATA,
@@ -3326,26 +3363,14 @@ fn extract_openai_image_items(body: &Value) -> Result<Vec<OpenAiImageItem>> {
         .into());
     }
 
-    data.iter()
+    data.iter_mut()
         .map(|item| {
-            item.get("b64_json")
-                .and_then(Value::as_str)
-                .filter(|value| !value.trim().is_empty())
-                .map(|value| OpenAiImageItem::B64Json(value.to_owned()))
-                .or_else(|| {
-                    item.get("url")
+            let key = ["b64_json", "url"]
+                .into_iter()
+                .find(|key| {
+                    item.get(*key)
                         .and_then(Value::as_str)
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())
-                        .map(|value| {
-                            parse_openai_image_data_url(value).map_or_else(
-                                || OpenAiImageItem::Url(value.to_owned()),
-                                |parsed| OpenAiImageItem::DataUrl {
-                                    mime_type: parsed.mime_type,
-                                    data_base64: parsed.data_base64,
-                                },
-                            )
-                        })
+                        .is_some_and(|value| !value.trim().is_empty())
                 })
                 .ok_or_else(|| {
                     StructuredProxyError::new(
@@ -3354,19 +3379,42 @@ fn extract_openai_image_items(body: &Value) -> Result<Vec<OpenAiImageItem>> {
                         "missing_image_payload",
                         "上游响应缺少 data[].b64_json 或 data[].url",
                     )
-                    .into()
+                })?;
+            let Value::String(mut value) = item[key].take() else {
+                unreachable!()
+            };
+            if key == "b64_json" {
+                return Ok(OpenAiImageItem::B64Json(value));
+            }
+            let start = value.len() - value.trim_start().len();
+            value.truncate(value.trim_end().len());
+            value.drain(..start);
+            if let Some(parsed) = parse_openai_image_data_url(&value) {
+                let mime_type = parsed.mime_type;
+                let length = parsed.data_base64.len();
+                let payload_start = value.find(',').expect("parsed data URL has a comma") + 1;
+                let payload = &value[payload_start..];
+                let start = payload_start + payload.len() - payload.trim_start().len();
+                value.truncate(start + length);
+                value.drain(..start);
+                Ok(OpenAiImageItem::DataUrl {
+                    mime_type,
+                    data_base64: value,
                 })
+            } else {
+                Ok(OpenAiImageItem::Url(value))
+            }
         })
         .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ParsedOpenAiImageDataUrl {
+struct ParsedOpenAiImageDataUrl<'a> {
     mime_type: String,
-    data_base64: String,
+    data_base64: &'a str,
 }
 
-fn parse_openai_image_data_url(raw: &str) -> Option<ParsedOpenAiImageDataUrl> {
+fn parse_openai_image_data_url(raw: &str) -> Option<ParsedOpenAiImageDataUrl<'_>> {
     let payload = raw.strip_prefix("data:")?;
     let (metadata, data_base64) = payload.split_once(',')?;
     let data_base64 = data_base64.trim();
@@ -3401,7 +3449,7 @@ fn parse_openai_image_data_url(raw: &str) -> Option<ParsedOpenAiImageDataUrl> {
 
     Some(ParsedOpenAiImageDataUrl {
         mime_type,
-        data_base64: data_base64.to_string(),
+        data_base64,
     })
 }
 
@@ -4026,76 +4074,96 @@ mod tests {
 
     #[tokio::test]
     async fn tianyue_image_generations_adapts_request_and_proxies_response() {
-        let upstream = Router::new().route(
-            "/v1/images/generations",
-            post(|headers: HeaderMap, Json(body): Json<Value>| async move {
-                assert_eq!(headers[AUTHORIZATION], "Bearer tianyue-key");
-                assert_eq!(body["model"], "GZ-seedream-5-pro-2K");
-                assert_eq!(body["size"], "2k");
-                assert_eq!(
-                    body["images"],
-                    json!(["https://img.example/a.webp", "https://img.example/b.webp"])
-                );
-                assert!(body.get("image").is_none());
-                Json(json!({
-                    "created": 1790729428,
-                    "data": [{"url": "https://dw2.tianyue.xyz/proxy/down_image?token=a.b_c&x=1"}],
-                    "usage": {"total_tokens": 20, "input_tokens": 10, "output_tokens": 10}
-                }))
-            }),
-        );
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            axum::serve(listener, upstream).await.unwrap();
-        });
-        let mut config = crate::test_config();
-        config.public_base_url = "https://image.xinbao-ai.cn".to_string();
-        let upstream_client = reqwest::Client::builder()
-            .no_proxy()
-            .resolve("api.tianyue.xyz", address)
-            .build()
-            .unwrap();
-        let state = AppState {
-            config: Arc::new(config.clone()),
-            upstream_client,
-            image_client: reqwest::Client::new(),
-            uploader: Arc::new(Uploader::new(reqwest::Client::new(), config)),
-            admin: None,
-            request_inline_data_fetch_service: None,
-            response_inline_data_fetch_service: None,
-            blob_runtime: Arc::new(crate::test_blob_runtime(8 * 1024 * 1024)),
-            upstream_block_cache: None,
-        };
-        let request = Request::builder()
-            .method("POST")
-            .uri("/v1/images/generations")
-            .header(CONTENT_TYPE, "application/json")
-            .header(
-                AUTHORIZATION,
-                format!(
-                    "Bearer http://api.tianyue.xyz:{}|tianyue-key",
-                    address.port()
-                ),
-            )
-            .body(Body::from(
-                json!({
-                    "model": "seedream-5-pro", "size": "2k", "prompt": "draw cat",
-                    "image": ["https://img.example/a.webp", "https://img.example/b.webp"]
-                })
-                .to_string(),
-            ))
-            .unwrap();
-        let response = image_generations_action(State(state), request).await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let body: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(body["created"], 1790729428_i64);
-        assert_eq!(
-            body["data"][0]["url"],
-            "https://image.xinbao-ai.cn/proxy/image?url=https%3A%2F%2Fdw2.tianyue.xyz%2Fproxy%2Fdown_image%3Ftoken%3Da.b_c%26x%3D1"
-        );
-        server.abort();
+        for (model, upstream_model, size, aspect_ratio, image_field) in [
+            ("seedream-5-pro", "seedream-5-pro-2K", "2k", "16:9", "image"),
+            ("seedream-5.5", "GZ-seedream-5.5-2K", "2K", "1:1", "image"),
+            ("seedream-5.5", "GZ-seedream-5.5-2K", "2K", "16:9", "images"),
+            (
+                "seedream-5.5",
+                "GZ-seedream-5.5-2K",
+                "2K",
+                "9:16",
+                "reference_images",
+            ),
+        ] {
+            let upstream = Router::new().route(
+                "/v1/images/generations",
+                post(move |headers: HeaderMap, Json(body): Json<Value>| async move {
+                    assert_eq!(headers[AUTHORIZATION], "Bearer tianyue-key");
+                    assert_eq!(body["model"], upstream_model);
+                    assert_eq!(body["size"], size);
+                    assert_eq!(body["prompt"], "draw cat");
+                    assert_eq!(body["duration"], 1);
+                    assert_eq!(body["aspect_ratio"], aspect_ratio);
+                    assert_eq!(body["output_resolution"], "2K");
+                    assert_eq!(body["response_format"], "url");
+                    assert_eq!(
+                        body["images"],
+                        json!(["https://img.example/a.webp", "https://img.example/b.webp"])
+                    );
+                    assert!(body.get("image").is_none());
+                    assert!(body.get("reference_images").is_none());
+                    Json(json!({
+                        "created": 1790729428,
+                        "data": [{"url": "https://dw2.tianyue.xyz/proxy/down_image?token=a.b_c&x=1"}],
+                        "usage": {"total_tokens": 20, "input_tokens": 10, "output_tokens": 10}
+                    }))
+                }),
+            );
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                axum::serve(listener, upstream).await.unwrap();
+            });
+            let mut config = crate::test_config();
+            config.public_base_url = "https://image.xinbao-ai.cn".to_string();
+            let upstream_client = reqwest::Client::builder()
+                .no_proxy()
+                .resolve("api.tianyue.xyz", address)
+                .build()
+                .unwrap();
+            let state = AppState {
+                config: Arc::new(config.clone()),
+                upstream_client,
+                image_client: reqwest::Client::new(),
+                uploader: Arc::new(Uploader::new(reqwest::Client::new(), config)),
+                admin: None,
+                request_inline_data_fetch_service: None,
+                response_inline_data_fetch_service: None,
+                blob_runtime: Arc::new(crate::test_blob_runtime(8 * 1024 * 1024)),
+                upstream_block_cache: None,
+            };
+            let request = Request::builder()
+                .method("POST")
+                .uri("/v1/images/generations")
+                .header(CONTENT_TYPE, "application/json")
+                .header(
+                    AUTHORIZATION,
+                    format!(
+                        "Bearer http://api.tianyue.xyz:{}|tianyue-key",
+                        address.port()
+                    ),
+                )
+                .body(Body::from(
+                    json!({
+                        "model": model, "size": size, "prompt": "draw cat",
+                        "duration": 1, "aspect_ratio": aspect_ratio, "output_resolution": "2K",
+                        (image_field): ["https://img.example/a.webp", "https://img.example/b.webp"]
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+            let response = image_generations_action(State(state), request).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let body: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["created"], 1790729428_i64);
+            assert_eq!(
+                body["data"][0]["url"],
+                "https://image.xinbao-ai.cn/proxy/image?url=https%3A%2F%2Fdw2.tianyue.xyz%2Fproxy%2Fdown_image%3Ftoken%3Da.b_c%26x%3D1"
+            );
+            server.abort();
+        }
     }
 
     #[test]
@@ -6287,14 +6355,19 @@ mod tests {
 
     #[test]
     fn extract_openai_image_items_prefers_b64_json_over_url() {
-        let body = json!({
+        let mut body = json!({
             "data": [{
                 "b64_json": "iVBORw0KGgo=",
                 "url": "https://img.example.com/direct.png"
             }]
         });
 
-        let items = extract_openai_image_items(&body).unwrap();
+        let original = body["data"][0]["b64_json"].as_str().unwrap().as_ptr();
+        let items = extract_openai_image_items(&mut body).unwrap();
+        let OpenAiImageItem::B64Json(data) = &items[0] else {
+            panic!("expected base64")
+        };
+        assert_eq!(original, data.as_ptr());
 
         assert_eq!(
             items,
@@ -6304,13 +6377,13 @@ mod tests {
 
     #[test]
     fn extract_openai_image_items_accepts_url_entries() {
-        let body = json!({
+        let mut body = json!({
             "data": [{
                 "url": "https://img.example.com/direct.png"
             }]
         });
 
-        let items = extract_openai_image_items(&body).unwrap();
+        let items = extract_openai_image_items(&mut body).unwrap();
 
         assert_eq!(
             items,
@@ -6322,13 +6395,13 @@ mod tests {
 
     #[test]
     fn extract_openai_image_items_accepts_data_url_entries() {
-        let body = json!({
+        let mut body = json!({
             "data": [{
-                "url": "data:image/png;base64,AQID"
+                "url": "  data:image/png;base64,  AQID  "
             }]
         });
 
-        let items = extract_openai_image_items(&body).unwrap();
+        let items = extract_openai_image_items(&mut body).unwrap();
 
         assert_eq!(
             items,
@@ -6341,11 +6414,11 @@ mod tests {
 
     #[test]
     fn extract_openai_image_items_rejects_entries_without_b64_json_or_url() {
-        let body = json!({
+        let mut body = json!({
             "data": [{}]
         });
 
-        let err = extract_openai_image_items(&body).unwrap_err();
+        let err = extract_openai_image_items(&mut body).unwrap_err();
         let structured = err.downcast_ref::<StructuredProxyError>().unwrap();
 
         assert_eq!(structured.kind, "missing_image_payload");

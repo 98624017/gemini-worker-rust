@@ -255,6 +255,61 @@ async fn successful_candidates_keep_order_deduplicate_and_use_compatible_usage()
 }
 
 #[tokio::test]
+async fn v82_resolution_flags_return_original_candidates_in_both_modes() {
+    for (model, mode, path, flag) in [
+        ("mj_fast_imagine", "FAST", "/mj/submit/imagine", "--fast"),
+        (
+            "mj_relax_imagine",
+            "RELAX",
+            "/mj-relax/mj/submit/imagine",
+            "--relax",
+        ),
+    ] {
+        for (resolution, image_id) in [
+            ("--sd", "be70613e-ef23-446d-aa34-562e51f8cac7"),
+            ("--hd", "50ae7195-40a3-4578-bd3e-5c1a1083e6d3"),
+        ] {
+            let candidates: Vec<_> = (0..4)
+                .map(|index| {
+                    json!({"url": format!(
+                        "https://imagine-cdn.youchuan.cn/{image_id}_0_{index}.png"
+                    )})
+                })
+                .collect();
+            let harness = Harness::new(vec![
+                json!({"code": 1, "result": "resolution-task"}),
+                json!({
+                    "status": "SUCCESS",
+                    "imageUrls": candidates,
+                    "imageUrl": "https://img.example/grid.png"
+                }),
+            ])
+            .await;
+            let prompt = format!("中文狐狸 --v 8.2 --ar 1:1 {resolution}");
+            let response = harness
+                .request(json!({
+                    "model": model, "prompt": format!("{prompt} --turbo"),
+                    "response_format": "url"
+                }))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{model} {resolution}");
+            let body: Value = response.json().await.unwrap();
+            assert_eq!(body["data"], json!(candidates), "{model} {resolution}");
+            let requests = harness.mock.requests.lock().await;
+            assert_eq!(requests.len(), 2);
+            assert_eq!(requests[0].uri, path);
+            assert_eq!(
+                requests[0].body,
+                json!({"mode": mode, "prompt": format!("{prompt} {flag}")})
+            );
+            assert_eq!(requests[1].uri, "/mj/task/resolution-task/fetch");
+        }
+    }
+}
+
+#[tokio::test]
 async fn only_missing_or_empty_candidate_lists_fall_back_to_main_image() {
     for candidates in [None, Some(json!([]))] {
         let mut result = json!({"status": "SUCCESS", "imageUrl": "https://img.example/grid.png"});

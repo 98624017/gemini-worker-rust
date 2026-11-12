@@ -265,7 +265,7 @@ async fn write_counted<W: AsyncWrite + Unpin>(
     Ok(())
 }
 
-fn strip_output_from_value(body: &mut Value) {
+pub(crate) fn strip_output_from_value(body: &mut Value) {
     if let Some(map) = body.as_object_mut() {
         map.remove("output");
     }

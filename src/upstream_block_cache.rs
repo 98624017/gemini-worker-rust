@@ -1,10 +1,15 @@
+use std::io::{self, Write};
 use std::num::NonZeroUsize;
 use std::time::{Duration, Instant};
 
 use axum::http::{HeaderValue, StatusCode};
 use bytes::Bytes;
 use lru::LruCache;
-use serde_json::{Map, Value};
+use serde::{
+    Serialize, Serializer,
+    ser::{SerializeMap, SerializeSeq},
+};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
@@ -42,11 +47,10 @@ pub struct UpstreamBlockCache {
 
 impl UpstreamBlockCacheKey {
     pub fn new(path: &str, upstream_base_url: &str, request_body: &Value) -> Self {
-        let canonical = canonicalize_json(request_body);
-        let body_bytes = serde_json::to_vec(&canonical).unwrap_or_else(|_| b"null".to_vec());
-        let mut hasher = Sha256::new();
-        hasher.update(body_bytes);
-        let body_hash = hex::encode(hasher.finalize());
+        let mut writer = HashWriter(Sha256::new());
+        serde_json::to_writer(&mut writer, &CanonicalJson(request_body))
+            .expect("serializing a JSON value into SHA256 cannot fail");
+        let body_hash = hex::encode(writer.0.finalize());
         Self(format!("{path}\n{upstream_base_url}\n{body_hash}"))
     }
 }
@@ -95,7 +99,10 @@ impl UpstreamBlockCache {
 }
 
 pub fn classify_blockable_upstream_error(status: StatusCode, body: &[u8]) -> Option<&'static str> {
-    if !matches!(status, StatusCode::BAD_REQUEST | StatusCode::BAD_GATEWAY) {
+    if !matches!(
+        status,
+        StatusCode::BAD_REQUEST | StatusCode::INTERNAL_SERVER_ERROR | StatusCode::BAD_GATEWAY
+    ) {
         return None;
     }
     let text = String::from_utf8_lossy(body).to_ascii_lowercase();
@@ -108,25 +115,48 @@ pub fn classify_blockable_upstream_error(status: StatusCode, body: &[u8]) -> Opt
     if text.contains("content blocked") {
         return Some("content_blocked");
     }
-    if text.contains("请求无法用于生成图像") {
+    if text.contains("请求无法用于生成图像") || text.contains("不符合安全策略") {
         return Some("content_blocked");
     }
     None
 }
 
-fn canonicalize_json(value: &Value) -> Value {
-    match value {
-        Value::Array(items) => Value::Array(items.iter().map(canonicalize_json).collect()),
-        Value::Object(map) => {
-            let mut sorted = Map::new();
-            let mut keys: Vec<_> = map.keys().collect();
-            keys.sort();
-            for key in keys {
-                sorted.insert(key.clone(), canonicalize_json(&map[key]));
+struct CanonicalJson<'a>(&'a Value);
+
+impl Serialize for CanonicalJson<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self.0 {
+            Value::Array(items) => {
+                let mut sequence = serializer.serialize_seq(Some(items.len()))?;
+                for item in items {
+                    sequence.serialize_element(&CanonicalJson(item))?;
+                }
+                sequence.end()
             }
-            Value::Object(sorted)
+            Value::Object(map) => {
+                let mut keys: Vec<_> = map.keys().collect();
+                keys.sort_unstable();
+                let mut sorted = serializer.serialize_map(Some(map.len()))?;
+                for key in keys {
+                    sorted.serialize_entry(key, &CanonicalJson(&map[key]))?;
+                }
+                sorted.end()
+            }
+            value => value.serialize(serializer),
         }
-        _ => value.clone(),
+    }
+}
+
+struct HashWriter(Sha256);
+
+impl Write for HashWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.update(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -148,6 +178,21 @@ fn prune_expired_entries(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn key_preserves_canonical_json_digest() {
+        let body: Value = serde_json::from_str(
+            r#"{"z":null,"b":{"z":"转义\n\"\\","a":1.25},"a":[true,2,{"y":0,"x":"AQID"}]}"#,
+        )
+        .unwrap();
+        let canonical =
+            r#"{"a":[true,2,{"x":"AQID","y":0}],"b":{"a":1.25,"z":"转义\n\"\\"},"z":null}"#;
+        let hash = hex::encode(Sha256::digest(canonical.as_bytes()));
+        assert_eq!(
+            UpstreamBlockCacheKey::new("/generate", "https://upstream.example", &body).0,
+            format!("/generate\nhttps://upstream.example\n{hash}")
+        );
+    }
 
     #[test]
     fn key_ignores_object_order_and_preserves_array_order() {
@@ -219,7 +264,7 @@ mod tests {
     }
 
     #[test]
-    fn classifier_requires_400_or_502_and_known_keyword() {
+    fn classifier_requires_400_500_or_502_and_known_keyword() {
         assert_eq!(
             classify_blockable_upstream_error(
                 StatusCode::BAD_GATEWAY,
@@ -252,6 +297,46 @@ mod tests {
         );
         assert_eq!(
             classify_blockable_upstream_error(StatusCode::BAD_GATEWAY, b"temporary upstream error"),
+            None
+        );
+        assert_eq!(
+            classify_blockable_upstream_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                b"temporary upstream error"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn classifier_matches_safety_policy_keyword() {
+        for message in [
+            "内容不符合安全策略，请调整提示词或参考图后重试",
+            "上游错误：输入不符合安全策略。",
+        ] {
+            for status in [
+                StatusCode::BAD_REQUEST,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                StatusCode::BAD_GATEWAY,
+            ] {
+                assert_eq!(
+                    classify_blockable_upstream_error(status, message.as_bytes()),
+                    Some("content_blocked")
+                );
+            }
+            assert_eq!(
+                classify_blockable_upstream_error(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    message.as_bytes()
+                ),
+                None
+            );
+        }
+        assert_eq!(
+            classify_blockable_upstream_error(
+                StatusCode::BAD_REQUEST,
+                "请调整提示词或参考图后重试".as_bytes()
+            ),
             None
         );
     }

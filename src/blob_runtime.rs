@@ -36,6 +36,38 @@ struct BlobInner {
     meta: BlobMeta,
     storage: BlobStorage,
     removed: AtomicBool,
+    runtime: Arc<BlobRuntimeInner>,
+}
+
+impl Drop for BlobInner {
+    fn drop(&mut self) {
+        if self.removed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        match &self.storage {
+            BlobStorage::Inline(bytes) => {
+                self.runtime
+                    .global_hot_bytes
+                    .fetch_sub(bytes.len() as u64, Ordering::AcqRel);
+            }
+            BlobStorage::Shared(_) => {}
+            BlobStorage::Spilled(path) => {
+                let path = path.clone();
+                let cleanup = move || {
+                    if let Err(error) = std::fs::remove_file(path)
+                        && error.kind() != std::io::ErrorKind::NotFound
+                    {
+                        tracing::warn!(%error, "blob spill cleanup failed");
+                    }
+                };
+                if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                    runtime.spawn_blocking(cleanup);
+                } else {
+                    cleanup();
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -240,21 +272,32 @@ impl BlobRuntime {
     }
 
     pub async fn remove(&self, handle: &BlobHandle) -> Result<()> {
-        if handle.inner.removed.swap(true, Ordering::AcqRel) {
+        if handle.inner.removed.load(Ordering::Acquire) {
             return Ok(());
         }
 
         match handle.storage() {
             BlobStorage::Inline(bytes) => {
-                self.release_inline_bytes(bytes.len() as u64);
+                if !handle.inner.removed.swap(true, Ordering::AcqRel) {
+                    handle
+                        .inner
+                        .runtime
+                        .global_hot_bytes
+                        .fetch_sub(bytes.len() as u64, Ordering::AcqRel);
+                }
                 Ok(())
             }
             BlobStorage::Shared(_) => Ok(()),
-            BlobStorage::Spilled(path) => match fs::remove_file(path).await {
-                Ok(()) => Ok(()),
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                Err(err) => Err(err.into()),
-            },
+            BlobStorage::Spilled(path) => {
+                // 删除完成后才标记；取消或失败时仍由最后一个 handle 兜底清理。
+                match fs::remove_file(path).await {
+                    Ok(()) => {}
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(err) => return Err(err.into()),
+                }
+                handle.inner.removed.store(true, Ordering::Release);
+                Ok(())
+            }
         }
     }
 
@@ -292,6 +335,7 @@ impl BlobRuntime {
                 },
                 storage,
                 removed: AtomicBool::new(false),
+                runtime: Arc::clone(&self.inner),
             }),
         }
     }
@@ -325,12 +369,6 @@ impl BlobRuntime {
                 return true;
             }
         }
-    }
-
-    fn release_inline_bytes(&self, size_bytes: u64) {
-        self.inner
-            .global_hot_bytes
-            .fetch_sub(size_bytes, Ordering::AcqRel);
     }
 
     fn record_spill(&self, size_bytes: u64) {

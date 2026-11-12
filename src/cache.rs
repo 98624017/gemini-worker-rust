@@ -5,14 +5,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use lru::LruCache;
 use reqwest::StatusCode;
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, Notify};
 use url::Url;
 use url::form_urlencoded;
@@ -22,6 +20,9 @@ use crate::image_io::{
     fetch_image_as_inline_data_with_options, hostname_matches_domain_patterns,
     maybe_convert_large_png_to_lossless_webp_with_timeout,
 };
+
+mod disk;
+use disk::DiskCache;
 
 const EXTERNAL_IMAGE_FETCH_PROXY_PREFIX: &str = "https://gemini.xinbaoai.com/proxy/image?url=";
 const INLINE_DATA_FETCH_RETRY_DELAY: Duration = Duration::from_secs(1);
@@ -108,21 +109,6 @@ struct MemoryCacheInner {
     items: LruCache<String, MemoryEntry>,
     max_bytes: u64,
     cur_bytes: u64,
-}
-
-#[derive(Clone)]
-struct DiskCache {
-    dir: PathBuf,
-    ttl: Duration,
-    max_bytes: u64,
-    io_lock: Arc<Mutex<()>>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct DiskMeta {
-    mime_type: String,
-    expires_at_unix_ms: u64,
-    size_bytes: u64,
 }
 
 impl InlineDataUrlFetchService {
@@ -354,8 +340,10 @@ impl InlineDataUrlFetchService {
         if let Some(memory) = &self.memory_cache {
             memory.set(raw_url, hit).await;
         }
-        if let Some(disk) = &self.disk_cache {
-            let _ = disk.set(raw_url, hit).await;
+        if let Some(disk) = &self.disk_cache
+            && let Err(error) = disk.set(raw_url, hit).await
+        {
+            tracing::warn!(%error, "image disk cache write failed");
         }
     }
 
@@ -547,104 +535,6 @@ impl MemoryCache {
     }
 }
 
-impl DiskCache {
-    fn new(dir: PathBuf, ttl: Duration, max_bytes: u64) -> Self {
-        Self {
-            dir,
-            ttl,
-            max_bytes,
-            io_lock: Arc::new(Mutex::new(())),
-        }
-    }
-
-    async fn get(&self, url: &str) -> Result<Option<CachedInlineData>> {
-        let _guard = self.io_lock.lock().await;
-        let stem = cache_key(url);
-        let meta_path = self.dir.join(format!("{stem}.json"));
-        let body_path = self.dir.join(format!("{stem}.bin"));
-        if !meta_path.exists() || !body_path.exists() {
-            return Ok(None);
-        }
-
-        let meta: DiskMeta = serde_json::from_slice(&std::fs::read(&meta_path)?)?;
-        if now_unix_ms() > meta.expires_at_unix_ms {
-            let _ = std::fs::remove_file(&meta_path);
-            let _ = std::fs::remove_file(&body_path);
-            return Ok(None);
-        }
-
-        let bytes = Bytes::from(std::fs::read(body_path)?);
-        Ok(Some(CachedInlineData {
-            mime_type: Arc::from(meta.mime_type.as_str()),
-            bytes,
-        }))
-    }
-
-    async fn set(&self, url: &str, value: &CachedInlineData) -> Result<()> {
-        let _guard = self.io_lock.lock().await;
-        std::fs::create_dir_all(&self.dir)?;
-
-        let stem = cache_key(url);
-        let meta_path = self.dir.join(format!("{stem}.json"));
-        let body_path = self.dir.join(format!("{stem}.bin"));
-        std::fs::write(&body_path, value.bytes.as_ref())?;
-        std::fs::write(
-            &meta_path,
-            serde_json::to_vec(&DiskMeta {
-                mime_type: value.mime_type.to_string(),
-                expires_at_unix_ms: now_unix_ms() + self.ttl.as_millis() as u64,
-                size_bytes: value.bytes.len() as u64,
-            })?,
-        )?;
-        self.prune_if_needed()?;
-        Ok(())
-    }
-
-    fn prune_if_needed(&self) -> Result<()> {
-        let mut total_bytes = 0u64;
-        let mut entries = Vec::new();
-        if !self.dir.exists() {
-            return Ok(());
-        }
-
-        for entry in std::fs::read_dir(&self.dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-                continue;
-            }
-            let Ok(meta_bytes) = std::fs::read(&path) else {
-                continue;
-            };
-            let Ok(meta) = serde_json::from_slice::<DiskMeta>(&meta_bytes) else {
-                continue;
-            };
-            total_bytes += meta.size_bytes;
-            let modified = entry
-                .metadata()
-                .and_then(|metadata| metadata.modified())
-                .unwrap_or(SystemTime::UNIX_EPOCH);
-            entries.push((modified, path, meta.size_bytes));
-        }
-
-        if total_bytes <= self.max_bytes {
-            return Ok(());
-        }
-
-        entries.sort_by_key(|(modified, _, _)| *modified);
-        for (_, meta_path, size_bytes) in entries {
-            if total_bytes <= self.max_bytes {
-                break;
-            }
-            let body_path = meta_path.with_extension("bin");
-            let _ = std::fs::remove_file(&meta_path);
-            let _ = std::fs::remove_file(&body_path);
-            total_bytes = total_bytes.saturating_sub(size_bytes);
-        }
-        Ok(())
-    }
-}
-
 fn maybe_wrap_external_proxy_url(raw_url: &str, patterns: &[String]) -> Result<String> {
     if patterns.is_empty() {
         return Ok(raw_url.to_string());
@@ -687,19 +577,6 @@ fn should_retry_fetch_error(err: &anyhow::Error) -> bool {
     }
 
     reqwest_err.is_connect() || reqwest_err.is_request()
-}
-
-fn cache_key(url: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(url.as_bytes());
-    hex::encode(hasher.finalize())
-}
-
-fn now_unix_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
 }
 
 #[allow(dead_code)]

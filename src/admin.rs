@@ -1458,7 +1458,7 @@ pub fn sanitize_json_for_log(raw: &[u8]) -> SanitizedAdminLog {
         };
     }
 
-    let mut root = match serde_json::from_slice::<Value>(raw) {
+    let root = match serde_json::from_slice::<Value>(raw) {
         Ok(root) => root,
         Err(_) => {
             return SanitizedAdminLog {
@@ -1471,17 +1471,91 @@ pub fn sanitize_json_for_log(raw: &[u8]) -> SanitizedAdminLog {
         }
     };
 
-    let image_urls = redact_inline_data_and_collect_image_urls(&mut root);
-    let pretty = serde_json::to_string_pretty(&root)
-        .map(|text| truncate_for_admin_log(&text, ADMIN_MAX_BODY_BYTES_PER_ENTRY))
-        .unwrap_or_else(|_| {
-            truncate_for_admin_log(
-                &String::from_utf8_lossy(raw),
-                ADMIN_MAX_BODY_BYTES_PER_ENTRY,
-            )
-        });
+    sanitize_json_value_for_log(&root)
+}
 
-    SanitizedAdminLog { pretty, image_urls }
+pub fn sanitize_json_value_for_log(root: &Value) -> SanitizedAdminLog {
+    format_sanitized_log(&redact_json_value(root, false), collect_image_urls(root))
+}
+
+pub(crate) fn sanitize_materialized_request_for_log(
+    request: &Value,
+    replacements: &[crate::request_materialize::RequestReplacement],
+) -> SanitizedAdminLog {
+    let mut root = redact_json_value(request, false);
+    crate::request_encode::strip_output_from_value(&mut root);
+    for replacement in replacements {
+        if let Some(target) = root.pointer_mut(&replacement.json_pointer) {
+            *target = json!({
+                "mimeType": replacement.mime_type,
+                "data": format!("[base64 omitted len={}]", replacement.blob.meta().size_bytes.div_ceil(3) * 4)
+            });
+        }
+    }
+    format_sanitized_log(&root, collect_image_urls(&root))
+}
+
+fn format_sanitized_log(root: &Value, image_urls: Vec<String>) -> SanitizedAdminLog {
+    let pretty = serde_json::to_string_pretty(root).expect("JSON value serialization cannot fail");
+    SanitizedAdminLog {
+        pretty: truncate_for_admin_log(&pretty, ADMIN_MAX_BODY_BYTES_PER_ENTRY),
+        image_urls,
+    }
+}
+
+fn redact_json_value(node: &Value, inline_data: bool) -> Value {
+    match node {
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(key, value)| {
+                    let redacted = if key == "base64Array" {
+                        redact_base64_array(value)
+                    } else if inline_data
+                        && key == "data"
+                        && let Some(data) = value.as_str()
+                        && !data.trim().is_empty()
+                        && !is_image_url(data.trim())
+                    {
+                        Value::String(format!("[base64 omitted len={}]", data.len()))
+                    } else {
+                        redact_json_value(value, key == "inlineData" || key == "inline_data")
+                    };
+                    (key.clone(), redacted)
+                })
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|item| redact_json_value(item, false))
+                .collect(),
+        ),
+        _ => node.clone(),
+    }
+}
+
+fn redact_base64_array(value: &Value) -> Value {
+    let Some(items) = value.as_array() else {
+        return Value::String("[base64 omitted invalid array]".into());
+    };
+    Value::Array(
+        items
+            .iter()
+            .map(|item| {
+                let Some(raw) = item.as_str() else {
+                    return Value::String("[base64 omitted invalid item]".into());
+                };
+                let (prefix, data) = raw.split_once(',').unwrap_or(("", raw));
+                let mime = match prefix {
+                    "data:image/jpeg;base64" => "image/jpeg",
+                    "data:image/png;base64" => "image/png",
+                    "data:image/webp;base64" => "image/webp",
+                    _ => "unknown",
+                };
+                Value::String(format!("[base64 omitted mime={mime} len={}]", data.len()))
+            })
+            .collect(),
+    )
 }
 
 pub fn apply_admin_stats(stats: &AdminStats, entry: &AdminLogEntry) {
@@ -1530,14 +1604,14 @@ pub fn extract_finish_reason(body: &Value) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-fn redact_inline_data_and_collect_image_urls(root: &mut Value) -> Vec<String> {
+fn collect_image_urls(root: &Value) -> Vec<String> {
     let mut urls = Vec::new();
     let mut seen = HashSet::new();
 
     fn push_image_url(raw: &str, urls: &mut Vec<String>, seen: &mut HashSet<String>) {
-        let trimmed = raw.trim().to_string();
-        if is_image_url(&trimmed) && seen.insert(trimmed.clone()) {
-            urls.push(trimmed);
+        let trimmed = raw.trim();
+        if is_image_url(trimmed) && seen.insert(trimmed.to_string()) {
+            urls.push(trimmed.to_string());
         }
     }
 
@@ -1577,64 +1651,26 @@ fn redact_inline_data_and_collect_image_urls(root: &mut Value) -> Vec<String> {
     }
     collect_explicit_url_image_items(root, &mut urls, &mut seen);
 
-    fn walk(node: &mut Value, urls: &mut Vec<String>, seen: &mut HashSet<String>) {
+    fn walk(node: &Value, urls: &mut Vec<String>, seen: &mut HashSet<String>) {
         match node {
             Value::Object(map) => {
-                if let Some(value) = map.get_mut("base64Array") {
-                    if let Value::Array(items) = value {
-                        for item in items {
-                            let summary = item.as_str().map(|raw| {
-                                let (mime, data) = raw
-                                    .split_once(',')
-                                    .map(|(prefix, data)| {
-                                        let mime = match prefix {
-                                            "data:image/jpeg;base64" => "image/jpeg",
-                                            "data:image/png;base64" => "image/png",
-                                            "data:image/webp;base64" => "image/webp",
-                                            _ => "unknown",
-                                        };
-                                        (mime, data)
-                                    })
-                                    .unwrap_or(("unknown", raw));
-                                format!("[base64 omitted mime={mime} len={}]", data.len())
-                            });
-                            *item =
-                                Value::String(summary.unwrap_or_else(|| {
-                                    "[base64 omitted invalid item]".to_string()
-                                }));
-                        }
-                    } else {
-                        *value = Value::String("[base64 omitted invalid array]".to_string());
-                    }
-                }
                 for key in ["inlineData", "inline_data"] {
-                    if let Some(Value::Object(inline)) = map.get_mut(key)
+                    if let Some(Value::Object(inline)) = map.get(key)
                         && let Some(Value::String(data)) = inline.get("data")
                     {
-                        let trimmed = data.trim().to_string();
-                        if is_image_url(&trimmed) {
-                            if seen.insert(trimmed.clone()) {
-                                urls.push(trimmed);
-                            }
-                        } else if !trimmed.is_empty() {
-                            inline.insert(
-                                "data".to_string(),
-                                Value::String(format!("[base64 omitted len={}]", data.len())),
-                            );
-                        }
+                        push_image_url(data, urls, seen);
                     }
                 }
-                if let Some(Value::Object(file_data)) = map.get_mut("file_data")
+                if let Some(Value::Object(file_data)) = map.get("file_data")
                     && let Some(Value::String(file_uri)) = file_data.get("file_uri")
                 {
-                    let trimmed = file_uri.trim().to_string();
-                    if is_image_url(&trimmed) && seen.insert(trimmed.clone()) {
-                        urls.push(trimmed);
-                    }
+                    push_image_url(file_uri, urls, seen);
                 }
 
-                for child in map.values_mut() {
-                    walk(child, urls, seen);
+                for (key, child) in map {
+                    if key != "base64Array" {
+                        walk(child, urls, seen);
+                    }
                 }
             }
             Value::Array(items) => {
@@ -1670,4 +1706,63 @@ pub(crate) fn truncate_for_admin_log(input: &str, max_bytes: usize) -> String {
     }
     let suffix = "\n...[truncated]";
     format!("{}{}", &input[..boundary], suffix)
+}
+
+#[cfg(test)]
+mod log_tests {
+    use super::*;
+    use crate::request_materialize::RequestReplacement;
+
+    #[tokio::test]
+    async fn materialized_log_matches_encoded_request_without_reading_blob() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = crate::BlobRuntime::new(crate::BlobRuntimeConfig {
+            inline_max_bytes: 4,
+            request_hot_budget_bytes: 4,
+            global_hot_budget_bytes: 4,
+            spill_dir: directory.path().into(),
+        });
+        let blob = runtime
+            .store_bytes(vec![7; 4097], "image/png".into())
+            .await
+            .unwrap();
+        let request = json!({
+            "output": "url",
+            "generationConfig": {"imageConfig": {"output": "url", "imageSize": "4K"}},
+            "contents": [{"parts": [
+                {"inlineData": {"mimeType": "image/jpeg", "data": "https://img.example/a.png", "extra": true}},
+                {"inline_data": {"data": "AQID"}},
+                {"file_data": {"file_uri": "https://img.example/b.png"}}
+            ]}]
+        });
+        let replacements = vec![RequestReplacement {
+            json_pointer: "/contents/0/parts/0/inlineData".into(),
+            mime_type: "image/png".into(),
+            blob,
+        }];
+        let sanitized = sanitize_materialized_request_for_log(&request, &replacements);
+        let encoded = crate::request_encode::encode_request_body(request, replacements, &runtime)
+            .await
+            .unwrap();
+        let actual = runtime.read_bytes(&encoded.body_blob).await.unwrap();
+        assert_eq!(sanitized, sanitize_json_for_log(&actual));
+        assert_eq!(sanitized.image_urls, vec!["https://img.example/b.png"]);
+        runtime.remove(&encoded.body_blob).await.unwrap();
+    }
+
+    #[test]
+    fn borrowed_log_redacts_large_images_without_mutating_the_source() {
+        let payload = "A".repeat(1024 * 1024);
+        let body = json!({"parts": [{"inlineData": {"data": payload}}]});
+        let sanitized = sanitize_json_value_for_log(&body);
+        assert!(sanitized.pretty.contains("[base64 omitted len=1048576]"));
+        assert_eq!(
+            body["parts"][0]["inlineData"]["data"]
+                .as_str()
+                .unwrap()
+                .len(),
+            1024 * 1024
+        );
+        assert!(sanitized.pretty.len() < 200);
+    }
 }

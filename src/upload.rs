@@ -30,6 +30,23 @@ pub type BoxUploadFuture = Pin<Box<dyn Future<Output = Result<UploadResult>> + S
 const UPLOAD_USER_AGENT: &str = "ComfyUI-Banana/1.0";
 const BASE64_STREAM_INPUT_CHARS: usize = 32 * 1024;
 
+#[derive(Clone)]
+enum Base64Source {
+    Shared(Arc<str>),
+    Owned(Arc<String>),
+}
+
+impl std::ops::Deref for Base64Source {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        match self {
+            Self::Shared(value) => value,
+            Self::Owned(value) => value.as_str(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ImageHostMode {
     Legacy,
@@ -88,14 +105,29 @@ impl Uploader {
         data_base64: Arc<str>,
         mime_type: &str,
     ) -> Result<UploadResult> {
+        self.upload_base64(Base64Source::Shared(data_base64), mime_type)
+            .await
+    }
+
+    pub(crate) async fn upload_owned_base64(
+        &self,
+        data_base64: String,
+        mime_type: &str,
+    ) -> Result<UploadResult> {
+        self.upload_base64(Base64Source::Owned(Arc::new(data_base64)), mime_type)
+            .await
+    }
+
+    async fn upload_base64(
+        &self,
+        data_base64: Base64Source,
+        mime_type: &str,
+    ) -> Result<UploadResult> {
         match parse_image_host_mode(&self.config.image_host_mode)? {
             ImageHostMode::Legacy => self.upload_legacy_base64(data_base64, mime_type).await,
             ImageHostMode::R2 => self.upload_r2_base64(data_base64, mime_type).await,
             ImageHostMode::R2ThenLegacy => {
-                match self
-                    .upload_r2_base64(Arc::clone(&data_base64), mime_type)
-                    .await
-                {
+                match self.upload_r2_base64(data_base64.clone(), mime_type).await {
                     Ok(result) => Ok(result),
                     Err(_) => self.upload_legacy_base64(data_base64, mime_type).await,
                 }
@@ -125,11 +157,11 @@ impl Uploader {
 
     async fn upload_legacy_base64(
         &self,
-        data_base64: Arc<str>,
+        data_base64: Base64Source,
         mime_type: &str,
     ) -> Result<UploadResult> {
         if let Ok(url) = self
-            .upload_base64_to_uguu(Arc::clone(&data_base64), mime_type)
+            .upload_base64_to_uguu(data_base64.clone(), mime_type)
             .await
         {
             return Ok(UploadResult {
@@ -350,7 +382,7 @@ impl Uploader {
 
     async fn upload_base64_to_uguu(
         &self,
-        data_base64: Arc<str>,
+        data_base64: Base64Source,
         mime_type: &str,
     ) -> Result<String> {
         #[derive(Deserialize)]
@@ -420,7 +452,7 @@ impl Uploader {
 
     async fn upload_base64_to_kefan(
         &self,
-        data_base64: Arc<str>,
+        data_base64: Base64Source,
         mime_type: &str,
     ) -> Result<String> {
         #[derive(Deserialize)]
@@ -578,7 +610,7 @@ impl Uploader {
 
     async fn upload_r2_base64(
         &self,
-        data_base64: Arc<str>,
+        data_base64: Base64Source,
         mime_type: &str,
     ) -> Result<UploadResult> {
         let endpoint = Url::parse(&self.config.r2_endpoint)?;
@@ -744,6 +776,26 @@ fn sha256_hex(data: &[u8]) -> String {
     hex::encode(hasher.finalize())
 }
 
+pub(crate) fn validate_base64_image(data: &str) -> Result<Option<&'static str>> {
+    let mut output = [0_u8; BASE64_STREAM_INPUT_CHARS / 4 * 3];
+    let mut mime_type = None;
+    for (index, chunk) in data
+        .as_bytes()
+        .chunks(BASE64_STREAM_INPUT_CHARS)
+        .enumerate()
+    {
+        let is_last = (index + 1) * BASE64_STREAM_INPUT_CHARS >= data.len();
+        if !is_last && chunk.contains(&b'=') {
+            return Err(anyhow!("invalid base64 padding before end of image"));
+        }
+        let written = STANDARD.decode_slice(chunk, &mut output)?;
+        if index == 0 {
+            mime_type = crate::image_io::sniff_image_mime_type(&output[..written]);
+        }
+    }
+    Ok(mime_type)
+}
+
 fn decoded_base64_len(data_base64: &str) -> Result<u64> {
     if data_base64.is_empty() {
         return Ok(0);
@@ -791,14 +843,14 @@ fn decode_base64_chunk(chunk: &[u8]) -> Result<Vec<u8>> {
 }
 
 struct Base64DecodedReader {
-    data_base64: Arc<str>,
+    data_base64: Base64Source,
     offset: usize,
     pending: Vec<u8>,
     pending_offset: usize,
 }
 
 impl Base64DecodedReader {
-    fn new(data_base64: Arc<str>) -> Self {
+    fn new(data_base64: Base64Source) -> Self {
         Self {
             data_base64,
             offset: 0,
@@ -932,6 +984,24 @@ mod tests {
     use tokio::time::{Duration, timeout};
 
     use super::{Uploader, put_object_stream};
+
+    #[test]
+    fn base64_validation_handles_chunk_boundaries_and_rejects_invalid_tails() {
+        use super::{BASE64_STREAM_INPUT_CHARS, validate_base64_image};
+        use base64::engine::general_purpose::STANDARD;
+
+        for length in [12, 24575, 24576, 24577, 49153] {
+            let mut bytes = vec![0_u8; length];
+            bytes[..8].copy_from_slice(&[137, 80, 78, 71, 13, 10, 26, 10]);
+            let encoded = STANDARD.encode(bytes);
+            assert_eq!(validate_base64_image(&encoded).unwrap(), Some("image/png"));
+            assert!(validate_base64_image(&format!("{encoded}!")).is_err());
+        }
+        let mut padded_middle = "A".repeat(BASE64_STREAM_INPUT_CHARS - 4);
+        padded_middle.push_str("AA==AQID");
+        assert!(STANDARD.decode(&padded_middle).is_err());
+        assert!(validate_base64_image(&padded_middle).is_err());
+    }
 
     #[derive(Clone)]
     struct R2StreamState {

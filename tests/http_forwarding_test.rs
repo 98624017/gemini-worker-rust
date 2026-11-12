@@ -465,6 +465,72 @@ async fn generate_content_reuses_cached_upstream_block_error() {
 }
 
 #[tokio::test]
+async fn safety_policy_errors_return_451_and_are_cached() {
+    for status in [
+        StatusCode::BAD_REQUEST,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        StatusCode::BAD_GATEWAY,
+    ] {
+        let calls = Arc::new(Mutex::new(0));
+        let upstream_calls = calls.clone();
+        let handler = post(move || {
+            let calls = upstream_calls.clone();
+            async move {
+                *calls.lock().await += 1;
+                (
+                    status,
+                    Json(json!({"error": {
+                        "message": "内容不符合安全策略，请调整提示词或参考图后重试"
+                    }})),
+                )
+            }
+        });
+        let server = Router::new()
+            .route("/v1beta/models/demo:generateContent", handler.clone())
+            .route("/v1/images/generations", handler);
+        let server_addr = spawn_server(server).await;
+        let mut config = rust_sync_proxy::test_config();
+        config.upstream_base_url = format!("http://{server_addr}");
+        config.upstream_api_key = "env-key".to_string();
+        let app = rust_sync_proxy::build_router(config);
+
+        for (path, body) in [
+            (
+                "/v1beta/models/demo:generateContent",
+                json!({"contents": [{"parts": [{"text": "draw cat"}]}]}),
+            ),
+            (
+                "/v1/images/generations",
+                json!({"model": "gpt-image-2", "prompt": "draw cat"}),
+            ),
+        ] {
+            for _ in 0..2 {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri(path)
+                            .header(CONTENT_TYPE, "application/json")
+                            .body(Body::from(body.to_string()))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);
+                let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                let body: Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(
+                    body["error"]["message"],
+                    "输入内容触发上游违规提示，请调整输入提示词和参考图或尝试更换模型。"
+                );
+            }
+        }
+        assert_eq!(*calls.lock().await, 2);
+    }
+}
+
+#[tokio::test]
 async fn upstream_block_cache_does_not_match_different_request_body() {
     let state = TestState::default();
     let server = Router::new()
