@@ -52,9 +52,7 @@ pub fn normalize_request_body_for_upstream(
     base_url: &str,
 ) -> Result<Value> {
     let mut body = normalize_request_body(body, force_b64_json)?;
-    if Url::parse(base_url)
-        .ok()
-        .is_some_and(|url| url.host_str() == Some("api.tianyue.xyz"))
+    if crate::provider::is_tianyue_base_url(base_url)
         && let Some(object) = body.as_object_mut()
     {
         if object.get("model").and_then(Value::as_str) == Some("seedream-5.5") {

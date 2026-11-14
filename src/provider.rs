@@ -4,6 +4,7 @@ use url::Url;
 pub enum ProviderKind {
     Grsai,
     Aiapidev,
+    MaiToken,
     Transparent,
 }
 
@@ -12,6 +13,7 @@ impl ProviderKind {
         match self {
             Self::Grsai => "grsai",
             Self::Aiapidev => "aiapidev",
+            Self::MaiToken => "mai-token",
             Self::Transparent => "transparent",
         }
     }
@@ -43,6 +45,11 @@ pub fn resolve_provider(base_url: &str) -> Provider {
             kind: ProviderKind::Aiapidev,
         };
     }
+    if parse_host(base_url).as_deref() == Some("api.mai-token.com") {
+        return Provider {
+            kind: ProviderKind::MaiToken,
+        };
+    }
     Provider {
         kind: ProviderKind::Transparent,
     }
@@ -60,6 +67,10 @@ pub fn is_aiapidev_base_url(raw: &str) -> bool {
         return false;
     };
     host == "www.aiapipro.vip"
+}
+
+pub fn is_tianyue_base_url(raw: &str) -> bool {
+    parse_host(raw).as_deref() == Some("api.tianyue.xyz")
 }
 
 fn parse_host(raw: &str) -> Option<String> {

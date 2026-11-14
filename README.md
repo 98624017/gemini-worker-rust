@@ -24,6 +24,7 @@
 - 已有 Rust 集成测试
 - 已有可选的 Go/Rust 对照脚本
 - Magic FAST OpenAI 文生图调用说明见 [docs/magic-fast-openai.md](docs/magic-fast-openai.md)
+- MAI Seedream 5.5 调用说明见 [docs/mai-token-seedream55.md](docs/mai-token-seedream55.md)
 
 ## 支持的上游 Provider
 
@@ -33,7 +34,16 @@
 | --- | --- | --- |
 | `grsai` | `grsai.com`、`*.grsai.com` | 同步单次请求到 `/v1/draw/nano-banana` |
 | `aiapidev` | `www.aiapipro.vip` | 创建任务并轮询结果 |
+| `mai-token` | 精确匹配 `api.mai-token.com` | 仅 OpenAI `seedream-5.5` 请求通过 `/v1/videos` 兼容接口提交图片任务并轮询 |
 | `transparent` | 其他上游 | 保持现有 Gemini/OpenAI 透明转发 |
+
+`mai-token` 的调用方继续使用 `POST /v1/images/generations`，传入原有的
+`size`、`aspect_ratio` 和 `image` 数组等字段。内部固定使用 `/v1/videos` 兼容图片任务接口，
+映射为 `quality=1440p`、`aspect_ratio`、`image_urls` 和可选 `seed`。
+代理在同一 HTTP 请求内等待任务完成，读取 `metadata.url`，
+统一返回 `created`、`data[].url` 和兼容 `usage`。本分支固定生成 `2K`，
+兼容 `size=1K`，拒绝 `4K`，参考图合计最多 10 张。其他模型及 Gemini 请求沿用原有转发。
+完整参数、超时及任务错误字段见 [MAI Seedream 5.5 调用说明](docs/mai-token-seedream55.md)。
 
 `grsai` 支持 Gemini `generateContent` 和 OpenAI `/v1/images/generations`。
 Gemini 模型映射：
@@ -46,6 +56,7 @@ Gemini 模型映射：
 
 ## 路由
 
+- `POST /v1/images/generations`
 - `POST /v1beta/models/{model}:generateContent`
 - `GET /admin`
 - `GET /admin/logs`
@@ -114,7 +125,7 @@ export MALLOC_CONF="background_thread:true,dirty_decay_ms:100,muzzy_decay_ms:100
 - `UPSTREAM_API_KEY`
   必填；为空时请求返回 `401`
 - `UPSTREAM_TIMEOUT_MS`
-  上游请求总超时；默认 `600000`
+  上游请求总超时；默认 `600000`。MAI Seedream 5.5 的请求体读取、任务提交与轮询共享此预算
 - `UPSTREAM_CONNECT_TIMEOUT_MS`
   连接上游阶段超时；默认 `30000`
 - `UPSTREAM_INSECURE_SKIP_VERIFY`
@@ -290,7 +301,7 @@ R2 模式还需要：
   `seedream-5-pro-1K/2K`；缺失或其他 `size` 保持模型不变。
   `seedream-5.5` 固定改写为 `GZ-seedream-5.5-2K`，不依赖 `size`；已有上游模型名保持不变。
   参考图字段 `image`、`images`、`reference_images` 合并后统一发送为 `images`，
-  未传参考图时不添加该字段
+  未传参考图时不添加该字段。本层默认最多接受 6 张参考图；天悦和 MAI Seedream 5.5 渠道各自最多接受 10 张。
 - `POST /v1/images/generations` 请求体包含参考图时，若上游 host 命中
   `OPENAI_IMAGE_EDITS_UPSTREAM_DOMAINS`，上游路径会改为 `/v1/images/edits`
   并转为 multipart；参考图字段兼容 `image`、`images`、`reference_images`

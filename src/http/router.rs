@@ -42,8 +42,11 @@ use crate::upstream_block_cache::{
     classify_blockable_upstream_error,
 };
 
+mod mai_token;
 mod midjourney;
 
+#[cfg(test)]
+mod mai_token_tests;
 #[cfg(test)]
 mod midjourney_tests;
 
@@ -54,6 +57,7 @@ const AIAPIDEV_OPENAI_IMAGE_POLL_INTERVAL: Duration = Duration::from_secs(10);
 const AIAPIDEV_MAX_POLL_TIME: Duration = Duration::from_secs(450);
 const AIAPIDEV_MAX_CONSECUTIVE_POLL_FAILURES: usize = 5;
 const MAX_OPENAI_REFERENCE_IMAGES: usize = 6;
+const MAX_TIANYUE_OPENAI_REFERENCE_IMAGES: usize = 10;
 const OPENAI_IMAGE_REFERENCE_FIELDS: [&str; 3] = ["image", "images", "reference_images"];
 const MSG_INVALID_REQUEST_JSON: &str = "请求内容不是有效的 JSON，请检查后再试";
 const MSG_REQUEST_BODY_TOO_LARGE: &str = "请求内容太大，请缩小后再试";
@@ -71,7 +75,6 @@ const MSG_UPSTREAM_TRANSPORT_ERROR: &str = "上游服务通信异常，请稍后
 const MSG_READ_UPSTREAM_BODY_FAILED: &str = "读取上游服务响应失败，请稍后再试";
 const MSG_PARSE_UPSTREAM_JSON_FAILED: &str = "解析上游服务响应失败，请稍后再试";
 const MSG_DECODE_UPSTREAM_B64_FAILED: &str = "解码上游图片数据失败，请稍后再试";
-const MSG_REFERENCE_IMAGES_TOO_MANY: &str = "参考图片最多支持 6 张，请减少后再试";
 const MSG_AIAPIDEV_CREATE_PARSE_FAILED: &str = "解析任务创建响应失败，请稍后再试";
 const MSG_AIAPIDEV_MISSING_REQUEST_ID: &str = "任务创建响应缺少请求 ID，请稍后再试";
 const MSG_AIAPIDEV_MISSING_IMAGE_URLS: &str = "任务结果里没有可用的图片地址，请稍后再试";
@@ -861,6 +864,7 @@ async fn image_generations_action(State(state): State<AppState>, request: Reques
     let request_parse_ms = request_parse_started.elapsed().as_millis() as i64;
 
     match forward_openai_image_request(
+        deadline,
         state.clone(),
         resolved,
         normalized_body,
@@ -1209,7 +1213,7 @@ async fn forward_gemini_request(
             admin_entry.status_code = response.status().as_u16();
             return Ok((response, admin_entry));
         }
-        ProviderKind::Transparent => {}
+        ProviderKind::MaiToken | ProviderKind::Transparent => {}
     }
 
     let request_image_prepare_started = Instant::now();
@@ -1652,6 +1656,7 @@ fn grsai_openai_proxy_error_response(
 }
 
 async fn forward_openai_image_request(
+    deadline: tokio::time::Instant,
     state: AppState,
     resolved: ResolvedUpstream,
     request_body: Value,
@@ -1666,17 +1671,37 @@ async fn forward_openai_image_request(
         build_request_cache_tracking(state.admin.as_ref().map(|admin| admin.stats()));
     let provider = resolve_provider(&resolved.base_url);
 
-    if openai_image_reference_image_count(&request_body) > MAX_OPENAI_REFERENCE_IMAGES {
+    if provider.kind() == ProviderKind::MaiToken
+        && crate::mai_token::is_seedream_55_request(&request_body)
+    {
+        return Ok(mai_token::handle(
+            &state,
+            &resolved,
+            request_body,
+            admin_entry,
+            block_cache_key.as_ref(),
+            deadline,
+        )
+        .await);
+    }
+
+    let max_reference_images = if crate::provider::is_tianyue_base_url(&resolved.base_url) {
+        MAX_TIANYUE_OPENAI_REFERENCE_IMAGES
+    } else {
+        MAX_OPENAI_REFERENCE_IMAGES
+    };
+    if openai_image_reference_image_count(&request_body) > max_reference_images {
+        let error_message = format!("参考图片最多支持 {max_reference_images} 张，请减少后再试");
         admin_entry.status_code = StatusCode::BAD_REQUEST.as_u16();
         admin_entry.error_source = "proxy".to_string();
         admin_entry.error_stage = "validate_request".to_string();
         admin_entry.error_kind = "too_many_reference_images".to_string();
-        admin_entry.error_message = MSG_REFERENCE_IMAGES_TOO_MANY.to_string();
+        admin_entry.error_message = error_message.clone();
         admin_entry.error_detail =
-            format!("reference image count exceeds limit: max={MAX_OPENAI_REFERENCE_IMAGES}");
+            format!("reference image count exceeds limit: max={max_reference_images}");
         let response = proxy_error_response(
             StatusCode::BAD_REQUEST,
-            MSG_REFERENCE_IMAGES_TOO_MANY,
+            &error_message,
             "validate_request",
             "too_many_reference_images",
         );
@@ -1721,7 +1746,7 @@ async fn forward_openai_image_request(
             admin_entry.status_code = response.status().as_u16();
             return Ok((response, admin_entry));
         }
-        ProviderKind::Transparent => {}
+        ProviderKind::MaiToken | ProviderKind::Transparent => {}
     }
 
     if state
@@ -3867,6 +3892,7 @@ mod tests {
         };
 
         let (response, admin_entry) = forward_openai_image_request(
+            tokio::time::Instant::now() + state.config.upstream_timeout,
             state,
             resolved,
             json!({
@@ -3962,6 +3988,7 @@ mod tests {
         };
 
         let (response, admin_entry) = forward_openai_image_request(
+            tokio::time::Instant::now() + state.config.upstream_timeout,
             state,
             resolved,
             json!({
@@ -4074,18 +4101,44 @@ mod tests {
 
     #[tokio::test]
     async fn tianyue_image_generations_adapts_request_and_proxies_response() {
-        for (model, upstream_model, size, aspect_ratio, image_field) in [
-            ("seedream-5-pro", "seedream-5-pro-2K", "2k", "16:9", "image"),
-            ("seedream-5.5", "GZ-seedream-5.5-2K", "2K", "1:1", "image"),
-            ("seedream-5.5", "GZ-seedream-5.5-2K", "2K", "16:9", "images"),
+        for (model, upstream_model, size, aspect_ratio, image_field, reference_count) in [
+            (
+                "seedream-5-pro",
+                "seedream-5-pro-2K",
+                "2k",
+                "16:9",
+                "image",
+                2,
+            ),
+            (
+                "seedream-5.5",
+                "GZ-seedream-5.5-2K",
+                "2K",
+                "1:1",
+                "image",
+                2,
+            ),
+            (
+                "seedream-5.5",
+                "GZ-seedream-5.5-2K",
+                "2K",
+                "16:9",
+                "images",
+                2,
+            ),
             (
                 "seedream-5.5",
                 "GZ-seedream-5.5-2K",
                 "2K",
                 "9:16",
                 "reference_images",
+                10,
             ),
         ] {
+            let reference_urls: Vec<String> = (0..reference_count)
+                .map(|index| format!("https://img.example/{index}.webp"))
+                .collect();
+            let expected_images = json!(reference_urls.clone());
             let upstream = Router::new().route(
                 "/v1/images/generations",
                 post(move |headers: HeaderMap, Json(body): Json<Value>| async move {
@@ -4097,10 +4150,7 @@ mod tests {
                     assert_eq!(body["aspect_ratio"], aspect_ratio);
                     assert_eq!(body["output_resolution"], "2K");
                     assert_eq!(body["response_format"], "url");
-                    assert_eq!(
-                        body["images"],
-                        json!(["https://img.example/a.webp", "https://img.example/b.webp"])
-                    );
+                    assert_eq!(body["images"], expected_images);
                     assert!(body.get("image").is_none());
                     assert!(body.get("reference_images").is_none());
                     Json(json!({
@@ -4148,7 +4198,7 @@ mod tests {
                     json!({
                         "model": model, "size": size, "prompt": "draw cat",
                         "duration": 1, "aspect_ratio": aspect_ratio, "output_resolution": "2K",
-                        (image_field): ["https://img.example/a.webp", "https://img.example/b.webp"]
+                        (image_field): reference_urls
                     })
                     .to_string(),
                 ))
@@ -4833,6 +4883,7 @@ mod tests {
         };
 
         let (response, _admin_entry) = forward_openai_image_request(
+            tokio::time::Instant::now() + state.config.upstream_timeout,
             state,
             resolved,
             json!({
@@ -4888,6 +4939,7 @@ mod tests {
         };
 
         let (response, admin_entry) = forward_openai_image_request(
+            tokio::time::Instant::now() + state.config.upstream_timeout,
             state,
             resolved,
             json!({
@@ -4945,6 +4997,7 @@ mod tests {
         };
 
         let (response, admin_entry) = forward_openai_image_request(
+            tokio::time::Instant::now() + state.config.upstream_timeout,
             state,
             resolved,
             json!({
@@ -5034,6 +5087,7 @@ mod tests {
         };
 
         let (response, _admin_entry) = forward_openai_image_request(
+            tokio::time::Instant::now() + state.config.upstream_timeout,
             state,
             resolved,
             json!({
@@ -5146,6 +5200,7 @@ mod tests {
         };
 
         let (response, _admin_entry) = forward_openai_image_request(
+            tokio::time::Instant::now() + state.config.upstream_timeout,
             state,
             resolved,
             json!({
@@ -5176,6 +5231,7 @@ mod tests {
         let state = test_app_state(config, None);
 
         let (response, _admin_entry) = forward_openai_image_request(
+            tokio::time::Instant::now() + state.config.upstream_timeout,
             state,
             resolved,
             json!({
@@ -5202,8 +5258,49 @@ mod tests {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let json_body: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json_body["error"]["message"], MSG_REFERENCE_IMAGES_TOO_MANY);
+        assert_eq!(
+            json_body["error"]["message"],
+            "参考图片最多支持 6 张，请减少后再试"
+        );
         assert_eq!(json_body["error"]["source"], "proxy");
+        assert_eq!(json_body["error"]["kind"], "too_many_reference_images");
+    }
+
+    #[tokio::test]
+    async fn forward_openai_image_request_rejects_more_than_ten_tianyue_reference_images() {
+        let resolved = ResolvedUpstream {
+            base_url: "https://api.tianyue.xyz".to_string(),
+            api_key: "tianyue-key".to_string(),
+        };
+        let config = crate::test_config();
+        let state = test_app_state(config, None);
+
+        let (response, _admin_entry) = forward_openai_image_request(
+            tokio::time::Instant::now() + state.config.upstream_timeout,
+            state,
+            resolved,
+            json!({
+                "model": "seedream-5.5",
+                "prompt": "电商产品图",
+                "image": (1..=11)
+                    .map(|index| format!("https://img.example.com/{index}.png"))
+                    .collect::<Vec<_>>(),
+                "response_format": "url"
+            }),
+            None,
+            RequestLogSnapshot::default(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json_body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            json_body["error"]["message"],
+            "参考图片最多支持 10 张，请减少后再试"
+        );
         assert_eq!(json_body["error"]["kind"], "too_many_reference_images");
     }
 
@@ -5248,6 +5345,7 @@ mod tests {
         };
 
         let (response, _admin_entry) = forward_openai_image_request(
+            tokio::time::Instant::now() + state.config.upstream_timeout,
             state,
             resolved,
             json!({
@@ -5338,6 +5436,7 @@ mod tests {
         };
 
         let (response, _admin_entry) = forward_openai_image_request(
+            tokio::time::Instant::now() + state.config.upstream_timeout,
             state,
             ResolvedUpstream {
                 base_url: "http://happyapi.org".to_string(),
