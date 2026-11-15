@@ -179,6 +179,7 @@ pub fn rewrite_aiapidev_model_path(path: &str) -> String {
         "gemini-3.1-flash-image-preview" => "nanobanana2-qyj",
         "gemini-3-pro-image-preview-as" => "nanobananapro-qyj",
         "gemini-3.1-flash-image-preview-as" => "nanobanana2-qyj",
+        "gemini-nano-banana-2.1" => "nano-banana-2-1-25",
         _ => model,
     };
 

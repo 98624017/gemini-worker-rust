@@ -131,6 +131,12 @@ fn aiapidev_model_path_is_mapped() {
     );
     assert_eq!(
         rust_sync_proxy::upstream::rewrite_aiapidev_model_path(
+            "/v1beta/models/gemini-nano-banana-2.1:generateContent"
+        ),
+        "/v1beta/models/nano-banana-2-1-25:generateContent"
+    );
+    assert_eq!(
+        rust_sync_proxy::upstream::rewrite_aiapidev_model_path(
             "/v1beta/models/other-model:generateContent"
         ),
         "/v1beta/models/other-model:generateContent"
