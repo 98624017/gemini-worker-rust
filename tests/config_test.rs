@@ -17,7 +17,7 @@ fn defaults_match_runtime_expectations() {
     assert_eq!(cfg.upstream_block_cache_max_entries, 1024);
     assert_eq!(cfg.image_host_mode.as_str(), "legacy");
     assert_eq!(cfg.slow_log_threshold, Duration::from_millis(100_000));
-    assert_eq!(cfg.image_fetch_timeout, Duration::from_millis(20_000));
+    assert_eq!(cfg.image_fetch_timeout, Duration::from_millis(50_000));
     assert_eq!(cfg.upload_timeout, Duration::from_millis(20_000));
     assert!(!cfg.enable_image_compression);
     assert!(!cfg.enable_request_image_webp_optimization);
