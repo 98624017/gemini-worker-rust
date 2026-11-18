@@ -299,7 +299,7 @@ R2 模式还需要：
 - 上游 host 为 `api.tianyue.xyz` 时，`POST /v1/images/generations` 将
   `seedream-5-pro` 按 `size=1K/2K`（大小写均可）改写为
   `seedream-5-pro-1K/2K`；缺失或其他 `size` 保持模型不变。
-  `seedream-5.5` 固定改写为 `GZ-seedream-5.5-2K`，不依赖 `size`；已有上游模型名保持不变。
+  `seedream-5.5` 固定改写为 `seedream-5.5-2K`，不依赖 `size`；已有上游模型名保持不变。
   参考图字段 `image`、`images`、`reference_images` 合并后统一发送为 `images`，
   未传参考图时不添加该字段。本层默认最多接受 6 张参考图；天悦和 MAI Seedream 5.5 渠道各自最多接受 10 张。
 - `POST /v1/images/generations` 请求体包含参考图时，若上游 host 命中

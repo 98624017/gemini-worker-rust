@@ -59,7 +59,7 @@ fn tianyue_request_maps_seedream_55_with_or_without_size() {
         "https://api.tianyue.xyz",
     )
     .unwrap();
-    assert_eq!(with_size["model"], "GZ-seedream-5.5-2K");
+    assert_eq!(with_size["model"], "seedream-5.5-2K");
     assert_eq!(with_size["size"], "4K");
     assert_eq!(with_size["prompt"], "draw cat");
     assert_eq!(with_size["duration"], 1);
@@ -85,7 +85,7 @@ fn tianyue_request_maps_seedream_55_with_or_without_size() {
         "https://api.tianyue.xyz",
     )
     .unwrap();
-    assert_eq!(without_size["model"], "GZ-seedream-5.5-2K");
+    assert_eq!(without_size["model"], "seedream-5.5-2K");
     assert!(without_size.get("size").is_none());
     assert_eq!(without_size["images"], json!(["https://img.example/d.png"]));
     assert!(without_size.get("reference_images").is_none());
@@ -100,6 +100,7 @@ fn tianyue_request_keeps_other_models_sizes_and_channels_unchanged() {
         json!({"model": "other-model", "size": "2K"}),
         json!({"model": "seedream-5-pro-1K", "size": "2K"}),
         json!({"model": "seedream-5-pro-2K", "size": "1K"}),
+        json!({"model": "seedream-5.5-2K", "size": "2K"}),
         json!({"model": "GZ-seedream-5.5-2K", "size": "1K"}),
     ] {
         let normalized = rust_sync_proxy::openai_image::normalize_request_body_for_upstream(

@@ -58,7 +58,7 @@ pub fn normalize_request_body_for_upstream(
         if object.get("model").and_then(Value::as_str) == Some("seedream-5.5") {
             object.insert(
                 "model".to_string(),
-                Value::String("GZ-seedream-5.5-2K".to_string()),
+                Value::String("seedream-5.5-2K".to_string()),
             );
         }
         if object.get("model").and_then(Value::as_str) == Some("seedream-5-pro")
