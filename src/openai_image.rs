@@ -52,16 +52,19 @@ pub fn normalize_request_body_for_upstream(
     base_url: &str,
 ) -> Result<Value> {
     let mut body = normalize_request_body(body, force_b64_json)?;
-    if crate::provider::is_tianyue_base_url(base_url)
+    let is_tianyue = crate::provider::is_tianyue_base_url(base_url);
+    let is_ai666_seedream = is_ai666_seedream_55_request(base_url, &body);
+    if (is_tianyue || is_ai666_seedream)
         && let Some(object) = body.as_object_mut()
     {
-        if object.get("model").and_then(Value::as_str) == Some("seedream-5.5") {
+        if is_tianyue && object.get("model").and_then(Value::as_str) == Some("seedream-5.5") {
             object.insert(
                 "model".to_string(),
                 Value::String("GZ-seedream-5.5-2K".to_string()),
             );
         }
-        if object.get("model").and_then(Value::as_str) == Some("seedream-5-pro")
+        if is_tianyue
+            && object.get("model").and_then(Value::as_str) == Some("seedream-5-pro")
             && let Some(size) = object.get("size").and_then(Value::as_str)
             && (size.eq_ignore_ascii_case("1K") || size.eq_ignore_ascii_case("2K"))
         {
@@ -73,8 +76,60 @@ pub fn normalize_request_body_for_upstream(
                 object.insert("images".to_string(), images);
             }
         }
+        if is_ai666_seedream {
+            normalize_ai666_seedream_55_request(object)?;
+        }
     }
     Ok(body)
+}
+
+pub(crate) fn is_ai666_seedream_55_request(base_url: &str, body: &Value) -> bool {
+    body.get("model").and_then(Value::as_str) == Some("seedream-5.5")
+        && crate::provider::is_ai666_base_url(base_url)
+}
+
+fn normalize_ai666_seedream_55_request(object: &mut Map<String, Value>) -> Result<()> {
+    if object
+        .get("prompt")
+        .and_then(Value::as_str)
+        .is_none_or(|prompt| prompt.trim().is_empty())
+    {
+        return Err(anyhow!("prompt 必须是非空字符串"));
+    }
+    if object.get("n").is_some_and(|n| n.as_u64() != Some(1)) {
+        return Err(anyhow!("AI666 Seedream 5.5 每次只生成一张图片，n 必须为 1"));
+    }
+    if object
+        .get("images")
+        .and_then(Value::as_array)
+        .is_some_and(Vec::is_empty)
+    {
+        object.remove("images");
+    }
+
+    // 上游将清晰度和尺寸分开，保留像素尺寸或比例形式的 size。
+    let size_resolution = match object.get("size") {
+        Some(Value::String(size)) if size.trim_end().ends_with(['K', 'k']) => object.remove("size"),
+        Some(Value::String(_)) | None => None,
+        Some(_) => return Err(anyhow!("size 必须是字符串")),
+    };
+    let output_resolution = object.remove("output_resolution");
+    if let Some(resolution) = object
+        .get("resolution")
+        .or(size_resolution.as_ref())
+        .or(output_resolution.as_ref())
+    {
+        let resolution = match resolution.as_str().map(str::trim) {
+            Some(value) if value.eq_ignore_ascii_case("1K") => "1K",
+            Some(value) if value.eq_ignore_ascii_case("2K") => "2K",
+            _ => return Err(anyhow!("AI666 Seedream 5.5 分辨率只支持 1K 或 2K")),
+        };
+        object.insert(
+            "resolution".to_string(),
+            Value::String(resolution.to_string()),
+        );
+    }
+    Ok(())
 }
 
 pub fn build_fixed_usage() -> Value {

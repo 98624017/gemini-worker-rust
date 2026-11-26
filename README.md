@@ -302,6 +302,8 @@ R2 模式还需要：
   `seedream-5.5` 固定改写为 `GZ-seedream-5.5-2K`，不依赖 `size`；已有上游模型名保持不变。
   参考图字段 `image`、`images`、`reference_images` 合并后统一发送为 `images`，
   未传参考图时不添加该字段。本层默认最多接受 6 张参考图；天悦和 MAI Seedream 5.5 渠道各自最多接受 10 张。
+- 上游 host 为 `us.ai666.live` 且模型为 `seedream-5.5` 时，复用同步图片接口：
+  `size=1K/2K` 改为上游 `resolution`，参考图合并为 `images`，最多 10 张。调用方式见下方示例。
 - `POST /v1/images/generations` 请求体包含参考图时，若上游 host 命中
   `OPENAI_IMAGE_EDITS_UPSTREAM_DOMAINS`，上游路径会改为 `/v1/images/edits`
   并转为 multipart；参考图字段兼容 `image`、`images`、`reference_images`
@@ -316,6 +318,24 @@ R2 模式还需要：
 - 上传失败统一走 fail-open，保留原始 base64
 
 ## 示例
+
+### AI666 Seedream 5.5
+
+按请求选择渠道，使用现有的 `baseUrl|apiKey` 请求头格式：
+
+```bash
+curl --fail-with-body --silent --show-error \
+  -H 'Authorization: Bearer https://us.ai666.live|YOUR_API_KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"seedream-5.5","prompt":"同一主体，明亮的自然光","size":"2K","aspect_ratio":"3:2","n":1,"image":["https://images.example/reference.png"],"response_format":"url"}' \
+  'http://127.0.0.1:8787/v1/images/generations'
+```
+
+也可用 `UPSTREAM_BASE_URL=https://us.ai666.live` 和 `UPSTREAM_API_KEY` 设置默认上游。
+文生图可省略参考图或传空数组；`image`、`images`、`reference_images` 只接受 HTTP(S) URL 数组。
+清晰度优先级为 `resolution`、`size=1K/2K`、`output_resolution`；像素或比例格式的 `size` 和独立的 `aspect_ratio` 保留。
+该模型只支持 1K、2K，且每次只返回一张图。`seed`、`watermark` 等未在 [上游图片文档](https://us.ai666.live/docs#image)承诺的字段不保证生效。
+成功时仍返回 `created`、`data[].url` 和固定兼容 `usage`，图片 URL 沿用代理现有包装规则。
 
 ### base64 模式
 

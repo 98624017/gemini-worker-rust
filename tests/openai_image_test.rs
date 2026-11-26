@@ -1,6 +1,72 @@
 use serde_json::json;
 
 #[test]
+fn ai666_seedream_55_uses_legacy_resolution_without_replacing_native_size() {
+    let body = rust_sync_proxy::openai_image::normalize_request_body_for_upstream(
+        json!({
+            "model": "seedream-5.5",
+            "prompt": "geometric pattern",
+            "size": "1536x1024",
+            "output_resolution": "1k",
+            "image": [],
+            "n": 1,
+        }),
+        false,
+        "https://US.AI666.LIVE/v1/",
+    )
+    .unwrap();
+    assert_eq!(body["size"], "1536x1024");
+    assert_eq!(body["resolution"], "1K");
+    assert!(body.get("output_resolution").is_none());
+    assert!(body.get("images").is_none());
+}
+
+#[test]
+fn ai666_seedream_55_rejects_unsupported_resolution_and_count() {
+    for (field, value) in [
+        ("size", json!("4k")),
+        ("resolution", json!(2)),
+        ("n", json!(2)),
+    ] {
+        let mut request = json!({"model": "seedream-5.5", "prompt": "geometric pattern"});
+        request[field] = value;
+        assert!(
+            rust_sync_proxy::openai_image::normalize_request_body_for_upstream(
+                request,
+                false,
+                "https://us.ai666.live",
+            )
+            .is_err(),
+            "unexpectedly accepted {field}"
+        );
+    }
+}
+
+#[test]
+fn ai666_seedream_55_preserves_other_models_and_hosts() {
+    for (base_url, model) in [
+        ("https://us.ai666.live", "other-model"),
+        ("https://us.ai666.live.example.com", "seedream-5.5"),
+        ("https://ai666.live", "seedream-5.5"),
+    ] {
+        let request = json!({
+            "model": model,
+            "prompt": "geometric pattern",
+            "size": "2K",
+            "image": ["https://img.example/reference.png"],
+            "response_format": "url",
+        });
+        let normalized = rust_sync_proxy::openai_image::normalize_request_body_for_upstream(
+            request.clone(),
+            false,
+            base_url,
+        )
+        .unwrap();
+        assert_eq!(normalized, request);
+    }
+}
+
+#[test]
 fn tianyue_request_rewrites_model_and_merges_image_aliases() {
     for size in ["1K", "1k", "2K", "2k"] {
         let body = rust_sync_proxy::openai_image::normalize_request_body_for_upstream(

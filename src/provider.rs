@@ -73,6 +73,10 @@ pub fn is_tianyue_base_url(raw: &str) -> bool {
     parse_host(raw).as_deref() == Some("api.tianyue.xyz")
 }
 
+pub(crate) fn is_ai666_base_url(raw: &str) -> bool {
+    parse_host(raw).as_deref() == Some("us.ai666.live")
+}
+
 fn parse_host(raw: &str) -> Option<String> {
     Url::parse(raw)
         .ok()
