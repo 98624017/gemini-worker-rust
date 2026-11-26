@@ -12,6 +12,7 @@ const ALLOWED_RATIOS: [&str; 11] = [
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TaskState {
     Pending,
+    Unknown,
     Completed(Vec<String>),
     Failed(String),
 }
@@ -117,6 +118,7 @@ pub fn parse_task_state(body: &Value) -> Result<TaskState> {
 
     match status {
         "queued" | "in_progress" | "processing" => Ok(TaskState::Pending),
+        "unknown" => Ok(TaskState::Unknown),
         "completed" => Ok(TaskState::Completed(parse_completed_urls(object)?)),
         "failed" => Ok(TaskState::Failed(
             failure_reason(object).unwrap_or_else(|| "任务失败".to_string()),

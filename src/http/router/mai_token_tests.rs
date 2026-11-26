@@ -629,7 +629,7 @@ async fn malformed_create_missing_id_and_completed_without_url_are_502() {
         (
             vec![MockReply::json(json!({
                 "task_id": "bad-status-task",
-                "status": "unknown",
+                "status": "unexpected",
             }))],
             false,
             Some("bad-status-task"),
@@ -691,4 +691,65 @@ async fn short_deadline_returns_timeout_with_task_id_in_error_and_admin_log() {
         .unwrap();
     assert_eq!(logs["items"][0]["upstreamTaskId"], "deadline-task");
     assert_eq!(harness.mock.requests.lock().await.len(), 1);
+}
+
+#[tokio::test]
+async fn transient_unknown_status_continues_polling_until_completed() {
+    let harness = Harness::new(vec![
+        MockReply::json(json!({"id": "mai-unknown-ok", "status": "unknown"})),
+        MockReply::json(json!({"status": "unknown", "progress": 0})),
+        MockReply::json(json!({"status": "unknown", "progress": 0})),
+        MockReply::json(json!({"status": "in_progress", "progress": 10})),
+        completed_reply("https://img.example/recovered.png"),
+    ])
+    .await;
+    let request = harness
+        .request(generation_body())
+        .bearer_auth("selected-key");
+    let task = tokio::spawn(async move { request.send().await.unwrap() });
+
+    harness.wait_for_requests(1).await;
+    tokio::time::pause();
+    for expected_requests in 2..=5 {
+        tokio::time::advance(Duration::from_secs(5) + TIMER_TICK).await;
+        harness.wait_for_requests(expected_requests).await;
+    }
+
+    let response = task.await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(
+        body["data"],
+        json!([{"url": proxy_url("https://img.example/recovered.png")}])
+    );
+    let requests = harness.mock.requests.lock().await;
+    assert_eq!(requests.len(), 5);
+    assert_eq!(requests[0].method, "POST");
+    assert!(requests[1..].iter().all(|request| request.method == "GET"));
+}
+
+#[tokio::test]
+async fn persistent_unknown_status_returns_502_after_limit() {
+    let mut replies = vec![create_reply("stuck-unknown-task")];
+    replies.extend((0..18).map(|_| MockReply::json(json!({"status": "unknown", "progress": 0}))));
+    let harness = Harness::new(replies).await;
+    let request = harness
+        .request(generation_body())
+        .bearer_auth("selected-key");
+    let task = tokio::spawn(async move { request.send().await.unwrap() });
+
+    harness.wait_for_requests(1).await;
+    tokio::time::pause();
+    for expected_requests in 2..=19 {
+        tokio::time::advance(Duration::from_secs(5) + TIMER_TICK).await;
+        harness.wait_for_requests(expected_requests).await;
+    }
+
+    let response = task.await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["error"]["code"], 502);
+    assert_eq!(body["error"]["kind"], "invalid_task_response");
+    assert_eq!(body["error"]["upstream_task_id"], "stuck-unknown-task");
+    assert_eq!(harness.mock.requests.lock().await.len(), 19);
 }

@@ -119,6 +119,10 @@ fn parses_pending_completed_and_failed_states() {
         );
     }
     assert_eq!(
+        parse_task_state(&json!({"status": "unknown"})).unwrap(),
+        TaskState::Unknown
+    );
+    assert_eq!(
         parse_task_state(&json!({"status": "processing", "progress": 100})).unwrap(),
         TaskState::Pending
     );
@@ -154,7 +158,7 @@ fn rejects_incomplete_or_unknown_task_responses() {
         json!({"status": "completed", "metadata": {"url": ""}}),
         json!({"status": "completed", "metadata": {"url": "not-a-url"}}),
         json!({"status": "completed"}),
-        json!({"status": "unknown"}),
+        json!({"status": "unexpected"}),
         json!({"progress": 100}),
     ] {
         assert!(

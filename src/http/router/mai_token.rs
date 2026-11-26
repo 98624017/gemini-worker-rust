@@ -3,6 +3,7 @@ use crate::mai_token::TaskState;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_CONSECUTIVE_FAILURES: usize = 5;
+const MAX_CONSECUTIVE_UNKNOWN_STATES: usize = 18;
 const MAX_TASK_RESPONSE_BYTES: usize = 64 * 1024;
 
 struct ExchangeFailure {
@@ -122,7 +123,17 @@ async fn execute(
     if let Ok(task_id) = &task_id {
         entry.upstream_task_id = redact(task_id, resolved, &state.config);
     }
-    if let Some(result) = task_result(state, resolved, &submitted, entry, cache_key).await? {
+    let mut unknown_states = 0;
+    if let Some(result) = task_result(
+        state,
+        resolved,
+        &submitted,
+        entry,
+        cache_key,
+        &mut unknown_states,
+    )
+    .await?
+    {
         return Ok(result);
     }
     let task_id = task_id.map_err(|error| {
@@ -154,7 +165,16 @@ async fn execute(
         let delay = match exchange(state, resolved, request, entry, cache_key).await {
             Ok(body) => {
                 failures = 0;
-                if let Some(result) = task_result(state, resolved, &body, entry, cache_key).await? {
+                if let Some(result) = task_result(
+                    state,
+                    resolved,
+                    &body,
+                    entry,
+                    cache_key,
+                    &mut unknown_states,
+                )
+                .await?
+                {
                     return Ok(result);
                 }
                 POLL_INTERVAL
@@ -177,6 +197,7 @@ async fn task_result(
     body: &Value,
     entry: &AdminLogEntry,
     cache_key: Option<&UpstreamBlockCacheKey>,
+    unknown_states: &mut usize,
 ) -> std::result::Result<Option<(Vec<String>, i64)>, Response> {
     match crate::mai_token::parse_task_state(body).map_err(|error| {
         error_response(
@@ -187,8 +208,29 @@ async fn task_result(
             &redact(&error.to_string(), resolved, &state.config),
         )
     })? {
-        TaskState::Pending => Ok(None),
+        TaskState::Pending => {
+            *unknown_states = 0;
+            Ok(None)
+        }
+        TaskState::Unknown => {
+            *unknown_states += 1;
+            if *unknown_states >= MAX_CONSECUTIVE_UNKNOWN_STATES {
+                return Err(error_response(
+                    entry,
+                    StatusCode::BAD_GATEWAY,
+                    "proxy",
+                    "invalid_task_response",
+                    &redact(
+                        "MAI 协议响应错误：未知任务状态：unknown",
+                        resolved,
+                        &state.config,
+                    ),
+                ));
+            }
+            Ok(None)
+        }
         TaskState::Completed(urls) => {
+            *unknown_states = 0;
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()

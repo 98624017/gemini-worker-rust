@@ -75,7 +75,7 @@ curl --fail-with-body --silent --show-error \
 
 1. 校验并转换请求，向 MAI 发送 `POST /v1/videos`。
 2. 上游返回已完成结果时，直接构造成功响应。任务未完成时，读取 `id` 或 `task_id`，发送 `GET /v1/videos/{taskId}` 查询。
-3. 创建后等待 5 秒再首次查询；`queued`、`in_progress` 和 `processing` 状态继续每 5 秒查询，`completed` 返回结果，`failed` 返回任务错误。
+3. 创建后等待 5 秒再首次查询；`queued`、`in_progress` 和 `processing` 状态继续每 5 秒查询，`completed` 返回结果，`failed` 返回任务错误。上游在创建或初期查询阶段可能短暂返回 `unknown` 状态，代理会按待处理继续每 5 秒查询（连续达 18 次仍为 `unknown` 时返回 `502` 协议错误并保留任务 ID）；其他非预期状态值立即返回 `502`。
 
 请求体读取、提交、响应读取、查询和等待共享 `UPSTREAM_TIMEOUT_MS` 的绝对截止时间，默认 `600000` 毫秒。预算耗尽返回 `504`，不会为每次查询重新计时。
 
