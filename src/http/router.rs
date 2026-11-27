@@ -48,6 +48,8 @@ mod midjourney;
 #[cfg(test)]
 mod ai666_tests;
 #[cfg(test)]
+mod api888_tests;
+#[cfg(test)]
 mod mai_token_tests;
 #[cfg(test)]
 mod midjourney_tests;
@@ -61,6 +63,7 @@ const AIAPIDEV_MAX_CONSECUTIVE_POLL_FAILURES: usize = 5;
 const MAX_OPENAI_REFERENCE_IMAGES: usize = 6;
 const MAX_TIANYUE_OPENAI_REFERENCE_IMAGES: usize = 10;
 const MAX_AI666_SEEDREAM_REFERENCE_IMAGES: usize = 10;
+const MAX_API888_SEEDREAM_REFERENCE_IMAGES: usize = 10;
 const OPENAI_IMAGE_REFERENCE_FIELDS: [&str; 3] = ["image", "images", "reference_images"];
 const MSG_INVALID_REQUEST_JSON: &str = "请求内容不是有效的 JSON，请检查后再试";
 const MSG_REQUEST_BODY_TOO_LARGE: &str = "请求内容太大，请缩小后再试";
@@ -1688,10 +1691,14 @@ async fn forward_openai_image_request(
         .await);
     }
 
+    let is_api888_seedream =
+        crate::openai_image::is_api888_seedream_55_request(&resolved.base_url, &request_body);
     let max_reference_images = if crate::provider::is_tianyue_base_url(&resolved.base_url) {
         MAX_TIANYUE_OPENAI_REFERENCE_IMAGES
     } else if crate::openai_image::is_ai666_seedream_55_request(&resolved.base_url, &request_body) {
         MAX_AI666_SEEDREAM_REFERENCE_IMAGES
+    } else if is_api888_seedream {
+        MAX_API888_SEEDREAM_REFERENCE_IMAGES
     } else {
         MAX_OPENAI_REFERENCE_IMAGES
     };
@@ -1754,9 +1761,10 @@ async fn forward_openai_image_request(
         ProviderKind::MaiToken | ProviderKind::Transparent => {}
     }
 
-    if state
-        .config
-        .should_use_openai_image_edits_for_upstream(&resolved.base_url)
+    if !is_api888_seedream
+        && state
+            .config
+            .should_use_openai_image_edits_for_upstream(&resolved.base_url)
         && openai_image_request_has_images(&request_body)
     {
         let upstream_build_started = Instant::now();

@@ -304,7 +304,9 @@ R2 模式还需要：
   未传参考图时不添加该字段。本层默认最多接受 6 张参考图；天悦和 MAI Seedream 5.5 渠道各自最多接受 10 张。
 - 上游 host 为 `us.ai666.live` 且模型为 `seedream-5.5` 时，复用同步图片接口：
   `size=1K/2K` 改为上游 `resolution`，参考图合并为 `images`，最多 10 张。调用方式见下方示例。
-- `POST /v1/images/generations` 请求体包含参考图时，若上游 host 命中
+- 上游 host 为 `888api.xin` 且模型为 `seedream-5.5` 时，文生图和参考图均同步提交到 JSON
+  `/v1/images/generations`。代理将 `aspect_ratio` 换算为 2K 像素尺寸，最多接受 10 张 HTTPS 参考图。
+- 其余 `POST /v1/images/generations` 请求包含参考图时，若上游 host 命中
   `OPENAI_IMAGE_EDITS_UPSTREAM_DOMAINS`，上游路径会改为 `/v1/images/edits`
   并转为 multipart；参考图字段兼容 `image`、`images`、`reference_images`
 - 标准链路里，`legacy` 上传结果会在 `PROXY_STANDARD_OUTPUT_URLS=true` 时包装代理前缀
@@ -336,6 +338,36 @@ curl --fail-with-body --silent --show-error \
 清晰度优先级为 `resolution`、`size=1K/2K`、`output_resolution`；像素或比例格式的 `size` 和独立的 `aspect_ratio` 保留。
 该模型只支持 1K、2K，且每次只返回一张图。`seed`、`watermark` 等未在 [上游图片文档](https://us.ai666.live/docs#image)承诺的字段不保证生效。
 成功时仍返回 `created`、`data[].url` 和固定兼容 `usage`，图片 URL 沿用代理现有包装规则。
+
+### 888API Seedream 5.5
+
+按请求选择 888API 时，使用现有的 `baseUrl|apiKey` 格式。
+
+```bash
+curl --fail-with-body --silent --show-error \
+  -H 'Authorization: Bearer https://888api.xin|YOUR_API_KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"seedream-5.5","prompt":"同一主体，明亮的自然光","size":"2K","aspect_ratio":"3:2","n":1,"image":["https://images.example/reference.png"],"watermark":false,"response_format":"url"}' \
+  'http://127.0.0.1:8787/v1/images/generations'
+```
+
+也可用 `UPSTREAM_BASE_URL=https://888api.xin` 和 `UPSTREAM_API_KEY` 设置默认上游。
+`size=1K/2K` 均输出 2K，省略 `size` 和 `aspect_ratio` 时输出 `2048x2048`。也可直接传表中的 `size`，同时提供的 `aspect_ratio` 须与之对应。
+
+| `aspect_ratio` | 上游 `size` |
+| --- | --- |
+| `1:1` | `2048x2048` |
+| `3:4` | `1728x2304` |
+| `16:9` | `2560x1440` |
+| `4:3` | `2304x1728` |
+| `9:16` | `1440x2560` |
+| `2:3` | `1664x2496` |
+| `3:2` | `2496x1664` |
+| `21:9` | `3024x1296` |
+
+代理会合并 `reference_images`、`images` 和 `image` 中的 HTTPS URL，最多 10 张。文生图可省略参考图或传空数组。
+每次生成一张，兼容客户端的 `watermark:false` 和 `resolution`、`output_resolution` 的 `1K/2K` 档位写法。
+`background` 和 `output_format` 原样转发，成功响应沿用 `created`、`data[].url` 和兼容 `usage`。[888API 渠道文档](https://888api.xin/docs#seedream-5.5)
 
 ### base64 模式
 

@@ -1,6 +1,87 @@
 use serde_json::json;
 
 #[test]
+fn api888_seedream_maps_documented_ratios_and_preserves_native_sizes() {
+    for (ratio, size) in [
+        ("1:1", "2048x2048"),
+        ("3:4", "1728x2304"),
+        ("16:9", "2560x1440"),
+        ("4:3", "2304x1728"),
+        ("9:16", "1440x2560"),
+        ("2:3", "1664x2496"),
+        ("3:2", "2496x1664"),
+        ("21:9", "3024x1296"),
+    ] {
+        let legacy = json!({"size": "2k", "aspect_ratio": ratio, "output_resolution": "2K"});
+        let native = json!({"size": size});
+        for mut request in [legacy, native] {
+            request["model"] = json!("seedream-5.5");
+            request["prompt"] = json!("geometric pattern");
+            let normalized = rust_sync_proxy::openai_image::normalize_request_body_for_upstream(
+                request,
+                false,
+                "https://888API.XIN/v1/",
+            )
+            .unwrap();
+            assert_eq!(normalized["size"], size, "{ratio}");
+            assert!(normalized.get("aspect_ratio").is_none());
+            assert!(normalized.get("output_resolution").is_none());
+        }
+    }
+}
+
+#[test]
+fn api888_seedream_rejects_unsupported_sizes_and_fields() {
+    for (field, value) in [
+        ("aspect_ratio", json!("4:5")),
+        ("size", json!("4K")),
+        ("size", json!("2048x2048")),
+        ("quality", json!("high")),
+        ("image", json!(["http://img.example/ref.png"])),
+    ] {
+        let mut request = json!({
+            "model": "seedream-5.5", "prompt": "geometric pattern", "aspect_ratio": "3:2"
+        });
+        request[field] = value;
+        assert!(
+            rust_sync_proxy::openai_image::normalize_request_body_for_upstream(
+                request,
+                false,
+                "https://888api.xin",
+            )
+            .is_err(),
+            "unexpectedly accepted {field}"
+        );
+    }
+}
+
+#[test]
+fn api888_seedream_preserves_other_hosts_and_models() {
+    for (base_url, model) in [
+        ("https://888api.xin", "other-model"),
+        ("https://888api.xin.example.com", "seedream-5.5"),
+        ("https://www.888api.xin", "seedream-5.5"),
+    ] {
+        let request = json!({
+            "model": model,
+            "prompt": "geometric pattern",
+            "size": "2K",
+            "aspect_ratio": "3:2",
+            "image": ["https://img.example/reference.png"],
+            "watermark": false,
+            "response_format": "url"
+        });
+        let normalized = rust_sync_proxy::openai_image::normalize_request_body_for_upstream(
+            request.clone(),
+            false,
+            base_url,
+        )
+        .unwrap();
+        assert_eq!(normalized, request);
+    }
+}
+
+#[test]
 fn ai666_seedream_55_uses_legacy_resolution_without_replacing_native_size() {
     let body = rust_sync_proxy::openai_image::normalize_request_body_for_upstream(
         json!({

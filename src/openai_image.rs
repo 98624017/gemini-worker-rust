@@ -5,6 +5,16 @@ use time::{PrimitiveDateTime, format_description::FormatItem, macros::format_des
 use url::Url;
 
 const IMAGE_FIELD_ALIASES: [&str; 3] = ["reference_images", "images", "image"];
+const API888_SEEDREAM_SIZES: [(&str, &str); 8] = [
+    ("1:1", "2048x2048"),
+    ("3:4", "1728x2304"),
+    ("16:9", "2560x1440"),
+    ("4:3", "2304x1728"),
+    ("9:16", "1440x2560"),
+    ("2:3", "1664x2496"),
+    ("3:2", "2496x1664"),
+    ("21:9", "3024x1296"),
+];
 const AIAPIDEV_TIMESTAMP_FORMAT: &[FormatItem<'static>] =
     format_description!("[year]-[month]-[day] [hour]:[minute]:[second]");
 
@@ -54,7 +64,8 @@ pub fn normalize_request_body_for_upstream(
     let mut body = normalize_request_body(body, force_b64_json)?;
     let is_tianyue = crate::provider::is_tianyue_base_url(base_url);
     let is_ai666_seedream = is_ai666_seedream_55_request(base_url, &body);
-    if (is_tianyue || is_ai666_seedream)
+    let is_api888_seedream = is_api888_seedream_55_request(base_url, &body);
+    if (is_tianyue || is_ai666_seedream || is_api888_seedream)
         && let Some(object) = body.as_object_mut()
     {
         if is_tianyue && object.get("model").and_then(Value::as_str) == Some("seedream-5.5") {
@@ -79,6 +90,9 @@ pub fn normalize_request_body_for_upstream(
         if is_ai666_seedream {
             normalize_ai666_seedream_55_request(object)?;
         }
+        if is_api888_seedream {
+            normalize_api888_seedream_55_request(object)?;
+        }
     }
     Ok(body)
 }
@@ -86,6 +100,107 @@ pub fn normalize_request_body_for_upstream(
 pub(crate) fn is_ai666_seedream_55_request(base_url: &str, body: &Value) -> bool {
     body.get("model").and_then(Value::as_str) == Some("seedream-5.5")
         && crate::provider::is_ai666_base_url(base_url)
+}
+
+pub(crate) fn is_api888_seedream_55_request(base_url: &str, body: &Value) -> bool {
+    body.get("model").and_then(Value::as_str) == Some("seedream-5.5")
+        && crate::provider::is_api888_base_url(base_url)
+}
+
+fn normalize_api888_seedream_55_request(object: &mut Map<String, Value>) -> Result<()> {
+    if object
+        .get("prompt")
+        .and_then(Value::as_str)
+        .is_none_or(|prompt| prompt.trim().is_empty())
+    {
+        return Err(anyhow!("prompt 必须是非空字符串"));
+    }
+    if object.get("n").is_some_and(|n| n.as_u64() != Some(1)) {
+        return Err(anyhow!("888API Seedream 5.5 的 n 必须为整数 1"));
+    }
+    if let Some(images) = object.get("images").and_then(Value::as_array) {
+        if images.is_empty() {
+            object.remove("images");
+        } else if images.iter().any(|image| {
+            !image
+                .as_str()
+                .and_then(|url| Url::parse(url).ok())
+                .is_some_and(|url| url.scheme() == "https")
+        }) {
+            return Err(anyhow!("888API 参考图片 URL 必须使用 HTTPS"));
+        }
+    }
+
+    let size = api888_seedream_size(object)?;
+    object.remove("aspect_ratio");
+    for field in ["resolution", "output_resolution"] {
+        if let Some(value) = object.remove(field)
+            && !value
+                .as_str()
+                .map(str::trim)
+                .is_some_and(is_legacy_seedream_size)
+        {
+            return Err(anyhow!("888API Seedream 5.5 的 {field} 只接受 1K 或 2K"));
+        }
+    }
+    if let Some(watermark) = object.remove("watermark")
+        && watermark.as_bool() != Some(false)
+    {
+        return Err(anyhow!("888API Seedream 5.5 不支持设置水印"));
+    }
+    if object.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "model"
+                | "prompt"
+                | "size"
+                | "n"
+                | "images"
+                | "response_format"
+                | "background"
+                | "output_format"
+        )
+    }) {
+        return Err(anyhow!("请求包含 888API Seedream 5.5 不支持的字段"));
+    }
+    object.insert("size".to_string(), Value::String(size.to_string()));
+    object.entry("n".to_string()).or_insert(Value::from(1));
+    Ok(())
+}
+
+fn api888_seedream_size(object: &Map<String, Value>) -> Result<&'static str> {
+    let pixels = match object.get("size") {
+        None => None,
+        Some(value) => {
+            let size = value
+                .as_str()
+                .ok_or_else(|| anyhow!("size 必须是字符串"))?
+                .trim();
+            (!is_legacy_seedream_size(size)).then_some(size)
+        }
+    };
+    let ratio = match object.get("aspect_ratio") {
+        Some(value) => Some(
+            value
+                .as_str()
+                .ok_or_else(|| anyhow!("aspect_ratio 必须是字符串"))?
+                .trim(),
+        ),
+        None if pixels.is_none() => Some("1:1"),
+        None => None,
+    };
+    API888_SEEDREAM_SIZES
+        .iter()
+        .find_map(|&(supported_ratio, supported_size)| {
+            (ratio.is_none_or(|ratio| ratio == supported_ratio)
+                && pixels.is_none_or(|size| size.eq_ignore_ascii_case(supported_size)))
+            .then_some(supported_size)
+        })
+        .ok_or_else(|| anyhow!("size 和 aspect_ratio 必须对应 888API 支持的 2K 尺寸"))
+}
+
+fn is_legacy_seedream_size(size: &str) -> bool {
+    size.eq_ignore_ascii_case("1K") || size.eq_ignore_ascii_case("2K")
 }
 
 fn normalize_ai666_seedream_55_request(object: &mut Map<String, Value>) -> Result<()> {
