@@ -34,7 +34,7 @@
 | --- | --- | --- |
 | `grsai` | `grsai.com`、`*.grsai.com` | 同步单次请求到 `/v1/draw/nano-banana` |
 | `aiapidev` | `www.aiapipro.vip` | 创建任务并轮询结果 |
-| `mai-token` | 精确匹配 `api.mai-token.com` | 仅 OpenAI `seedream-5.5` 请求通过 `/v1/videos` 兼容接口提交图片任务并轮询 |
+| `mai-token` | 精确匹配 `api.mai-token.com` | OpenAI 请求中的 `seedream-5.5`、`doubao-seedream-5-0` 和 `seedream-5-pro` 均以 `seedream-5.5` 提交到 `/v1/videos` 并轮询 |
 | `transparent` | 其他上游 | 保持现有 Gemini/OpenAI 透明转发 |
 
 `mai-token` 的调用方继续使用 `POST /v1/images/generations`，传入原有的
@@ -209,7 +209,7 @@ export MALLOC_CONF="background_thread:true,dirty_decay_ms:100,muzzy_decay_ms:100
     `a.example.com`，不匹配根域 `example.com`
 - `OPENAI_IMAGE_EDITS_UPSTREAM_DOMAINS`
   逗号分隔；仅 `POST /v1/images/generations` 使用。默认
-  `happyapi.org,www.happyapi.org`。当上游 `baseUrl` host 命中该列表，且请求体包含
+  `happyapi.org,www.happyapi.org,sub1.yfeng.wang`。当上游 `baseUrl` host 命中该列表，且请求体包含
   `image`、`images` 或 `reference_images` 参考图数组时，代理会把上游请求改发到
   `/v1/images/edits`，并以 multipart/form-data 发送图片
   - 普通值按 host 精确匹配，例如 `api.example.com`
@@ -309,6 +309,7 @@ R2 模式还需要：
 - 其余 `POST /v1/images/generations` 请求包含参考图时，若上游 host 命中
   `OPENAI_IMAGE_EDITS_UPSTREAM_DOMAINS`，上游路径会改为 `/v1/images/edits`
   并转为 multipart；参考图字段兼容 `image`、`images`、`reference_images`
+  - `sub1.yfeng.wang` 的编辑表单省略 `response_format`，单张图用 `image`，多张图各用一个 `image[]`
 - 标准链路里，`legacy` 上传结果会在 `PROXY_STANDARD_OUTPUT_URLS=true` 时包装代理前缀
 - `r2` 成功后真实 URL 为 `R2_PUBLIC_BASE_URL/<objectKey>`
 - 标准链路和 `POST /v1/images/generations` 里，`r2` 成功后是否包装代理前缀，
@@ -436,12 +437,14 @@ curl -sS \
 
 - `UPSTREAM_BLOCK_CACHE_TTL_MS=300000`，即 5 分钟。
 - `UPSTREAM_BLOCK_CACHE_MAX_ENTRIES=1024`。
-- 设置任一值为 `0` 会关闭该机制。
+- 设置任一值为 `0` 会关闭缓存，首次命中违规规则时仍返回 HTTP `451`。
 - 缓存 key 为请求路径、上游 base URL 和规范化请求体摘要，不包含 API key。
-- 只缓存 `400` 或 `502` 中包含以下关键词的错误：
+- 上游错误状态为 `400`、`500` 或 `502` 时，代理会识别以下违规提示并返回 HTTP `451`。
   - `content blocked`
   - `image_unsafe`
   - `Upstream moderation triggered`
+  - `请求无法用于生成图像`、`不符合安全策略`
+  - 版权拒绝，例如「素材版权违规」「侵犯他人版权」或「可能涉及受版权保护的形象」。代理按错误消息中的短语匹配，支持不同的报错前缀和结尾建议。
 
 缓存命中时，代理返回首次错误的 status、content-type 和 body，不再请求上游。
 admin 日志的 `errorDetail` 会包含 `upstream_block_cache_hit:<reason>`。

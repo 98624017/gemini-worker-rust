@@ -48,7 +48,7 @@ fn defaults_match_runtime_expectations() {
     assert!(cfg.openai_image_b64_json_upstream_domains.is_empty());
     assert_eq!(
         cfg.openai_image_edits_upstream_domains,
-        vec!["happyapi.org".to_string(), "www.happyapi.org".to_string()]
+        vec!["happyapi.org", "www.happyapi.org", "sub1.yfeng.wang"]
     );
     assert!(cfg.openai_image_upstream_url_proxy_prefix.is_empty());
     assert!(!cfg.proxy_r2_output_urls);

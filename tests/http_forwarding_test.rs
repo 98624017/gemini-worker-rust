@@ -465,11 +465,20 @@ async fn generate_content_reuses_cached_upstream_block_error() {
 }
 
 #[tokio::test]
-async fn safety_policy_errors_return_451_and_are_cached() {
-    for status in [
-        StatusCode::BAD_REQUEST,
-        StatusCode::INTERNAL_SERVER_ERROR,
-        StatusCode::BAD_GATEWAY,
+async fn policy_errors_return_451_and_are_cached() {
+    let safety_error = "内容不符合安全策略，请调整提示词或参考图后重试";
+    for (status, message) in [
+        (StatusCode::BAD_REQUEST, safety_error),
+        (StatusCode::INTERNAL_SERVER_ERROR, safety_error),
+        (StatusCode::BAD_GATEWAY, safety_error),
+        (
+            StatusCode::BAD_REQUEST,
+            concat!(
+                "status_code=400, 生成失败：生成失败：素材版权违规，",
+                "参考素材或生成内容可能涉及受版权保护的形象（影视动漫角色、明星肖像、品牌标识等），",
+                "请检查更换参考素材后重试；提示词里如果点名了知名角色或 IP，也请一并修改",
+            ),
+        ),
     ] {
         let calls = Arc::new(Mutex::new(0));
         let upstream_calls = calls.clone();
@@ -477,12 +486,7 @@ async fn safety_policy_errors_return_451_and_are_cached() {
             let calls = upstream_calls.clone();
             async move {
                 *calls.lock().await += 1;
-                (
-                    status,
-                    Json(json!({"error": {
-                        "message": "内容不符合安全策略，请调整提示词或参考图后重试"
-                    }})),
-                )
+                (status, Json(json!({"error": {"message": message}})))
             }
         });
         let server = Router::new()
@@ -504,6 +508,7 @@ async fn safety_policy_errors_return_451_and_are_cached() {
                 json!({"model": "gpt-image-2", "prompt": "draw cat"}),
             ),
         ] {
+            let calls_before = *calls.lock().await;
             for _ in 0..2 {
                 let response = app
                     .clone()
@@ -525,8 +530,8 @@ async fn safety_policy_errors_return_451_and_are_cached() {
                     "输入内容触发上游违规提示，请调整输入提示词和参考图或尝试更换模型。"
                 );
             }
+            assert_eq!(*calls.lock().await, calls_before + 1, "{path}");
         }
-        assert_eq!(*calls.lock().await, 2);
     }
 }
 

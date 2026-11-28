@@ -31,7 +31,9 @@ const DEFAULT_BLOB_SPILL_DIR: &str = "/tmp/rust-sync-proxy-blobs";
 const DEFAULT_LEGACY_UGUU_UPLOAD_URL: &str = "https://uguu.se/upload";
 const DEFAULT_LEGACY_KEFAN_UPLOAD_URL: &str = "https://ai.kefan.cn/api/upload/local";
 const DEFAULT_IMAGE_COMPRESSION_JPEG_QUALITY: u8 = 97;
-const DEFAULT_OPENAI_IMAGE_EDITS_UPSTREAM_DOMAINS: [&str; 2] = ["happyapi.org", "www.happyapi.org"];
+pub(crate) const SUBAPI_IMAGE_EDITS_HOST: &str = "sub1.yfeng.wang";
+const DEFAULT_OPENAI_IMAGE_EDITS_UPSTREAM_DOMAINS: [&str; 3] =
+    ["happyapi.org", "www.happyapi.org", SUBAPI_IMAGE_EDITS_HOST];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BlobBudgetDefaults {

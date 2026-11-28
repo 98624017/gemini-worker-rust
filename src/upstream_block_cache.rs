@@ -13,6 +13,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
+pub(crate) const COPYRIGHT_VIOLATION_REASON: &str = "copyright_violation";
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct UpstreamBlockCacheKey(String);
 
@@ -106,6 +108,14 @@ pub fn classify_blockable_upstream_error(status: StatusCode, body: &[u8]) -> Opt
         return None;
     }
     let text = String::from_utf8_lossy(body).to_ascii_lowercase();
+    if (text.contains("版权") || text.contains("\\u"))
+        && match serde_json::from_slice::<Value>(body) {
+            Ok(error) => copyright_violation_message(&error).is_some(),
+            Err(_) => matches_copyright_violation(&text),
+        }
+    {
+        return Some(COPYRIGHT_VIOLATION_REASON);
+    }
     if text.contains("image_unsafe") {
         return Some("image_unsafe");
     }
@@ -119,6 +129,54 @@ pub fn classify_blockable_upstream_error(status: StatusCode, body: &[u8]) -> Opt
         return Some("content_blocked");
     }
     None
+}
+
+pub(crate) fn copyright_violation_message(error: &Value) -> Option<&str> {
+    match error {
+        Value::String(message) if matches_copyright_violation(message) => Some(message),
+        Value::Array(items) => items.iter().find_map(copyright_violation_message),
+        Value::Object(fields) => [
+            "error",
+            "message",
+            "msg",
+            "detail",
+            "reason",
+            "description",
+            "errorMessage",
+            "failReason",
+            "failure_reason",
+            "error_detail",
+            "errorDetail",
+            "errors",
+            "details",
+        ]
+        .iter()
+        .filter_map(|key| fields.get(*key))
+        .find_map(copyright_violation_message)
+        .or_else(|| {
+            fields
+                .get("data")
+                .filter(|v| v.is_object())
+                .and_then(copyright_violation_message)
+        }),
+        _ => None,
+    }
+}
+
+fn matches_copyright_violation(message: &str) -> bool {
+    [
+        "版权违规",
+        "版权侵权",
+        "侵犯版权",
+        "侵犯他人版权",
+        "违反版权",
+        "受版权保护的形象",
+        "涉及受版权保护",
+        "涉及到受版权保护",
+        "包含受版权保护",
+    ]
+    .iter()
+    .any(|phrase| message.contains(phrase))
 }
 
 struct CanonicalJson<'a>(&'a Value);
@@ -339,6 +397,46 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn classifier_matches_copyright_rejections_in_upstream_errors() {
+        for message in [
+            "生成失败：素材版权违规",
+            "参考素材可能涉及受版权保护的形象，请更换参考图",
+            "参考图中出现了受版权保护的形象",
+            r#"{"error":{"message":"生成内容可能侵犯他人版权"}}"#,
+            r#"{"error":{"message":"\u7d20\u6750\u7248\u6743\u8fdd\u89c4"}}"#,
+        ] {
+            for status in [
+                StatusCode::BAD_REQUEST,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                StatusCode::BAD_GATEWAY,
+            ] {
+                assert_eq!(
+                    classify_blockable_upstream_error(status, message.as_bytes()),
+                    Some(COPYRIGHT_VIOLATION_REASON),
+                    "{message}"
+                );
+            }
+        }
+        for message in [
+            "生成失败，请更换参考素材后重试",
+            "品牌标识的文件格式错误，无法读取版权信息",
+            r#"{"error":{"message":"缺少图片"},"request":{"prompt":"素材版权违规"}}"#,
+        ] {
+            assert_eq!(
+                classify_blockable_upstream_error(StatusCode::BAD_REQUEST, message.as_bytes()),
+                None,
+                "{message}"
+            );
+        }
+        for status in [StatusCode::OK, StatusCode::TOO_MANY_REQUESTS] {
+            assert_eq!(
+                classify_blockable_upstream_error(status, "素材版权违规".as_bytes()),
+                None
+            );
+        }
     }
 
     #[tokio::test]

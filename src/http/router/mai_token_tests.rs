@@ -370,6 +370,27 @@ async fn request_body_merges_reference_aliases_and_preserves_seed_zero() {
 }
 
 #[tokio::test]
+async fn mai_seedream_model_aliases_are_submitted_as_seedream_55() {
+    let harness = Harness::new(vec![completed_reply("https://img.example/alias.png"); 2]).await;
+    for model in ["doubao-seedream-5-0", "seedream-5-pro"] {
+        let response = harness
+            .request(json!({"model": model, "prompt": "draw a glass house"}))
+            .bearer_auth("selected-key")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{model}");
+    }
+
+    let requests = harness.mock.requests.lock().await;
+    assert_eq!(requests.len(), 2);
+    for request in requests.iter() {
+        assert_eq!(request.uri, "/v1/videos");
+        assert_eq!(request.body["model"], "seedream-5.5");
+    }
+}
+
+#[tokio::test]
 async fn mai_selection_is_exact_host_and_model_and_gemini_stays_transparent() {
     let harness = Harness::new(vec![
         MockReply::json(json!({
@@ -387,15 +408,17 @@ async fn mai_selection_is_exact_host_and_model_and_gemini_stays_transparent() {
     .await;
 
     let response = harness
-        .request(json!({"model": "seedream-5-pro", "prompt": "other model"}))
+        .request(json!({"model": "seedream-5.5-preview", "prompt": "other model"}))
         .bearer_auth("selected-key")
         .send()
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 
+    let mut body = generation_body();
+    body["model"] = json!("seedream-5-pro");
     let response = harness
-        .request(generation_body())
+        .request(body)
         .header("x-goog-api-key", harness.other_host_token())
         .send()
         .await
@@ -421,8 +444,10 @@ async fn mai_selection_is_exact_host_and_model_and_gemini_stays_transparent() {
     assert_eq!(requests.len(), 3);
     assert_eq!(requests[0].method, "POST");
     assert_eq!(requests[0].uri, "/v1/images/generations");
+    assert_eq!(requests[0].body["model"], "seedream-5.5-preview");
     assert!(requests[0].body.get("contract_version").is_none());
     assert_eq!(requests[1].uri, "/v1/images/generations");
+    assert_eq!(requests[1].body["model"], "seedream-5-pro");
     assert!(requests[1].body.get("contract_version").is_none());
     assert_eq!(
         requests[2].uri,

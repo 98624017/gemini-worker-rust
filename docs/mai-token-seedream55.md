@@ -9,7 +9,7 @@ MAI 标准图片入口不支持 `seed`，本适配固定采用其文档中的兼
 只有同时满足以下条件才启用本适配：
 
 - 解析后的上游 host 精确为 `api.mai-token.com`。
-- 请求的 `model` 精确为 `seedream-5.5`。
+- 请求的 `model` 精确匹配 `seedream-5.5`、`doubao-seedream-5-0` 或 `seedream-5-pro`。
 
 `mai-token.com`、其他子域及 `api.mai-token.com.evil.example` 均不匹配。其他模型和 Gemini `generateContent` 请求沿用原有转发。上游配置可以包含 `/v1` 或尾斜杠，代理基于解析后的 origin 构造提交和查询路径。
 
@@ -39,7 +39,7 @@ curl --fail-with-body --silent --show-error \
 
 | 字段 | 合同 |
 | --- | --- |
-| `model` | 必须为 `seedream-5.5`。 |
+| `model` | 接受 `seedream-5.5`、`doubao-seedream-5-0` 和 `seedream-5-pro`。 |
 | `prompt` | 必填的非空字符串，正文原样保留。 |
 | `size` | 可省略；接受大小写兼容的 `1K`、`2K`，均生成 `2K`。`4K` 及其他值返回 `400`。 |
 | `aspect_ratio` | 可省略，默认 `1:1`。仅接受下文列出的比例。 |
@@ -60,7 +60,7 @@ curl --fail-with-body --silent --show-error \
 
 | 客户端字段 | 上游字段 |
 | --- | --- |
-| `model` | 保持 `seedream-5.5`。 |
+| `model` | 统一发送 `seedream-5.5`。 |
 | `prompt` | 原样传入 `prompt`。 |
 | `size` | 省略、`1K`、`2K` 均使用固定 `quality="1440p"`。 |
 | `aspect_ratio` | 传入同名字段，省略时为 `1:1`。 |

@@ -5,6 +5,7 @@ use url::Url;
 pub const MAX_REFERENCE_IMAGES: usize = 10;
 
 const MODEL: &str = "seedream-5.5";
+const SUPPORTED_MODELS: [&str; 3] = [MODEL, "doubao-seedream-5-0", "seedream-5-pro"];
 const ALLOWED_RATIOS: [&str; 11] = [
     "1:1", "16:9", "9:16", "4:3", "3:4", "5:4", "4:5", "3:2", "2:3", "21:9", "auto",
 ];
@@ -18,7 +19,9 @@ pub enum TaskState {
 }
 
 pub fn is_seedream_55_request(body: &Value) -> bool {
-    body.get("model").and_then(Value::as_str) == Some(MODEL)
+    body.get("model")
+        .and_then(Value::as_str)
+        .is_some_and(|model| SUPPORTED_MODELS.contains(&model))
 }
 
 pub fn build_request_body(body: &Value) -> Result<Value> {
@@ -26,8 +29,8 @@ pub fn build_request_body(body: &Value) -> Result<Value> {
         .as_object()
         .ok_or_else(|| anyhow!("MAI 请求内容必须是 JSON 对象"))?;
 
-    if object.get("model").and_then(Value::as_str) != Some(MODEL) {
-        return Err(anyhow!("MAI 仅支持 model 为 seedream-5.5"));
+    if !is_seedream_55_request(body) {
+        return Err(anyhow!("MAI model 仅支持 {}", SUPPORTED_MODELS.join("、")));
     }
 
     let prompt = object
