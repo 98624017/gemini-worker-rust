@@ -13,7 +13,7 @@ env:
 
 jobs:
   build-and-push:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
@@ -21,6 +21,19 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: |
+          cargo build --release --locked
+          mkdir -p "${{ runner.temp }}/docker-dist"
+          cp target/release/rust-sync-proxy "${{ runner.temp }}/docker-dist/rust-sync-proxy"
+          chmod 0755 "${{ runner.temp }}/docker-dist/rust-sync-proxy"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -48,9 +61,8 @@ jobs:
       - name: Build and push
         uses: docker/build-push-action@v7
         with:
-          context: .
+          context: ${{ runner.temp }}/docker-dist
+          file: ./Dockerfile.prebuilt
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
