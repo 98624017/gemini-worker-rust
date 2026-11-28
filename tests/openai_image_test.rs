@@ -1,6 +1,44 @@
 use serde_json::json;
 
 #[test]
+fn subapi_gpt_image_generation_omits_response_format() {
+    use rust_sync_proxy::openai_image::normalize_request_body_for_upstream;
+
+    let request = json!({
+        "model": "gpt-image-2",
+        "prompt": "draw a creature",
+        "n": 1,
+        "quality": "high",
+        "size": "3840x2160",
+    });
+    let mut explicit_format = request.clone();
+    explicit_format["response_format"] = json!("url");
+    for (payload, force_b64_json) in [(request.clone(), false), (explicit_format, true)] {
+        let normalized = normalize_request_body_for_upstream(
+            payload,
+            force_b64_json,
+            "https://SUB1.YFENG.WANG/v1",
+        )
+        .unwrap();
+        assert_eq!(normalized, request);
+    }
+
+    let other_host = normalize_request_body_for_upstream(
+        request.clone(),
+        true,
+        "https://sub1.yfeng.wang.example.com",
+    )
+    .unwrap();
+    assert_eq!(other_host["response_format"], "b64_json");
+
+    let mut legacy = request;
+    legacy["model"] = json!("dall-e-3");
+    let legacy =
+        normalize_request_body_for_upstream(legacy, false, "https://sub1.yfeng.wang/v1").unwrap();
+    assert_eq!(legacy["response_format"], "url");
+}
+
+#[test]
 fn api888_seedream_maps_documented_ratios_and_preserves_native_sizes() {
     for (ratio, size) in [
         ("1:1", "2048x2048"),

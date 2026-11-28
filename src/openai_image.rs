@@ -4,6 +4,8 @@ use serde_json::{Map, Value, json};
 use time::{PrimitiveDateTime, format_description::FormatItem, macros::format_description};
 use url::Url;
 
+use crate::config::SUBAPI_IMAGE_HOST;
+
 const IMAGE_FIELD_ALIASES: [&str; 3] = ["reference_images", "images", "image"];
 const API888_SEEDREAM_SIZES: [(&str, &str); 8] = [
     ("1:1", "2048x2048"),
@@ -62,6 +64,18 @@ pub fn normalize_request_body_for_upstream(
     base_url: &str,
 ) -> Result<Value> {
     let mut body = normalize_request_body(body, force_b64_json)?;
+    if Url::parse(base_url).is_ok_and(|url| url.host_str() == Some(SUBAPI_IMAGE_HOST))
+        && let Some(object) = body.as_object_mut()
+        && object
+            .get("model")
+            .and_then(Value::as_str)
+            .is_some_and(|model| {
+                let model = model.trim();
+                model.starts_with("gpt-image-") || model == "chatgpt-image-latest"
+            })
+    {
+        object.remove("response_format");
+    }
     let is_tianyue = crate::provider::is_tianyue_base_url(base_url);
     let is_ai666_seedream = is_ai666_seedream_55_request(base_url, &body);
     let is_api888_seedream = is_api888_seedream_55_request(base_url, &body);

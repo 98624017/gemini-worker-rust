@@ -20,7 +20,7 @@ use url::{Url, form_urlencoded};
 use crate::admin::{self, AdminLogEntry, AdminState, SanitizedAdminLog};
 use crate::blob_runtime::{BlobRuntime, BlobRuntimeConfig};
 use crate::cache::InlineDataUrlFetchService;
-use crate::config::{Config, SUBAPI_IMAGE_EDITS_HOST};
+use crate::config::{Config, SUBAPI_IMAGE_HOST};
 use crate::provider::{ProviderKind, resolve_provider};
 use crate::request_encode::encode_request_body;
 use crate::request_materialize::{
@@ -2114,8 +2114,7 @@ async fn build_openai_image_edit_form(
         return Err(anyhow!("image 必须是数组，请检查后再试"));
     }
 
-    let is_subapi =
-        Url::parse(base_url).is_ok_and(|url| url.host_str() == Some(SUBAPI_IMAGE_EDITS_HOST));
+    let is_subapi = Url::parse(base_url).is_ok_and(|url| url.host_str() == Some(SUBAPI_IMAGE_HOST));
     let image_field = if is_subapi && image_urls.len() > 1 {
         "image[]"
     } else {

@@ -296,6 +296,7 @@ R2 模式还需要：
 - `POST /v1/images/generations` 请求默认保留原始 `response_format`
   - 未命中 `OPENAI_IMAGE_B64_JSON_UPSTREAM_DOMAINS` 时，`url` 会原样发给上游
   - 命中后，代理才会把 `url` 改写为 `b64_json`
+  - `sub1.yfeng.wang` 的 GPT Image 文生图请求以 JSON 发往 `/v1/images/generations`，省略 `response_format`
 - 上游 host 为 `api.tianyue.xyz` 时，`POST /v1/images/generations` 将
   `seedream-5-pro` 按 `size=1K/2K`（大小写均可）改写为
   `seedream-5-pro-1K/2K`；缺失或其他 `size` 保持模型不变。
